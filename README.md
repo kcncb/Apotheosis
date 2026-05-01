@@ -1,15 +1,15 @@
 <div align="center">
 
-# Sunone Aimbot 2 (C++)
+# Apotheosis (C++)
 
-[![C++](https://img.shields.io/badge/C%2B%2B-17-blue)](https://github.com/SunOner/sunone_aimbot_2)
-[![GitHub stars](https://img.shields.io/github/stars/SunOner/sunone_aimbot_2?color=ffb500)](https://github.com/SunOner/sunone_aimbot_2)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-blue)](https://github.com/Apotheosis/Apotheosis)
+[![GitHub stars](https://img.shields.io/github/stars/Apotheosis/Apotheosis?color=ffb500)](https://github.com/Apotheosis/Apotheosis)
 [![CUDA 13.1](https://img.shields.io/badge/CUDA-13.1-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-downloads)
 [![Discord server](https://badgen.net/discord/online-members/37WVp6sNEh)](https://discord.gg/37WVp6sNEh)
 
   <p>
-    <a href="https://github.com/SunOner/sunone_aimbot_2/releases" target="_blank">
-      <img width="75%" src="https://github.com/SunOner/sunone_aimbot/blob/main/media/one.gif">
+    <a href="https://github.com/Apotheosis/Apotheosis/releases" target="_blank">
+      <img width="75%" src="https://github.com/Apotheosis/apotheosis_aimbot/blob/main/media/one.gif">
     </a>
   </p>
 </div>
@@ -94,8 +94,8 @@ Precompiled `.exe` builds are provided for both CUDA (NVIDIA only) and DirectML 
 * Setup, FAQ, troubleshooting:
   [docs/guides.md](docs/guides.md)
 * Source of truth in code:
-  [sunone_aimbot_2/config/config.cpp](sunone_aimbot_2/config/config.cpp),
-  [sunone_aimbot_2/config/config.h](sunone_aimbot_2/config/config.h)
+  [Apotheosis/config/config.cpp](Apotheosis/config/config.cpp),
+  [Apotheosis/config/config.h](Apotheosis/config/config.h)
 
 ---
 
@@ -126,7 +126,7 @@ Precompiled `.exe` builds are provided for both CUDA (NVIDIA only) and DirectML 
 ---
 ## ❤️ Support the Project & Get Better AI Models
 
-This project is actively developed thanks to the people who support it on [Boosty](https://boosty.to/sunone) and [Patreon](https://www.patreon.com/c/sunone).  
+This project is actively developed thanks to the people who support it on [Boosty](https://boosty.to/apotheosis) and [Patreon](https://www.patreon.com/c/apotheosis).  
 **By supporting the project, you get access to improved and better-trained AI models!**
 
 ---
@@ -135,4 +135,4 @@ This project is actively developed thanks to the people who support it on [Boost
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=SunOner/sunone_aimbot_2&type=date&legend=top-left)](https://www.star-history.com/#SunOner/sunone_aimbot_2&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=Apotheosis/Apotheosis&type=date&legend=top-left)](https://www.star-history.com/#Apotheosis/Apotheosis&type=date&legend=top-left)

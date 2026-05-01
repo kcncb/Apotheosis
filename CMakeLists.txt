@@ -1,158 +1,129 @@
-cmake_minimum_required(VERSION 3.24)
+﻿cmake_minimum_required(VERSION 3.24)
 
-project(sunone_aimbot_2 LANGUAGES C CXX)
+project(Apotheosis LANGUAGES C CXX)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "sunone_aimbot_2 currently supports Windows builds only.")
+    message(FATAL_ERROR "Apotheosis only supports Windows builds.")
 endif()
 
 if(NOT CMAKE_GENERATOR STREQUAL "Visual Studio 18 2026")
-    message(FATAL_ERROR "Only 'Visual Studio 18 2026' generator is supported. Current generator: ${CMAKE_GENERATOR}")
+    message(FATAL_ERROR "Use Visual Studio 18 2026 generator. Current: ${CMAKE_GENERATOR}")
 endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-option(AIMBOT_USE_CUDA "Enable CUDA + TensorRT backend (USE_CUDA)" OFF)
-option(AIMBOT_COPY_RUNTIME_DLLS "Copy required runtime DLLs next to ai.exe after build" ON)
-
-set(AIMBOT_OPENCV_DML_PREBUILT_ROOT
-    "${CMAKE_SOURCE_DIR}/sunone_aimbot_2/modules/opencv/prebuilt/opencv/build"
-    CACHE PATH "Path to prebuilt OpenCV build directory used by DML defaults")
-
-set(_opencv_cuda_install_root "${CMAKE_SOURCE_DIR}/sunone_aimbot_2/modules/opencv/build/install")
-if(NOT AIMBOT_USE_CUDA)
-    set(_opencv_include_default "${AIMBOT_OPENCV_DML_PREBUILT_ROOT}/include")
-    set(_opencv_vc_glob "${AIMBOT_OPENCV_DML_PREBUILT_ROOT}/x64/vc*")
-else()
-    set(_opencv_include_default "${_opencv_cuda_install_root}/include")
-    set(_opencv_vc_glob "${_opencv_cuda_install_root}/x64/vc*")
+if(NOT CMAKE_CUDA_FLAGS MATCHES "(^| )--allow-unsupported-compiler($| )")
+    string(APPEND CMAKE_CUDA_FLAGS " --allow-unsupported-compiler")
 endif()
+enable_language(CUDA)
 
-file(GLOB _opencv_vc_dirs LIST_DIRECTORIES true "${_opencv_vc_glob}")
-if(_opencv_vc_dirs)
-    list(SORT _opencv_vc_dirs COMPARE NATURAL ORDER DESCENDING)
-    list(GET _opencv_vc_dirs 0 _opencv_vc_dir)
-else()
-    if(NOT AIMBOT_USE_CUDA)
-        set(_opencv_vc_dir "${AIMBOT_OPENCV_DML_PREBUILT_ROOT}/x64/vc17")
+set(SRC_DIR "${CMAKE_SOURCE_DIR}/Apotheosis")
+set(PACKAGES_DIR "${CMAKE_SOURCE_DIR}/packages")
+set(OPENCV_ROOT "${SRC_DIR}/modules/opencv/build/install")
+set(TENSORRT_ROOT "${SRC_DIR}/modules/TensorRT-10.15.1.29" CACHE PATH "TensorRT 10.15 root")
+set(CUDNN_ROOT "$ENV{ProgramW6432}/NVIDIA/CUDNN/v9.17" CACHE PATH "cuDNN 9 root")
+set(MSVC_REDIST_DIR "$ENV{ProgramW6432}/Microsoft Visual Studio/18/Community/VC/Redist/MSVC/14.50.35710/x64/Microsoft.VC145.CRT" CACHE PATH "MSVC x64 runtime redist")
+set(WINDOWS_DEBUGGERS_X64_DIR "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/Debuggers/x64" CACHE PATH "Windows Debugging Tools x64")
+set(GHUB_MOUSE_DLL "${SRC_DIR}/ghub_mouse.dll")
+
+function(pick_latest_dir out_var glob_pattern)
+    file(GLOB candidates LIST_DIRECTORIES true "${glob_pattern}")
+    if(candidates)
+        list(SORT candidates COMPARE NATURAL ORDER DESCENDING)
+        list(GET candidates 0 latest)
+        set(${out_var} "${latest}" PARENT_SCOPE)
     else()
-        set(_opencv_vc_dir "${_opencv_cuda_install_root}/x64/vc18")
+        set(${out_var} "" PARENT_SCOPE)
     endif()
-endif()
-
-set(AIMBOT_PACKAGES_DIR "${CMAKE_SOURCE_DIR}/packages" CACHE PATH "Directory with restored NuGet packages")
-set(AIMBOT_OPENCV_INCLUDE_DIR "${_opencv_include_default}" CACHE PATH "Path to OpenCV include directory")
-set(AIMBOT_OPENCV_LIBRARY "${_opencv_vc_dir}/lib/opencv_world4130.lib" CACHE FILEPATH "Path to opencv_world4130.lib")
-set(AIMBOT_OPENCV_DLL "${_opencv_vc_dir}/bin/opencv_world4130.dll" CACHE FILEPATH "Path to opencv_world4130.dll")
-set(AIMBOT_TENSORRT_ROOT "${CMAKE_SOURCE_DIR}/sunone_aimbot_2/modules/TensorRT-10.14.1.48" CACHE PATH "Path to TensorRT root directory")
-set(AIMBOT_GHUB_MOUSE_DLL "${CMAKE_SOURCE_DIR}/sunone_aimbot_2/ghub_mouse.dll" CACHE FILEPATH "Path to ghub_mouse.dll")
-set(AIMBOT_CUDNN_ROOT "$ENV{ProgramW6432}/NVIDIA/CUDNN/v9.17" CACHE PATH "Path to cuDNN root directory (optional)")
-set(AIMBOT_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Path to Windows SDK cppwinrt include directory")
-
-function(aimbot_pick_latest_dir out_var glob_pattern)
-    file(GLOB _candidates LIST_DIRECTORIES true "${glob_pattern}")
-    set(_dirs "")
-    foreach(_candidate IN LISTS _candidates)
-        if(IS_DIRECTORY "${_candidate}")
-            list(APPEND _dirs "${_candidate}")
-        endif()
-    endforeach()
-    if(_dirs)
-        list(SORT _dirs COMPARE NATURAL ORDER DESCENDING)
-        list(GET _dirs 0 _latest)
-    else()
-        set(_latest "")
-    endif()
-    set(${out_var} "${_latest}" PARENT_SCOPE)
 endfunction()
 
-function(aimbot_require_file path description)
+function(require_file path label)
     if(NOT EXISTS "${path}")
-        message(FATAL_ERROR "${description} not found: ${path}")
+        message(FATAL_ERROR "${label} not found: ${path}")
     endif()
 endfunction()
 
-function(aimbot_copy_if_exists target path)
+function(copy_runtime target path)
     if(EXISTS "${path}")
-        add_custom_command(
-            TARGET ${target}
-            POST_BUILD
+        add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${path}" "$<TARGET_FILE_DIR:${target}>"
-            VERBATIM
-        )
+            VERBATIM)
     endif()
 endfunction()
 
-aimbot_pick_latest_dir(_onnxruntime_default "${AIMBOT_PACKAGES_DIR}/Microsoft.ML.OnnxRuntime.DirectML.*")
-aimbot_pick_latest_dir(_directml_default "${AIMBOT_PACKAGES_DIR}/Microsoft.AI.DirectML.*")
-
-set(AIMBOT_ONNXRUNTIME_DIR "${_onnxruntime_default}" CACHE PATH "Path to Microsoft.ML.OnnxRuntime.DirectML.* package")
-set(AIMBOT_DIRECTML_DIR "${_directml_default}" CACHE PATH "Path to Microsoft.AI.DirectML.* package")
-
-if(AIMBOT_CPPWINRT_INCLUDE_DIR STREQUAL "")
-    if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION AND DEFINED ENV{WindowsSdkDir})
-        file(TO_CMAKE_PATH "$ENV{WindowsSdkDir}" _winsdk_dir)
-        set(AIMBOT_CPPWINRT_INCLUDE_DIR "${_winsdk_dir}/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/cppwinrt")
-    endif()
+pick_latest_dir(ONNXRUNTIME_DIR "${PACKAGES_DIR}/Microsoft.ML.OnnxRuntime.DirectML.*")
+pick_latest_dir(DIRECTML_DIR "${PACKAGES_DIR}/Microsoft.AI.DirectML.*")
+pick_latest_dir(OPENCV_VC_DIR "${OPENCV_ROOT}/x64/vc*")
+if(OPENCV_VC_DIR STREQUAL "")
+    set(OPENCV_VC_DIR "${OPENCV_ROOT}/x64/vc18")
 endif()
 
-if(AIMBOT_CPPWINRT_INCLUDE_DIR STREQUAL "")
-    if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
-        set(_vs_sdk_candidate "C:/Program Files (x86)/Windows Kits/10/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/cppwinrt")
-        if(EXISTS "${_vs_sdk_candidate}/winrt/base.h")
-            set(AIMBOT_CPPWINRT_INCLUDE_DIR "${_vs_sdk_candidate}")
-        endif()
-    endif()
+set(OPENCV_INCLUDE_DIR "${OPENCV_ROOT}/include")
+set(OPENCV_LIB "${OPENCV_VC_DIR}/lib/opencv_world4130.lib")
+set(OPENCV_DLL "${OPENCV_VC_DIR}/bin/opencv_world4130.dll")
+
+if(DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+    set(CPPWINRT_INCLUDE_DIR "C:/Program Files (x86)/Windows Kits/10/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/cppwinrt")
+endif()
+if(NOT EXISTS "${CPPWINRT_INCLUDE_DIR}/winrt/base.h")
+    pick_latest_dir(CPPWINRT_INCLUDE_DIR "C:/Program Files (x86)/Windows Kits/10/Include/*/cppwinrt")
 endif()
 
-if(AIMBOT_CPPWINRT_INCLUDE_DIR STREQUAL "")
-    file(GLOB _winsdk_cppwinrt_candidates LIST_DIRECTORIES true "C:/Program Files (x86)/Windows Kits/10/Include/*/cppwinrt")
-    if(_winsdk_cppwinrt_candidates)
-        list(SORT _winsdk_cppwinrt_candidates COMPARE NATURAL ORDER DESCENDING)
-        list(GET _winsdk_cppwinrt_candidates 0 AIMBOT_CPPWINRT_INCLUDE_DIR)
-    endif()
-endif()
+require_file("${OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp" "OpenCV headers")
+require_file("${OPENCV_LIB}" "OpenCV library")
+require_file("${OPENCV_DLL}" "OpenCV runtime")
+require_file("${ONNXRUNTIME_DIR}/build/native/include/onnxruntime_cxx_api.h" "ONNX Runtime headers")
+require_file("${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib" "ONNX Runtime library")
+require_file("${DIRECTML_DIR}/bin/x64-win/DirectML.dll" "DirectML runtime")
+require_file("${TENSORRT_ROOT}/include/NvInfer.h" "TensorRT headers")
+require_file("${TENSORRT_ROOT}/lib/nvinfer_10.lib" "TensorRT nvinfer library")
+require_file("${TENSORRT_ROOT}/lib/nvonnxparser_10.lib" "TensorRT nvonnxparser library")
+require_file("${CPPWINRT_INCLUDE_DIR}/winrt/base.h" "C++/WinRT headers")
+require_file("${MSVC_REDIST_DIR}/vcruntime140.dll" "MSVC runtime redistributables")
 
-if(AIMBOT_ONNXRUNTIME_DIR STREQUAL "")
-    message(FATAL_ERROR "Microsoft.ML.OnnxRuntime.DirectML package directory was not found. Set AIMBOT_ONNXRUNTIME_DIR manually.")
-endif()
-if(AIMBOT_DIRECTML_DIR STREQUAL "")
-    message(WARNING "Microsoft.AI.DirectML package directory was not found. DirectML.dll auto-copy may be skipped.")
-endif()
+find_package(CUDAToolkit REQUIRED)
 
-set(SRC_DIR "${CMAKE_SOURCE_DIR}/sunone_aimbot_2")
-
-set(AIMBOT_SOURCES
+set(APP_SOURCES
+    "${SRC_DIR}/Apotheosis.cpp"
     "${SRC_DIR}/capture/capture.cpp"
     "${SRC_DIR}/capture/capture_utils.cpp"
-    "${SRC_DIR}/capture/duplication_api_capture.cpp"
+    "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
+    "${SRC_DIR}/capture/opencv_capture.cpp"
+    "${SRC_DIR}/capture/tcp_capture.cpp"
     "${SRC_DIR}/capture/udp_capture.cpp"
-    "${SRC_DIR}/capture/virtual_camera.cpp"
-    "${SRC_DIR}/capture/winrt_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
+    "${SRC_DIR}/crosshair/crosshair_detector.cpp"
     "${SRC_DIR}/depth/depth_anything_trt.cpp"
     "${SRC_DIR}/depth/depth_mask.cpp"
     "${SRC_DIR}/depth/depth_utils.cpp"
+    "${SRC_DIR}/detector/cuda_preprocess.cu"
     "${SRC_DIR}/detector/detection_buffer.cpp"
     "${SRC_DIR}/detector/dml_detector.cpp"
+    "${SRC_DIR}/detector/model_inspector.cpp"
     "${SRC_DIR}/detector/postProcess.cpp"
+    "${SRC_DIR}/detector/trt_detector.cpp"
     "${SRC_DIR}/imgui/imgui.cpp"
     "${SRC_DIR}/imgui/imgui_draw.cpp"
     "${SRC_DIR}/imgui/imgui_impl_dx11.cpp"
     "${SRC_DIR}/imgui/imgui_impl_win32.cpp"
     "${SRC_DIR}/imgui/imgui_tables.cpp"
     "${SRC_DIR}/imgui/imgui_widgets.cpp"
-    "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
+    "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
+    "${SRC_DIR}/mem/gpu_resource_manager.cpp"
+    "${SRC_DIR}/model_crypto/model_crypto.cpp"
+    "${SRC_DIR}/auth/auth_client.cpp"
+    "${SRC_DIR}/auth/auth_state.cpp"
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
+    "${SRC_DIR}/mouse/AimbotTarget.cpp"
+    "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
     "${SRC_DIR}/mouse/KmboxAConnection.cpp"
@@ -161,225 +132,159 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
-    "${SRC_DIR}/mouse/Arduino.cpp"
-    "${SRC_DIR}/mouse/AimbotTarget.cpp"
-    "${SRC_DIR}/overlay/draw_ai.cpp"
-    "${SRC_DIR}/overlay/draw_buttons.cpp"
-    "${SRC_DIR}/overlay/draw_capture.cpp"
+    "${SRC_DIR}/overlay/app_log.cpp"
     "${SRC_DIR}/overlay/config_dirty.cpp"
+    "${SRC_DIR}/overlay/draw_auth.cpp"
+    "${SRC_DIR}/overlay/draw_ai.cpp"
+    "${SRC_DIR}/overlay/draw_capture.cpp"
+    "${SRC_DIR}/overlay/draw_crosshair.cpp"
     "${SRC_DIR}/overlay/draw_debug.cpp"
     "${SRC_DIR}/overlay/draw_depth.cpp"
-    "${SRC_DIR}/overlay/draw_game_overlay.cpp"
-    "${SRC_DIR}/overlay/draw_mouse.cpp"
+    "${SRC_DIR}/overlay/draw_detection_preview.cpp"
+    "${SRC_DIR}/overlay/draw_hardware.cpp"
+    "${SRC_DIR}/overlay/draw_hotkeys.cpp"
+    "${SRC_DIR}/overlay/draw_log.cpp"
+    "${SRC_DIR}/overlay/draw_model_tools.cpp"
     "${SRC_DIR}/overlay/draw_overlay.cpp"
+    "${SRC_DIR}/overlay/draw_session.cpp"
     "${SRC_DIR}/overlay/draw_stats.cpp"
     "${SRC_DIR}/overlay/draw_target.cpp"
-    "${SRC_DIR}/overlay/Game_overlay.cpp"
     "${SRC_DIR}/overlay/overlay.cpp"
-    "${SRC_DIR}/runtime/thread_loops_shared.cpp"
+    "${SRC_DIR}/runtime/active_hotkey.cpp"
+    "${SRC_DIR}/runtime/aim_telemetry.cpp"
+    "${SRC_DIR}/runtime/cuda_availability.cpp"
+    "${SRC_DIR}/runtime/inference_session.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
-    "${SRC_DIR}/runtime/game_overlay_loop.cpp"
+    "${SRC_DIR}/scr/file_picker.cpp"
     "${SRC_DIR}/scr/other_tools.cpp"
-    "${SRC_DIR}/sunone_aimbot_2.cpp"
+    "${SRC_DIR}/tensorrt/nvinf.cpp"
 )
-
-if(AIMBOT_USE_CUDA)
-    if(NOT CMAKE_CUDA_FLAGS MATCHES "(^| )--allow-unsupported-compiler($| )")
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
-    endif()
-    if(NOT CUDA_NVCC_FLAGS MATCHES "(^| )--allow-unsupported-compiler($| )")
-        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --allow-unsupported-compiler")
-    endif()
-    enable_language(CUDA)
-    list(APPEND AIMBOT_SOURCES
-        "${SRC_DIR}/detector/trt_detector.cpp"
-        "${SRC_DIR}/mem/gpu_resource_manager.cpp"
-        "${SRC_DIR}/tensorrt/nvinf.cpp"
-        "${SRC_DIR}/detector/cuda_preprocess.cu"
-    )
-endif()
 
 add_library(serial_embedded STATIC
     "${SRC_DIR}/modules/serial/src/serial.cc"
     "${SRC_DIR}/modules/serial/src/impl/win.cc"
-    "${SRC_DIR}/modules/serial/src/impl/list_ports/list_ports_win.cc"
-)
+    "${SRC_DIR}/modules/serial/src/impl/list_ports/list_ports_win.cc")
 
 target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/include")
 target_link_libraries(serial_embedded PUBLIC setupapi)
 
+add_executable(ai WIN32 ${APP_SOURCES})
+set_target_properties(ai PROPERTIES OUTPUT_NAME "ai" CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+
+foreach(target serial_embedded ai)
+    if(MSVC)
+        set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endforeach()
+
+target_compile_definitions(ai PRIVATE UNICODE _UNICODE _WINDOWS NOMINMAX WIN32_LEAN_AND_MEAN USE_CUDA)
 if(MSVC)
-    set_target_properties(serial_embedded PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-    )
-endif()
-
-add_executable(ai ${AIMBOT_SOURCES})
-
-set_target_properties(ai PROPERTIES
-    OUTPUT_NAME "ai"
-)
-
-if(MSVC)
-    set_target_properties(ai PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-    )
-endif()
-
-if(AIMBOT_USE_CUDA)
-    set_target_properties(ai PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-    )
+    target_compile_options(ai PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>
+        $<$<COMPILE_LANGUAGE:CXX>:/sdl>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+    target_link_libraries(ai PRIVATE delayimp)
+    target_link_options(ai PRIVATE "/ENTRY:mainCRTStartup" "/DELAYLOAD:nvinfer_10.dll" "/DELAYLOAD:nvonnxparser_10.dll")
 endif()
 
 target_include_directories(ai PRIVATE
     "${SRC_DIR}"
+    "${SRC_DIR}/auth"
     "${SRC_DIR}/capture"
     "${SRC_DIR}/config"
+    "${SRC_DIR}/crosshair"
     "${SRC_DIR}/depth"
     "${SRC_DIR}/detector"
     "${SRC_DIR}/imgui"
-    "${SRC_DIR}/keyboard"
     "${SRC_DIR}/include"
+    "${SRC_DIR}/keyboard"
     "${SRC_DIR}/mem"
     "${SRC_DIR}/mouse"
     "${SRC_DIR}/overlay"
+    "${SRC_DIR}/runtime"
     "${SRC_DIR}/scr"
     "${SRC_DIR}/tensorrt"
+    "${SRC_DIR}/modules/imgui-1.91.2"
+    "${SRC_DIR}/modules/imgui-1.91.2/backends"
     "${SRC_DIR}/modules/makcu/include"
     "${SRC_DIR}/modules/serial/include"
     "${SRC_DIR}/modules/stb"
-    "${SRC_DIR}/modules/imgui-1.91.2"
-    "${SRC_DIR}/modules/imgui-1.91.2/backends"
-)
+    "${OPENCV_INCLUDE_DIR}"
+    "${ONNXRUNTIME_DIR}/build/native/include"
+    "${CPPWINRT_INCLUDE_DIR}"
+    "${TENSORRT_ROOT}/include")
 
-target_compile_definitions(ai PRIVATE
-    UNICODE
-    _UNICODE
-    _CONSOLE
-)
-
-if(MSVC)
-    target_compile_options(ai PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W3>
-        $<$<COMPILE_LANGUAGE:CXX>:/sdl>
-        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
-        $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
-    )
+if(EXISTS "${CUDNN_ROOT}/include/12.9/cudnn.h")
+    target_include_directories(ai PRIVATE "${CUDNN_ROOT}/include/12.9")
+elseif(EXISTS "${CUDNN_ROOT}/include/cudnn.h")
+    target_include_directories(ai PRIVATE "${CUDNN_ROOT}/include")
 endif()
 
-if(AIMBOT_USE_CUDA)
-    target_compile_definitions(ai PRIVATE USE_CUDA)
-endif()
-
-if(NOT AIMBOT_USE_CUDA)
-    if(NOT EXISTS "${AIMBOT_OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp" OR
-       NOT EXISTS "${AIMBOT_OPENCV_LIBRARY}" OR
-       NOT EXISTS "${AIMBOT_OPENCV_DLL}")
-        message(FATAL_ERROR
-            "DML build requires prebuilt OpenCV package.\n"
-            "Run: powershell -ExecutionPolicy Bypass -File tools/setup_opencv_dml.ps1\n"
-            "Or set custom paths via:\n"
-            "  -DAIMBOT_OPENCV_INCLUDE_DIR=...\n"
-            "  -DAIMBOT_OPENCV_LIBRARY=...\n"
-            "  -DAIMBOT_OPENCV_DLL=...")
-    endif()
-endif()
-
-aimbot_require_file("${AIMBOT_OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp" "OpenCV headers")
-aimbot_require_file("${AIMBOT_OPENCV_LIBRARY}" "OpenCV library")
-aimbot_require_file("${AIMBOT_OPENCV_DLL}" "OpenCV runtime DLL")
-aimbot_require_file("${AIMBOT_ONNXRUNTIME_DIR}/build/native/include/onnxruntime_cxx_api.h" "ONNX Runtime headers")
-aimbot_require_file("${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib" "ONNX Runtime import library")
-
-if(AIMBOT_CPPWINRT_INCLUDE_DIR STREQUAL "")
-    message(FATAL_ERROR "C++/WinRT include directory is not set. Set AIMBOT_CPPWINRT_INCLUDE_DIR manually.")
-endif()
-aimbot_require_file("${AIMBOT_CPPWINRT_INCLUDE_DIR}/winrt/base.h" "C++/WinRT headers")
-
-target_include_directories(ai PRIVATE
-    "${AIMBOT_OPENCV_INCLUDE_DIR}"
-    "${AIMBOT_ONNXRUNTIME_DIR}/build/native/include"
-    "${AIMBOT_CPPWINRT_INCLUDE_DIR}"
-)
-
+target_link_directories(ai PRIVATE "${TENSORRT_ROOT}/lib")
 target_link_libraries(ai PRIVATE
     serial_embedded
-    "${AIMBOT_OPENCV_LIBRARY}"
-    "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"
+    "${OPENCV_LIB}"
+    "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"
+    CUDA::cuda_driver
+    CUDA::cudart
+    CUDA::nvjpeg
+    nvinfer_10
+    nvonnxparser_10
+    bcrypt
+    winhttp
+    crypt32
     d3d11
     dxgi
     d2d1
     setupapi
-    WindowsApp
-)
+    strmiids
+    ole32
+    oleaut32
+    WindowsApp)
 
-if(AIMBOT_USE_CUDA)
-    find_package(CUDAToolkit REQUIRED)
+copy_runtime(ai "${OPENCV_DLL}")
+copy_runtime(ai "${GHUB_MOUSE_DLL}")
+copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")
+copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
+copy_runtime(ai "${DIRECTML_DIR}/bin/x64-win/DirectML.dll")
+copy_runtime(ai "${MSVC_REDIST_DIR}/concrt140.dll")
+copy_runtime(ai "${MSVC_REDIST_DIR}/msvcp140.dll")
+copy_runtime(ai "${MSVC_REDIST_DIR}/msvcp140_1.dll")
+copy_runtime(ai "${MSVC_REDIST_DIR}/vcruntime140.dll")
+copy_runtime(ai "${MSVC_REDIST_DIR}/vcruntime140_1.dll")
+copy_runtime(ai "${WINDOWS_DEBUGGERS_X64_DIR}/dbghelp.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/cudart64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/cublas64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/cublasLt64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/cufft64_11.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nvjpeg64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppc64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppial64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppicc64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppidei64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppif64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppig64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppim64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppist64_12.dll")
+copy_runtime(ai "${CUDAToolkit_BIN_DIR}/nppitc64_12.dll")
+copy_runtime(ai "${TENSORRT_ROOT}/bin/nvinfer_10.dll")
+copy_runtime(ai "${TENSORRT_ROOT}/bin/nvonnxparser_10.dll")
 
-    aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/include/NvInfer.h" "TensorRT headers")
-    aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/lib/nvinfer_10.lib" "TensorRT nvinfer_10.lib")
-    aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/lib/nvonnxparser_10.lib" "TensorRT nvonnxparser_10.lib")
+file(GLOB TENSORRT_RESOURCE_DLLS "${TENSORRT_ROOT}/bin/nvinfer_builder_resource_*.dll")
+foreach(runtime_dll IN LISTS TENSORRT_RESOURCE_DLLS)
+    copy_runtime(ai "${runtime_dll}")
+endforeach()
 
-    target_include_directories(ai PRIVATE "${AIMBOT_TENSORRT_ROOT}/include")
-    target_link_directories(ai PRIVATE "${AIMBOT_TENSORRT_ROOT}/lib")
-    target_link_libraries(ai PRIVATE
-        CUDA::cuda_driver
-        CUDA::cudart
-        nvinfer_10
-        nvonnxparser_10
-    )
+add_custom_command(TARGET ai POST_BUILD
+    COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '${CUDNN_ROOT}/bin/12.9/*.dll' -Destination '$<TARGET_FILE_DIR:ai>' -Force"
+    VERBATIM)
 
-    if(EXISTS "${AIMBOT_CUDNN_ROOT}/include/13.1/cudnn.h")
-        target_include_directories(ai PRIVATE "${AIMBOT_CUDNN_ROOT}/include/13.1")
-    endif()
-endif()
-
-if(AIMBOT_COPY_RUNTIME_DLLS)
-    aimbot_copy_if_exists(ai "${AIMBOT_OPENCV_DLL}")
-    aimbot_copy_if_exists(ai "${AIMBOT_GHUB_MOUSE_DLL}")
-    aimbot_copy_if_exists(ai "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")
-    aimbot_copy_if_exists(ai "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
-    aimbot_copy_if_exists(ai "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_dml.dll")
-
-    if(NOT AIMBOT_DIRECTML_DIR STREQUAL "")
-        aimbot_copy_if_exists(ai "${AIMBOT_DIRECTML_DIR}/bin/x64-win/DirectML.dll")
-    endif()
-
-    if(AIMBOT_USE_CUDA)
-        file(GLOB _tensorrt_builder_resources "${AIMBOT_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*.dll")
-        foreach(_resource IN LISTS _tensorrt_builder_resources)
-            aimbot_copy_if_exists(ai "${_resource}")
-        endforeach()
-
-        set(_aimbot_cudnn_runtime_dll "")
-        set(_aimbot_cudnn_runtime_candidates
-            "${AIMBOT_CUDNN_ROOT}/bin/13.1/cudnn64_9.dll"
-            "${AIMBOT_CUDNN_ROOT}/bin/12.9/cudnn64_9.dll"
-            "${AIMBOT_CUDNN_ROOT}/bin/cudnn64_9.dll"
-            "${AIMBOT_CUDNN_ROOT}/lib/13.1/x64/cudnn64_9.dll"
-            "${AIMBOT_CUDNN_ROOT}/lib/12.9/x64/cudnn64_9.dll"
-            "${AIMBOT_CUDNN_ROOT}/lib/x64/cudnn64_9.dll"
-        )
-        foreach(_candidate IN LISTS _aimbot_cudnn_runtime_candidates)
-            if(EXISTS "${_candidate}")
-                set(_aimbot_cudnn_runtime_dll "${_candidate}")
-                break()
-            endif()
-        endforeach()
-        if(NOT _aimbot_cudnn_runtime_dll STREQUAL "")
-            aimbot_copy_if_exists(ai "${_aimbot_cudnn_runtime_dll}")
-        endif()
-
-        aimbot_copy_if_exists(ai "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_cuda.dll")
-        aimbot_copy_if_exists(ai "${AIMBOT_TENSORRT_ROOT}/bin/nvinfer_10.dll")
-        aimbot_copy_if_exists(ai "${AIMBOT_TENSORRT_ROOT}/bin/nvonnxparser_10.dll")
-    endif()
-endif()
-
-message(STATUS "Aimbot backend: ${AIMBOT_USE_CUDA}")
-message(STATUS "OpenCV include: ${AIMBOT_OPENCV_INCLUDE_DIR}")
-message(STATUS "OpenCV lib: ${AIMBOT_OPENCV_LIBRARY}")
-message(STATUS "ONNX Runtime package: ${AIMBOT_ONNXRUNTIME_DIR}")
-message(STATUS "C++/WinRT include: ${AIMBOT_CPPWINRT_INCLUDE_DIR}")
+message(STATUS "Apotheosis portable build")
+message(STATUS "OpenCV: ${OPENCV_VC_DIR}")
+message(STATUS "ONNX Runtime: ${ONNXRUNTIME_DIR}")
+message(STATUS "DirectML: ${DIRECTML_DIR}")
+message(STATUS "TensorRT: ${TENSORRT_ROOT}")
+message(STATUS "cuDNN: ${CUDNN_ROOT}")
+message(STATUS "CUDA: ${CUDAToolkit_BIN_DIR}")

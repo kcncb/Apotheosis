@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Apotheosis · 启动器预览</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg-page: #0b0b0d;
+    --bg-window: rgba(4, 4, 4, 0.97);
+    --bg-title: #141418;
+    --bg-sidebar: rgba(11, 11, 11, 0.98);
+    --bg-section-head: #121215;
+    --bg-section-body: rgba(14, 14, 14, 0.97);
+    --bg-frame: #0e0e12;
+    --bg-frame-hover: #16161b;
+    --border: rgba(255, 255, 255, 0.22);
+    --border-strong: rgba(255, 255, 255, 0.34);
+    --border-subtle: rgba(255, 255, 255, 0.14);
+    --text: #e8edf5;
+    --text-muted: #8fa0b6;
+    --text-disabled: #5a6374;
+    --accent-green: rgb(46, 140, 80);
+    --accent-green-hi: rgb(58, 170, 98);
+    --accent-red: rgb(182, 60, 60);
+    --accent-red-hi: rgb(210, 76, 76);
+    --accent-rose: #d88fa4;
+    --accent-blue: #6aa6ff;
+    --accent-yellow: #e0c565;
+    --box-color: rgb(80, 220, 110);
+    --label-bg: rgba(0, 0, 0, 0.72);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: linear-gradient(180deg, #14141a 0%, #0b0b0d 100%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+      "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+  }
+
+  .page { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 28px 24px 56px; }
+  .page h1 { color: var(--text); font-size: 18px; font-weight: 600; letter-spacing: 0.3px; margin: 0 0 2px; }
+  .page .subtitle { color: var(--text-muted); font-size: 12.5px; margin-bottom: 4px; }
+
+  .state-toggle {
+    display: inline-flex; border: 1px solid var(--border); background: #121215;
+    border-radius: 2px; overflow: hidden; font-size: 12px;
+  }
+  .state-toggle button {
+    background: transparent; border: 0; color: var(--text-muted);
+    padding: 6px 14px; cursor: pointer; font: inherit;
+  }
+  .state-toggle button.active { background: #242832; color: var(--text); }
+  .state-toggle .sep { width: 1px; background: var(--border-subtle); }
+
+  .window {
+    width: 980px; max-width: 100%;
+    background: var(--bg-window);
+    border: 1px solid var(--border);
+    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.60), 0 2px 0 rgba(255, 255, 255, 0.03) inset;
+    display: flex; flex-direction: column;
+  }
+  .titlebar {
+    height: 30px; background: var(--bg-title);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center;
+    padding: 0 12px; font-size: 12px; color: var(--text-muted); letter-spacing: 0.4px;
+  }
+  .titlebar .dots { display: inline-flex; gap: 6px; margin-right: 10px; }
+  .titlebar .dots i {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: #2a2a2e; border: 1px solid #1c1c1f;
+  }
+  .titlebar .title { flex: 1; }
+  .titlebar .title em { color: var(--accent-rose); font-style: normal; }
+
+  .body { display: flex; min-height: 640px; }
+
+  .sidebar {
+    width: 230px; background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 14px 10px;
+    display: flex; flex-direction: column; gap: 3px; flex-shrink: 0;
+  }
+  .brand-title { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0.4px; }
+  .brand-sub { font-size: 11px; color: #8fa0b6; margin-bottom: 10px; }
+  .group-label { font-size: 10.5px; letter-spacing: 2px; color: #7a8497; margin-top: 10px; margin-bottom: 2px; padding-left: 6px; }
+  .tab {
+    background: transparent; border: 1px solid transparent;
+    color: var(--text-muted); padding: 6px 10px; font: inherit; font-size: 13px;
+    text-align: left; cursor: pointer; letter-spacing: 0.2px; width: 100%;
+  }
+  .tab:hover { background: #1a1a1f; color: var(--text); }
+  .tab.active { background: #22252d; color: var(--text); border-color: var(--border-strong); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
+
+  .content { flex: 1; padding: 14px 16px; overflow: auto; font-size: 12.5px; min-width: 0; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  section { border: 1px solid var(--border-subtle); margin-bottom: 10px; background: var(--bg-section-body); }
+  section > h3 {
+    margin: 0; padding: 6px 10px; background: var(--bg-section-head);
+    font-size: 13px; font-weight: 500; letter-spacing: 0.3px; color: var(--text);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  section > h3::before { content: "▾  "; color: var(--text-muted); font-size: 10px; }
+  section .body-box { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  section.sub { margin-top: 8px; margin-left: 6px; }
+  section.sub > h3 { background: #0f0f13; font-size: 12.5px; }
+
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .row.col { flex-direction: column; align-items: stretch; gap: 8px; }
+
+  .btn {
+    background: var(--bg-frame); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer; letter-spacing: 0.3px;
+  }
+  .btn:hover { background: var(--bg-frame-hover); border-color: var(--border-strong); }
+  .btn[disabled] { color: var(--text-disabled); cursor: not-allowed; background: #0b0b0e; border-color: rgba(255, 255, 255, 0.10); }
+  .btn-start { background: var(--accent-green); border-color: rgba(255, 255, 255, 0.08); color: #f6fff8; padding: 9px 22px; font-weight: 600; }
+  .btn-start:hover { background: var(--accent-green-hi); }
+  .btn-stop { background: var(--accent-red); border-color: rgba(255, 255, 255, 0.08); color: #fff6f6; padding: 9px 22px; font-weight: 600; }
+  .btn-stop:hover { background: var(--accent-red-hi); }
+
+  .status { font-size: 13px; letter-spacing: 0.4px; }
+  .status.running { color: rgb(76, 217, 127); }
+  .status.stopped { color: #aab1be; }
+
+  .muted { color: var(--text-muted); font-size: 12px; }
+  .warn { color: #f08a8a; font-size: 12px; }
+  .good { color: #6be196; font-size: 12px; }
+
+  .combo {
+    display: flex; align-items: stretch;
+    background: var(--bg-frame); border: 1px solid var(--border); color: var(--text);
+    max-width: 460px; font-size: 12.5px;
+  }
+  .combo.disabled { opacity: 0.55; pointer-events: none; }
+  .combo-label { min-width: 96px; padding: 6px 10px; border-right: 1px solid var(--border-subtle); color: var(--text-muted); background: #0a0a0d; }
+  .combo-value { flex: 1; padding: 6px 10px; }
+  .combo-caret { padding: 6px 10px; border-left: 1px solid var(--border-subtle); color: var(--text-muted); }
+
+  .slider { display: flex; align-items: center; gap: 10px; max-width: 460px; }
+  .slider .slider-label { min-width: 140px; color: var(--text); }
+  .slider .track { flex: 1; height: 14px; background: var(--bg-frame); border: 1px solid var(--border); position: relative; }
+  .slider .fill { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #2a3648 0%, #3d5272 100%); border-right: 2px solid #6aa6ff; }
+  .slider .v { min-width: 54px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .checkbox { display: inline-flex; align-items: center; gap: 8px; cursor: default; user-select: none; }
+  .checkbox .box { width: 14px; height: 14px; background: var(--bg-frame); border: 1px solid var(--border); display: inline-block; position: relative; }
+  .checkbox.on .box::after { content: "✓"; position: absolute; top: -3px; left: 1px; color: #82c4ff; font-size: 13px; font-weight: 700; }
+  .checkbox label { font-size: 13px; color: var(--text); }
+
+  .text-input {
+    background: var(--bg-frame); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; font: inherit; font-size: 12.5px; min-width: 120px;
+  }
+
+  /* Preview pane */
+  .preview-wrap { padding: 8px; background: #050508; border: 1px solid var(--border-subtle); }
+  .preview-canvas {
+    position: relative; width: 100%; aspect-ratio: 16 / 9;
+    background: linear-gradient(135deg, #23272e 0%, #131518 100%);
+    overflow: hidden; border: 1px solid rgba(255,255,255,0.06);
+  }
+  .fake-scene {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(1200px 400px at 20% 40%, #2d3038 0%, transparent 55%),
+      radial-gradient(800px 300px at 80% 80%, #1b1f27 0%, transparent 60%),
+      linear-gradient(180deg, #1c1f25 0%, #0d0f13 100%);
+  }
+  .det { position: absolute; border: 1.5px solid var(--box-color); box-shadow: 0 0 0 1px rgba(0,0,0,0.45); }
+  .det::after {
+    content: attr(data-label);
+    position: absolute; top: -18px; left: -1px;
+    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #f0f5fa; background: var(--label-bg);
+    padding: 2px 6px; letter-spacing: 0.3px;
+  }
+
+  /* Class filter table */
+  table.cls-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.cls-table th, table.cls-table td {
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 6px 8px; text-align: left;
+  }
+  table.cls-table th { color: var(--text-muted); font-weight: 500; background: #10121a; }
+  .pill {
+    display: inline-block; padding: 2px 8px; font-size: 11.5px;
+    border: 1px solid var(--border); cursor: pointer; color: var(--text-muted);
+  }
+  .pill.delete.on { background: rgba(210, 90, 90, 0.8); color: #fff; border-color: transparent; }
+  .pill.filter.on { background: rgba(210, 190, 90, 0.85); color: #000; border-color: transparent; }
+  .pill.aim.on { background: rgba(90, 200, 120, 0.85); color: #000; border-color: transparent; }
+
+  /* Hotkey card */
+  .hotkey-card { border: 1px solid var(--border-subtle); background: #0e0e14; padding: 10px 12px; margin-bottom: 8px; }
+  .hotkey-card h4 { margin: 0 0 6px; font-size: 13px; }
+  .hotkey-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--bg-frame); border: 1px solid var(--border);
+    padding: 2px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+  }
+  .chip button { background: transparent; border: 0; color: var(--text-disabled); font: inherit; cursor: pointer; margin-left: 4px; }
+  .chip button:hover { color: #f08a8a; }
+
+  body[data-state="running"] .show-when-stopped { display: none; }
+  body[data-state="stopped"] .show-when-running { display: none; }
+
+  .annotation {
+    margin-top: 6px; padding: 12px 14px;
+    background: #0f1117; border: 1px solid var(--border-subtle);
+    font-size: 12px; color: var(--text-muted); line-height: 1.7;
+    width: 980px; max-width: 100%;
+  }
+  .annotation code { background: #1a1d24; padding: 1px 5px; border: 1px solid rgba(255,255,255,0.08); color: #e5eaf4; font-size: 11.5px; }
+  .annotation b { color: var(--text); }
+</style>
+</head>
+
+<body data-state="stopped">
+<div class="page">
+  <div class="header" style="position:relative">
+    <h1>Apotheosis · 启动器预览（重构后）</h1>
+    <div class="subtitle">左侧 tab 可点击；顶部可切换"会话运行中 / 已停止"观察 Launcher 差异</div>
+    <a href="tuning_guide.html"
+       style="position:absolute; top:0; right:0;
+              display:inline-block; padding:8px 16px;
+              background:linear-gradient(180deg,#3b82f6 0%,#2563eb 100%);
+              color:#fff; text-decoration:none; font-size:13px; font-weight:600;
+              border:1px solid #1e40af; border-radius:6px;
+              box-shadow:0 1px 3px rgba(0,0,0,0.4);">
+      📖 调参文档 →
+    </a>
+  </div>
+
+  <div class="state-toggle" id="stateToggle">
+    <button data-state="stopped" class="active">会话已停止</button>
+    <span class="sep"></span>
+    <button data-state="running">会话运行中</button>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="title">ai.exe — <em>Apotheosis</em>　·　启动后窗口常驻显示</span>
+    </div>
+
+    <div class="body">
+      <aside class="sidebar">
+        <div class="brand-title">Apotheosis 控制台</div>
+        <div class="brand-sub">窗口在整个会话期间常驻</div>
+
+        <div class="group-label">会话</div>
+        <button class="tab active" data-tab="launcher">启动器</button>
+
+        <div class="group-label">核心</div>
+        <button class="tab" data-tab="capture">画面采集</button>
+        <button class="tab" data-tab="target">目标</button>
+
+        <div class="group-label">控制</div>
+        <button class="tab" data-tab="hotkeys">瞄准热键</button>
+        <button class="tab" data-tab="crosshair">准星找色</button>
+
+        <div class="group-label">核心</div>
+        <button class="tab" data-tab="hardware">硬件</button>
+        <button class="tab" data-tab="ai">AI 模型</button>
+
+        <div class="group-label">控制</div>
+        <button class="tab" data-tab="overlay">界面外观</button>
+
+        <div class="group-label">监控</div>
+        <button class="tab" data-tab="stats">性能统计</button>
+        <button class="tab" data-tab="debug">调试</button>
+      </aside>
+
+      <main class="content">
+
+        <!-- ============= 启动器 ============= -->
+        <div class="tab-panel active" data-panel="launcher">
+          <section>
+            <h3>推理会话</h3>
+            <div class="body-box">
+              <div class="row show-when-stopped">
+                <button class="btn-start">启动推理</button>
+                <span class="status stopped">已停止</span>
+              </div>
+              <div class="row show-when-running">
+                <button class="btn-stop">停止推理</button>
+                <span class="status running">● 运行中</span>
+                <span class="muted">(后端 = TRT, 模型 = yolov8n.engine)</span>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h3>推理后端</h3>
+            <div class="body-box">
+              <div class="combo show-when-stopped">
+                <div class="combo-label">后端</div>
+                <div class="combo-value">TensorRT (CUDA)</div>
+                <div class="combo-caret">▾</div>
+              </div>
+              <div class="combo disabled show-when-running">
+                <div class="combo-label">后端</div>
+                <div class="combo-value">TensorRT (CUDA)</div>
+                <div class="combo-caret">▾</div>
+              </div>
+              <div class="muted show-when-running">停止后才能切换后端。</div>
+            </div>
+          </section>
+
+          <section>
+            <h3>模型</h3>
+            <div class="body-box">
+              <div class="combo">
+                <div class="combo-label">模型</div>
+                <div class="combo-value">yolov8n.engine</div>
+                <div class="combo-caret">▾</div>
+              </div>
+              <div class="row">
+                <button class="btn">浏览 ONNX...</button>
+                <span class="muted">文件会导入到 <code>models/</code>，编译引擎缓存在 <code>models/engines/</code>。</span>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h3>检测预览</h3>
+            <div class="body-box">
+              <div class="checkbox on"><span class="box"></span><label>显示实时检测预览</label></div>
+              <div class="muted">勾选后在启动器页直接渲染最新一帧画面与检测框；会话停止时保持空白。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 画面采集 ============= -->
+        <div class="tab-panel" data-panel="capture">
+          <section>
+            <h3>通用采集</h3>
+            <div class="body-box">
+              <div class="combo"><div class="combo-label">检测分辨率</div><div class="combo-value">320</div><div class="combo-caret">▾</div></div>
+              <div class="combo"><div class="combo-label">采集 FPS</div><div class="combo-value">240</div><div class="combo-caret">▾</div></div>
+              <div class="combo"><div class="combo-label">采集方式</div><div class="combo-value">udp_capture</div><div class="combo-caret">▾</div></div>
+              <div class="checkbox on"><span class="box"></span><label>圆形遮罩</label></div>
+              <div class="muted">下方 UDP / TCP / OpenCV 采集卡 三个子面板根据采集方式二选一显示；此处同时展示仅为预览方便。</div>
+            </div>
+          </section>
+          <section>
+            <h3>采集预览</h3>
+            <div class="body-box">
+              <div class="checkbox"><span class="box"></span><label>显示预览窗口</label></div>
+              <div class="muted">勾选后会在此渲染 capture 线程最新一帧，并可滑动"调试缩放"调整大小。</div>
+            </div>
+          </section>
+          <section>
+            <h3>UDP 采集</h3>
+            <div class="body-box">
+              <div class="row">
+                <span class="muted" style="min-width:90px">UDP 地址</span>
+                <input class="text-input" value="0.0.0.0" />
+              </div>
+              <div class="row">
+                <span class="muted" style="min-width:90px">UDP 端口</span>
+                <input class="text-input" value="1234" style="width:120px" />
+                <button class="btn">应用 UDP 设置</button>
+              </div>
+            </div>
+          </section>
+          <section>
+            <h3>TCP 采集</h3>
+            <div class="body-box">
+              <div class="row">
+                <span class="muted" style="min-width:90px">TCP 地址</span>
+                <input class="text-input" value="0.0.0.0" />
+              </div>
+              <div class="row">
+                <span class="muted" style="min-width:90px">TCP 端口</span>
+                <input class="text-input" value="1235" style="width:120px" />
+                <button class="btn">应用 TCP 设置</button>
+              </div>
+            </div>
+          </section>
+          <section>
+            <h3>OpenCV 采集卡</h3>
+            <div class="body-box">
+              <div class="row">
+                <span class="muted" style="min-width:90px">设备索引</span>
+                <input class="text-input" value="0" style="width:80px" />
+                <span class="muted">URL 非空时忽略</span>
+              </div>
+              <div class="combo"><div class="combo-label">驱动接口</div><div class="combo-value">DSHOW</div><div class="combo-caret">▾</div></div>
+              <div class="row">
+                <span class="muted" style="min-width:90px">URL (可选)</span>
+                <input class="text-input" value="" style="width:220px" placeholder="rtsp://... 或文件路径" />
+              </div>
+              <div class="row">
+                <span class="muted" style="min-width:90px">采集宽度</span>
+                <input class="text-input" value="0" style="width:80px" />
+                <span class="muted" style="min-width:90px">采集高度</span>
+                <input class="text-input" value="0" style="width:80px" />
+                <span class="muted" style="min-width:70px">采集 FPS</span>
+                <input class="text-input" value="0" style="width:80px" />
+              </div>
+              <button class="btn">应用 OpenCV 设置</button>
+              <div class="muted">USB 采集卡通常选 DSHOW；UVC 4K / HDMI 采集卡可试 MSMF。0 = 使用驱动默认值。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 目标：类别过滤表 ============= -->
+        <div class="tab-panel" data-panel="target">
+          <section>
+            <h3>流水线说明</h3>
+            <div class="body-box">
+              <div class="muted">YOLO 输出按顺序流经：<b style="color:var(--text)">删除 → 过滤 → 瞄准</b>。</div>
+              <div class="muted">• 删除：该类别的检测框直接丢弃，不再进入任何下游。</div>
+              <div class="muted">• 过滤：保留检测框（调试视图与深度遮罩可见），但不会作为瞄准候选。</div>
+              <div class="muted">• 瞄准：作为瞄准候选；优先级由"瞄准热键"面板决定。</div>
+            </div>
+          </section>
+
+          <section>
+            <h3>模型类别（检测到 7 个）</h3>
+            <div class="body-box">
+              <table class="cls-table">
+                <thead>
+                  <tr><th style="width:40px">ID</th><th>名称</th><th style="width:70px">删除</th><th style="width:70px">过滤</th><th style="width:70px">瞄准</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>0</td><td>person</td>
+                    <td><span class="pill delete">删除</span></td>
+                    <td><span class="pill filter">过滤</span></td>
+                    <td><span class="pill aim on">瞄准</span></td></tr>
+                  <tr><td>1</td><td>head</td>
+                    <td><span class="pill delete">删除</span></td>
+                    <td><span class="pill filter">过滤</span></td>
+                    <td><span class="pill aim on">瞄准</span></td></tr>
+                  <tr><td>2</td><td>bottle</td>
+                    <td><span class="pill delete on">删除</span></td>
+                    <td><span class="pill filter">过滤</span></td>
+                    <td><span class="pill aim">瞄准</span></td></tr>
+                  <tr><td>3</td><td>car</td>
+                    <td><span class="pill delete on">删除</span></td>
+                    <td><span class="pill filter">过滤</span></td>
+                    <td><span class="pill aim">瞄准</span></td></tr>
+                  <tr><td>4</td><td>chair</td>
+                    <td><span class="pill delete">删除</span></td>
+                    <td><span class="pill filter on">过滤</span></td>
+                    <td><span class="pill aim">瞄准</span></td></tr>
+                  <tr><td>5</td><td>dog</td>
+                    <td><span class="pill delete">删除</span></td>
+                    <td><span class="pill filter on">过滤</span></td>
+                    <td><span class="pill aim">瞄准</span></td></tr>
+                  <tr><td>6</td><td>ally</td>
+                    <td><span class="pill delete on">删除</span></td>
+                    <td><span class="pill filter">过滤</span></td>
+                    <td><span class="pill aim">瞄准</span></td></tr>
+                </tbody>
+              </table>
+              <div class="muted">新类别默认置于"删除"。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 瞄准热键 ============= -->
+        <div class="tab-panel" data-panel="hotkeys">
+          <section>
+            <h3>瞄准热键</h3>
+            <div class="body-box">
+              <div class="muted">可以创建多个瞄准热键；按下时第一个匹配的生效。每个热键可以单独选择瞄准的类别、Y 偏移，以及覆盖全局鼠标参数。<br>
+                <b>按键只允许鼠标四键：</b> <code>LeftMouseButton</code> / <code>RightMouseButton</code> / <code>X1MouseButton</code> / <code>X2MouseButton</code>，其它按键会被重置为 <code>None</code>。</div>
+
+              <div class="hotkey-card">
+                <h4>热键 #1 — 主瞄（头 + 身）</h4>
+                <div class="hotkey-row">
+                  <span class="muted" style="min-width:70px">按键</span>
+                  <span class="chip">RightMouseButton<button>×</button></span>
+                  <span class="chip">X2MouseButton<button>×</button></span>
+                  <button class="btn">+</button>
+                </div>
+                <div class="hotkey-row">
+                  <span class="muted" style="min-width:70px">瞄准类别</span>
+                  <span class="chip">#1　head　Y=0.45　<small style="opacity:0.7">· Kalman 覆盖 ✓</small> <button>×</button></span>
+                  <span class="chip">#2　person　Y=0.35 <button>×</button></span>
+                  <button class="btn">+ 添加类别</button>
+                </div>
+                <div class="muted">展开每个类别可单独覆盖 Kalman 噪声参数（过程噪声位置/速度、测量噪声、阻尼、最大速度）——例如让 head 更信任测量、允许更高速度。</div>
+                <section class="sub">
+                  <h3>视野 / FOV</h3>
+                  <div class="body-box">
+                    <div class="slider"><div class="slider-label">FOV X</div><div class="track"><div class="fill" style="width:62%"></div></div><div class="v">106</div></div>
+                    <div class="slider"><div class="slider-label">FOV Y</div><div class="track"><div class="fill" style="width:46%"></div></div><div class="v">74</div></div>
+                    <div class="muted">FOV 是检测分辨率上的瞄准区域「直径」上限；落在区域外的检测不会进入候选池。</div>
+                    <hr style="border:0; border-top:1px solid var(--border-subtle); margin:6px 0">
+                    <div class="checkbox on"><span class="box"></span><label>启用动态 FOV</label></div>
+                    <div class="muted">距离远 → 用上面的最大 FOV，方便闪到其他目标；距离近 → 收缩到正好框住当前 bbox（× 内边距系数），不让其他目标抢锁。</div>
+                    <div class="slider"><div class="slider-label">内边距系数</div><div class="track"><div class="fill" style="width:10%"></div></div><div class="v">1.10</div></div>
+                    <div class="slider"><div class="slider-label">最小半径系数</div><div class="track"><div class="fill" style="width:20%"></div></div><div class="v">0.20</div></div>
+                    <div class="muted">实时有效 FOV: 78 × 56 px</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>PID</h3>
+                  <div class="body-box">
+                    <div class="muted">以下三项为 <b>Flick</b>（远距离激进）。</div>
+                    <div class="slider"><div class="slider-label">P</div><div class="track"><div class="fill" style="width:12%"></div></div><div class="v">0.60</div></div>
+                    <div class="slider"><div class="slider-label">I</div><div class="track"><div class="fill" style="width:0%"></div></div><div class="v">0.00</div></div>
+                    <div class="slider"><div class="slider-label">D</div><div class="track"><div class="fill" style="width:2.5%"></div></div><div class="v">0.05</div></div>
+                    <hr style="border:0; border-top:1px solid var(--border-subtle); margin:6px 0">
+                    <div class="checkbox on"><span class="box"></span><label>启用 Flick / Track 双模式</label></div>
+                    <div class="muted">误差 &gt; 阈值+迟滞 → Flick；&lt; 阈值-迟滞 → Track；中间维持上一帧模式。模式切换会重置 PID 积分。</div>
+                    <div class="muted">以下三项为 <b>Track</b>（近距离平滑）。</div>
+                    <div class="slider"><div class="slider-label">P</div><div class="track"><div class="fill" style="width:6%"></div></div><div class="v">0.30</div></div>
+                    <div class="slider"><div class="slider-label">I</div><div class="track"><div class="fill" style="width:0%"></div></div><div class="v">0.00</div></div>
+                    <div class="slider"><div class="slider-label">D</div><div class="track"><div class="fill" style="width:5%"></div></div><div class="v">0.10</div></div>
+                    <div class="slider"><div class="slider-label">切换阈值 (px)</div><div class="track"><div class="fill" style="width:12%"></div></div><div class="v">30.0</div></div>
+                    <div class="slider"><div class="slider-label">切换迟滞 (px)</div><div class="track"><div class="fill" style="width:13%"></div></div><div class="v">8.0</div></div>
+                    <div class="muted">实时：模式 = Flick　|　误差 = 47.2 px</div>
+                    <hr style="border:0; border-top:1px solid var(--border-subtle); margin:6px 0">
+                    <div class="slider"><div class="slider-label">吸附锁死力度</div><div class="track"><div class="fill" style="width:40%"></div></div><div class="v">0.40</div></div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>预测 / Kalman（目标丢失时兜底）</h3>
+                  <div class="body-box">
+                    <div class="slider"><div class="slider-label">预测区间 (s)</div><div class="track"><div class="fill" style="width:20%"></div></div><div class="v">0.10</div></div>
+                    <div class="slider"><div class="slider-label">未来位置数</div><div class="track"><div class="fill" style="width:25%"></div></div><div class="v">10</div></div>
+                    <div class="checkbox on"><span class="box"></span><label>启用 Kalman 兜底</label></div>
+                    <div class="slider"><div class="slider-label">重置超时 (s)</div><div class="track"><div class="fill" style="width:15%"></div></div><div class="v">0.50</div></div>
+                    <div class="muted">展开后还可调过程/测量噪声、速度阻尼、最大速度、Warmup、检测延迟补偿等 Kalman 进阶参数。上面每个 aim class 还能单独覆盖这五个噪声参数。</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>准星找色</h3>
+                  <div class="body-box">
+                    <div class="checkbox on"><span class="box"></span><label>启用准星找色 (此热键)</label></div>
+                    <div class="muted">颜色列表 / 采样矩形 / 面积阈值在 <b>准星找色</b> 页统一配置。</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>目标切换迟滞</h3>
+                  <div class="body-box">
+                    <div class="slider"><div class="slider-label">切换分差阈值</div><div class="track"><div class="fill" style="width:15%"></div></div><div class="v">0.15</div></div>
+                    <div class="slider"><div class="slider-label">连续优势帧数</div><div class="track"><div class="fill" style="width:10%"></div></div><div class="v">3</div></div>
+                    <div class="muted">挑战者必须比当前锁定目标分数好出这个比例（按半对角线归一化），并连续保持这么多帧才换锁。同优先级类别间才走迟滞；更高优先级类别立即抢锁。</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>Y 偏移距离衰减</h3>
+                  <div class="body-box">
+                    <div class="checkbox"><span class="box"></span><label>启用（近距离向中心回归）</label></div>
+                    <div class="slider"><div class="slider-label">起始高度比</div><div class="track"><div class="fill" style="width:10%"></div></div><div class="v">0.10</div></div>
+                    <div class="slider"><div class="slider-label">完全衰减高度比</div><div class="track"><div class="fill" style="width:40%"></div></div><div class="v">0.40</div></div>
+                    <div class="muted">bbox 越大，Y 偏移越靠近 0.5；远距离维持用户设定。用于压制近距离锚点抖动。</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>智能扳机（自动开火）</h3>
+                  <div class="body-box">
+                    <div class="checkbox"><span class="box"></span><label>启用自动开火</label></div>
+                    <div class="muted">准星进入命中区 + 枪口稳定 + 冷却结束 → 通过当前输入设备（WIN32 / GHUB / KMBOX / MAKCU / Arduino）按下左键保持「开火持续时间」再释放。<b>松开瞄准热键或关闭此开关会强制弹起，按键绝不会卡住。</b></div>
+                    <div class="slider"><div class="slider-label">命中区半径系数</div><div class="track"><div class="fill" style="width:55%"></div></div><div class="v">0.55</div></div>
+                    <div class="slider"><div class="slider-label">最近 N 帧位移 RMS 上限 (px)</div><div class="track"><div class="fill" style="width:12%"></div></div><div class="v">6.0</div></div>
+                    <div class="slider"><div class="slider-label">采样窗口 (帧)</div><div class="track"><div class="fill" style="width:13%"></div></div><div class="v">8</div></div>
+                    <div class="slider"><div class="slider-label">最低命中概率</div><div class="track"><div class="fill" style="width:70%"></div></div><div class="v">0.70</div></div>
+                    <div class="slider"><div class="slider-label">开火持续时间 (ms)</div><div class="track"><div class="fill" style="width:8%"></div></div><div class="v">40</div></div>
+                    <div class="muted">按下时间越长 = 长按喷射（冷却也同等延长，占空比 ≤ 50%）；调到 40ms 附近 ≈ 单发点射。</div>
+                    <div class="muted" style="color:#d08060">● 正在开火　<small style="opacity:0.6">prob=0.83  rms=2.1px  保持=40ms</small></div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>威胁度优先级</h3>
+                  <div class="body-box">
+                    <div class="checkbox"><span class="box"></span><label>启用威胁加权</label></div>
+                    <div class="muted">启发式（占位实现）：head 类 + 朝准星运动 + 历史命中数 → 威胁分。乘进锁定打分里。可在 <code>AimbotTarget.cpp:compute_threat_score</code> 中替换为真正的人脸朝向模型。</div>
+                    <div class="slider"><div class="slider-label">威胁权重</div><div class="track"><div class="fill" style="width:50%"></div></div><div class="v">0.50</div></div>
+                  </div>
+                </section>
+              </div>
+
+              <div class="hotkey-card">
+                <h4>热键 #2 — 仅头瞄（高 P 值 + 关 Kalman）</h4>
+                <div class="hotkey-row">
+                  <span class="muted" style="min-width:70px">按键</span>
+                  <span class="chip">X1MouseButton<button>×</button></span>
+                  <button class="btn">+</button>
+                </div>
+                <div class="hotkey-row">
+                  <span class="muted" style="min-width:70px">瞄准类别</span>
+                  <span class="chip">#1　head　Y=0.45 <button>×</button></span>
+                  <button class="btn">+ 添加类别</button>
+                </div>
+                <section class="sub">
+                  <h3>PID</h3>
+                  <div class="body-box">
+                    <div class="slider"><div class="slider-label">P</div><div class="track"><div class="fill" style="width:42%"></div></div><div class="v">1.20</div></div>
+                    <div class="slider"><div class="slider-label">I</div><div class="track"><div class="fill" style="width:6%"></div></div><div class="v">0.02</div></div>
+                    <div class="slider"><div class="slider-label">D</div><div class="track"><div class="fill" style="width:24%"></div></div><div class="v">0.18</div></div>
+                    <div class="slider"><div class="slider-label">吸附锁死力度</div><div class="track"><div class="fill" style="width:0%"></div></div><div class="v">0.00</div></div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>预测 / Kalman（目标丢失时兜底）</h3>
+                  <div class="body-box">
+                    <div class="checkbox"><span class="box"></span><label>启用 Kalman 兜底</label></div>
+                    <div class="muted">此热键关闭 Kalman：目标一旦看不到，鼠标立刻停下。</div>
+                  </div>
+                </section>
+                <section class="sub">
+                  <h3>准星找色</h3>
+                  <div class="body-box">
+                    <div class="checkbox"><span class="box"></span><label>启用准星找色 (此热键)</label></div>
+                    <div class="muted">此热键不开准星找色，瞄准参考点仍为画面几何中心。</div>
+                  </div>
+                </section>
+              </div>
+
+              <button class="btn">新建热键</button>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 硬件：输入设备 ============= -->
+        <div class="tab-panel" data-panel="hardware">
+          <section>
+            <h3>输入方式</h3>
+            <div class="body-box">
+              <div class="combo"><div class="combo-label">输入设备</div><div class="combo-value">MAKCU</div><div class="combo-caret">▾</div></div>
+            </div>
+          </section>
+          <section>
+            <h3>MAKCU</h3>
+            <div class="body-box">
+              <div class="combo"><div class="combo-label">端口</div><div class="combo-value">COM7</div><div class="combo-caret">▾</div></div>
+              <div class="combo"><div class="combo-label">波特率</div><div class="combo-value">115200</div><div class="combo-caret">▾</div></div>
+              <span class="good">● 已连接</span>
+            </div>
+          </section>
+          <section>
+            <h3>警告</h3>
+            <div class="body-box">
+              <div class="muted">调试鼠标参数时请最小化覆盖窗口以免误触发射击。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= AI ============= -->
+        <div class="tab-panel" data-panel="ai">
+          <section>
+            <h3>模型</h3>
+            <div class="body-box">
+              <div class="row">
+                <div class="combo"><div class="combo-label">模型文件</div><div class="combo-value">yolov8n.engine</div><div class="combo-caret">▾</div></div>
+                <span class="muted">固定输入尺寸：开启</span>
+              </div>
+              <div class="row">
+                <button class="btn">浏览 ONNX...</button>
+                <span class="muted">(导入到 <code>models/</code>)</span>
+              </div>
+            </div>
+          </section>
+          <section>
+            <h3>推理后端</h3>
+            <div class="body-box">
+              <div class="combo"><div class="combo-label">后端</div><div class="combo-value">TensorRT (CUDA)</div><div class="combo-caret">▾</div></div>
+              <div class="muted">若运行时未检测到 CUDA，会自动切回 DirectML 并给出原因提示。</div>
+            </div>
+          </section>
+          <section>
+            <h3>检测参数</h3>
+            <div class="body-box">
+              <div class="slider"><div class="slider-label">置信度阈值</div><div class="track"><div class="fill" style="width:15%"></div></div><div class="v">0.15</div></div>
+              <div class="slider"><div class="slider-label">NMS 阈值</div><div class="track"><div class="fill" style="width:50%"></div></div><div class="v">0.50</div></div>
+              <div class="slider"><div class="slider-label">最大检测数</div><div class="track"><div class="fill" style="width:20%"></div></div><div class="v">20</div></div>
+            </div>
+          </section>
+          <section>
+            <h3>深度推理 / 深度遮罩（仅 TRT）</h3>
+            <div class="body-box">
+              <div class="checkbox on"><span class="box"></span><label>启用深度推理</label></div>
+              <div class="combo"><div class="combo-label">深度模型</div><div class="combo-value">depth_anything_v2_vits.engine</div><div class="combo-caret">▾</div></div>
+              <div class="row">
+                <button class="btn">加载深度模型</button>
+                <button class="btn">导出深度引擎</button>
+              </div>
+              <div class="slider"><div class="slider-label">深度 FPS</div><div class="track"><div class="fill" style="width:25%"></div></div><div class="v">30</div></div>
+              <div class="slider"><div class="slider-label">深度遮罩 FPS</div><div class="track"><div class="fill" style="width:50%"></div></div><div class="v">15</div></div>
+              <div class="checkbox on"><span class="box"></span><label>启用深度遮罩</label></div>
+              <div class="slider"><div class="slider-label">深度遮罩近端 %</div><div class="track"><div class="fill" style="width:40%"></div></div><div class="v">40</div></div>
+              <div class="slider"><div class="slider-label">深度遮罩透明度</div><div class="track"><div class="fill" style="width:60%"></div></div><div class="v">150</div></div>
+              <div class="slider"><div class="slider-label">遮罩抑制占比阈值</div><div class="track"><div class="fill" style="width:30%"></div></div><div class="v">0.30</div></div>
+              <div class="muted">bbox 内落在遮罩上的像素比例 ≥ 此值才丢弃检测；避免 bbox 压到墙边一瞬间跳变。</div>
+              <div class="muted">深度遮罩状态、运行时路径与错误信息会显示在本面板下方的 <b>深度状态</b> 区。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 准星找色 ============= -->
+        <div class="tab-panel" data-panel="crosshair">
+          <section>
+            <h3>说明</h3>
+            <div class="body-box">
+              <div class="muted">准星找色把画面中心矩形的 BGR 像素转为 HSV，寻找配置的颜色；命中时用识别到的点代替静态画面中心作为瞄准参考。</div>
+              <div class="muted"><b>是否启用由每个「瞄准热键」自己决定</b>（在 瞄准热键 页勾选），本页只配置采样矩形、颜色列表与面积过滤。多条颜色之间是「任一命中」的并集关系。</div>
+            </div>
+          </section>
+          <section>
+            <h3>采样矩形</h3>
+            <div class="body-box">
+              <div class="slider"><div class="slider-label">宽度 (px)</div><div class="track"><div class="fill" style="width:16%"></div></div><div class="v">40</div></div>
+              <div class="slider"><div class="slider-label">高度 (px)</div><div class="track"><div class="fill" style="width:16%"></div></div><div class="v">40</div></div>
+              <div class="muted">矩形位于 detection-image 画面中心，超出部分自动裁剪。</div>
+            </div>
+          </section>
+          <section>
+            <h3>颜色列表 (多条求并集)</h3>
+            <div class="body-box">
+              <div class="muted">OpenCV HSV：H∈[0,179]，S/V∈[0,255]。红色在 0/180 处回绕，所以 <b>红色用两条</b> (H:0-10 与 H:160-179) 才能完整覆盖。</div>
+
+              <div class="hotkey-card">
+                <h4>#1 — Red-Low <span class="chip" style="margin-left:8px">启用</span></h4>
+                <div class="slider"><div class="slider-label">H low</div><div class="track"><div class="fill" style="width:0%"></div></div><div class="v">0</div></div>
+                <div class="slider"><div class="slider-label">H high</div><div class="track"><div class="fill" style="width:6%"></div></div><div class="v">10</div></div>
+                <div class="slider"><div class="slider-label">S min</div><div class="track"><div class="fill" style="width:47%"></div></div><div class="v">120</div></div>
+                <div class="slider"><div class="slider-label">S max</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="v">255</div></div>
+                <div class="slider"><div class="slider-label">V min</div><div class="track"><div class="fill" style="width:47%"></div></div><div class="v">120</div></div>
+                <div class="slider"><div class="slider-label">V max</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="v">255</div></div>
+              </div>
+
+              <div class="hotkey-card">
+                <h4>#2 — Red-High <span class="chip" style="margin-left:8px">启用</span></h4>
+                <div class="slider"><div class="slider-label">H low</div><div class="track"><div class="fill" style="width:89%"></div></div><div class="v">160</div></div>
+                <div class="slider"><div class="slider-label">H high</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="v">179</div></div>
+                <div class="slider"><div class="slider-label">S min</div><div class="track"><div class="fill" style="width:47%"></div></div><div class="v">120</div></div>
+                <div class="slider"><div class="slider-label">S max</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="v">255</div></div>
+                <div class="slider"><div class="slider-label">V min</div><div class="track"><div class="fill" style="width:47%"></div></div><div class="v">120</div></div>
+                <div class="slider"><div class="slider-label">V max</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="v">255</div></div>
+              </div>
+
+              <div class="hotkey-card">
+                <h4>#3 — Purple <span class="chip" style="margin-left:8px">禁用</span></h4>
+                <div class="slider"><div class="slider-label">H low</div><div class="track"><div class="fill" style="width:70%"></div></div><div class="v">125</div></div>
+                <div class="slider"><div class="slider-label">H high</div><div class="track"><div class="fill" style="width:87%"></div></div><div class="v">155</div></div>
+                <div class="muted">同一个找色会话里可以同时开红色 + 紫色 + 绿色等。</div>
+              </div>
+
+              <div class="hotkey-row">
+                <button class="btn">新建空颜色</button>
+                <span class="combo" style="width:200px"><span class="combo-label">预设</span><span class="combo-value">红色 (双段)</span><span class="combo-caret">▾</span></span>
+                <button class="btn">添加预设</button>
+              </div>
+            </div>
+          </section>
+          <section>
+            <h3>噪声过滤 (轮廓面积)</h3>
+            <div class="body-box">
+              <div class="slider"><div class="slider-label">最小面积 (px²)</div><div class="track"><div class="fill" style="width:1%"></div></div><div class="v">2</div></div>
+              <div class="slider"><div class="slider-label">最大面积 (px²)</div><div class="track"><div class="fill" style="width:4%"></div></div><div class="v">200</div></div>
+              <div class="muted">面积在区间内的色块才会被视为准星候选；取离 ROI 中心最近的那个。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 界面外观 ============= -->
+        <div class="tab-panel" data-panel="overlay">
+          <section>
+            <h3>外观</h3>
+            <div class="body-box">
+              <div class="slider"><div class="slider-label">窗口不透明度</div><div class="track"><div class="fill" style="width:92%"></div></div><div class="v">245</div></div>
+              <div class="slider"><div class="slider-label">界面缩放</div><div class="track"><div class="fill" style="width:30%"></div></div><div class="v">1.00</div></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 性能统计 ============= -->
+        <div class="tab-panel" data-panel="stats">
+          <section>
+            <h3>耗时分解</h3>
+            <div class="body-box">
+              <div class="muted">每一项都是 120 帧滑窗，右侧给出当前值与 1s 平均；推理平均超过 20ms 会转红。</div>
+              <div class="muted">预处理 0.82 | 平均 0.79　·　推理 4.31 | 平均 4.25　·　拷贝 0.21 | 平均 0.20　·　后处理 0.33 | 平均 0.31　·　NMS 0.11 | 平均 0.10</div>
+            </div>
+          </section>
+          <section>
+            <h3>采集 FPS</h3>
+            <div class="body-box">
+              <div class="muted">当前: <b>238.4</b> | 平均: <b>232.9</b>（120 帧折线，最大量程 144 FPS）</div>
+            </div>
+          </section>
+          <section>
+            <h3>采集详情</h3>
+            <div class="body-box">
+              <div class="muted">采集方式: <b>udp_capture</b>　·　后端: <b>TRT</b></div>
+              <div class="muted">数据源: UDP 0.0.0.0:1234</div>
+              <div class="muted">桌面尺寸: 2560x1440　·　最新帧: 640x640</div>
+              <div class="muted">检测分辨率: 320　·　采集 FPS 上限: 240</div>
+              <div class="muted">帧时间: 当前 4.19 ms | 平均 4.29 ms　·　帧队列深度: 1　·　圆形遮罩: 开</div>
+              <div class="muted">深度遮罩: 开（仅 TRT 后端显示）</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============= 调试 ============= -->
+        <div class="tab-panel" data-panel="debug">
+          <section>
+            <h3>截图按键</h3>
+            <div class="body-box">
+              <div class="row">
+                <span class="chip">MouseButton5<button>×</button></span>
+                <button class="btn">+ 添加</button>
+              </div>
+              <div class="row">
+                <span class="muted" style="min-width:130px">截图延迟 (ms)</span>
+                <input class="text-input" value="200" style="width:100px" />
+              </div>
+              <div class="checkbox on"><span class="box"></span><label>控制台输出详细日志</label></div>
+            </div>
+          </section>
+
+          <section>
+            <h3>瞄准轨迹回放</h3>
+            <div class="body-box">
+              <div class="checkbox"><span class="box"></span><label>启用环形录制</label></div>
+              <div class="muted">关闭时无任何分配；开启后持续把每帧的检测框 / 锁定 ID / 锚点写入环形缓冲。</div>
+              <div class="slider"><div class="slider-label">保留秒数</div><div class="track"><div class="fill" style="width:17%"></div></div><div class="v">10</div></div>
+              <div class="slider"><div class="slider-label">回放速度</div><div class="track"><div class="fill" style="width:13%"></div></div><div class="v">0.25x</div></div>
+              <div class="row">
+                <button class="btn">清空缓冲</button>
+                <button class="btn">快照并慢放</button>
+                <button class="btn">停止回放</button>
+                <span class="muted">缓冲帧数: 312　·　○ 待机</span>
+              </div>
+              <div class="muted">回放窗口浮在画面上方：橙色 = 当前锁定目标；蓝色 = 其他检测；红点 = pivot；红框边 = 该帧热键被按下。</div>
+            </div>
+          </section>
+
+          <section>
+            <h3>动态 FOV (实时)</h3>
+            <div class="body-box">
+              <div class="muted">当前有效 FOV (像素直径): <b>78 × 56</b></div>
+              <div class="muted">瞄准时按目标距准星距离 + bbox 大小动态收缩；近距离正好框住识别框，远距离回到基线最大值。开关与参数在「瞄准热键 → 视野 / FOV」子段。</div>
+            </div>
+          </section>
+        </div>
+
+      </main>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <b>当前 UI 要点</b><br />
+    • 左栏里少掉的：<code>按键绑定</code>（统一到"瞄准热键"）、<code>游戏内叠层</code>（整个模块已移除）；多出来的：<code>瞄准热键</code> 与 <code>硬件</code>。<br />
+    • <b>没有任何运行时硬编码热键</b>：F2 / F3 / F4 / HOME 等旧功能键全部移除；设置窗口在整个会话期间一直可见，无显隐切换。<br />
+    • 侧栏分组按 <code>kOverlayTabs</code> 顺序渲染：<code>核心</code> 与 <code>控制</code> 会按 tab 顺序重复出现（例如 <code>核心 → 控制 → 核心</code>），不是 bug，是当前源码的排列方式。<br />
+    • 目标面板：<code>类别</code> 以"删除 / 过滤 / 瞄准"三栏单选；"删除"的类别在 NMS 后立即丢弃，"过滤"仍可被调试视图看到但不参与瞄准。<br />
+    • 瞄准热键：每个热键持有完整一套 FOV / PID（含<b>吸附锁死力度</b>）/ Kalman 参数；未按下任何热键时鼠标不动。原来的 Snap / Near 独立面板已合并，不再有单独的"目标修正"子段。<br />
+    • <code>鼠标</code> 面板已移除，所有参数并入每个热键自身。<br />
+    • <b>检测预览</b> 现在只在「启动器」面板提供；性能统计面板已移除该子段，只保留耗时分解、采集 FPS 与采集详情。<br />
+    • AI 模型面板包含 <b>深度推理 / 深度遮罩</b> 子段（仅在 TRT 后端可用）。<br />
+    • 界面外观不再有防截屏。
+  </div>
+</div>
+
+<script>
+  (function () {
+    const body = document.body;
+    const stateButtons = document.querySelectorAll('#stateToggle button');
+    stateButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const state = btn.getAttribute('data-state');
+        body.setAttribute('data-state', state);
+        stateButtons.forEach(b => b.classList.toggle('active', b === btn));
+      });
+    });
+
+    const tabs = document.querySelectorAll('.sidebar .tab[data-tab]');
+    const panels = document.querySelectorAll('.tab-panel[data-panel]');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const tabId = tab.getAttribute('data-tab');
+        tabs.forEach(t => t.classList.toggle('active', t === tab));
+        panels.forEach(p => p.classList.toggle('active', p.getAttribute('data-panel') === tabId));
+        document.querySelector('.content').scrollTop = 0;
+      });
+    });
+  })();
+</script>
+</body>
+</html>

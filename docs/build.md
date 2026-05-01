@@ -8,17 +8,10 @@ If you want to compile the project yourself or modify code, follow these instruc
 * **Windows 10 or 11 (x64)**
 * **Windows SDK 10.0.26100.0** or newer
 * **CMake** ([Download](https://cmake.org/))
-* **OpenCV 4.13.0**
-* **\[For CUDA version]**
-
-  * [CUDA Toolkit 13.1](https://developer.nvidia.com/cuda-13-1-0-download-archive)
-  * [cuDNN 9.17.1](https://developer.nvidia.com/cudnn-downloads)
-  * [TensorRT-10.14.1.48](https://developer.nvidia.com/tensorrt/download/10x)
-* **\[For DML version]**
-
-  * Use prebuilt OpenCV package (include/lib/dll), no OpenCV build required.
-  * One-time setup script:
-    `powershell -ExecutionPolicy Bypass -File tools/setup_opencv_dml.ps1`
+* **OpenCV 4.13.0** (must be built with CUDA support — see §3)
+* [CUDA Toolkit 13.1](https://developer.nvidia.com/cuda-13-1-0-download-archive)
+* [cuDNN 9.17.1](https://developer.nvidia.com/cudnn-downloads)
+* [TensorRT-10.14.1.48](https://developer.nvidia.com/tensorrt/download/10x)
 * Other dependencies:
 
   * [simpleIni](https://github.com/brofield/simpleini/blob/master/SimpleIni.h)
@@ -33,8 +26,8 @@ Before building the project, **download and place all third-party dependencies**
 **Required folders inside your repository:**
 
 ```
-sunone_aimbot_2/
-└── sunone_aimbot_2/
+Apotheosis/
+└── Apotheosis/
     └── modules/
 ```
 
@@ -42,11 +35,11 @@ sunone_aimbot_2/
 
 | Library   | Path                                                              |
 | --------- | ----------------------------------------------------------------- |
-| SimpleIni | `sunone_aimbot_2/sunone_aimbot_2/modules/SimpleIni.h`         |
-| serial    | `sunone_aimbot_2/sunone_aimbot_2/modules/serial/`             |
-| TensorRT  | `sunone_aimbot_2/sunone_aimbot_2/modules/TensorRT-10.14.1.48/` |
-| GLFW      | `sunone_aimbot_2/sunone_aimbot_2/modules/glfw-3.4.bin.WIN64/` |
-| OpenCV    | `sunone_aimbot_2/sunone_aimbot_2/modules/opencv/`             |
+| SimpleIni | `Apotheosis/Apotheosis/modules/SimpleIni.h`         |
+| serial    | `Apotheosis/Apotheosis/modules/serial/`             |
+| TensorRT  | `Apotheosis/Apotheosis/modules/TensorRT-10.14.1.48/` |
+| GLFW      | `Apotheosis/Apotheosis/modules/glfw-3.4.bin.WIN64/` |
+| OpenCV    | `Apotheosis/Apotheosis/modules/opencv/`             |
 
 * **SimpleIni:**
   Download [`SimpleIni.h`](https://github.com/brofield/simpleini/blob/master/SimpleIni.h)
@@ -65,14 +58,13 @@ sunone_aimbot_2/
   Place the folder as shown above.
 
 * **OpenCV:**
-  For DML, run `tools/setup_opencv_dml.ps1` (downloads prebuilt OpenCV package).
-  For CUDA, use your custom OpenCV build with CUDA support.
+  Use a custom OpenCV build with CUDA support (see §3). The fused DML + TensorRT binary links against a single CUDA-enabled OpenCV and serves both runtime backends.
 
 **Example structure after setup:**
 
 ```
-sunone_aimbot_2/
-└── sunone_aimbot_2/
+Apotheosis/
+└── Apotheosis/
 	└── modules/
 		├── SimpleIni.h
         ├── serial/
@@ -81,10 +73,9 @@ sunone_aimbot_2/
         └── opencv/
 ```
 
-## 3. How to Build OpenCV 4.13.0 with CUDA Support (For CUDA Version Only)
+## 3. How to Build OpenCV 4.13.0 with CUDA Support
 
-> This section is **only required** if you want to use the CUDA (TensorRT) version and need OpenCV with CUDA support.
-> For DML build, skip this step — you can use the pre-built OpenCV DLL.
+> This step is **required**. The fused DML + TensorRT binary always links against a CUDA-enabled OpenCV, even though DirectML is selectable at runtime.
 
 **Fast path (recommended):**
 
@@ -135,12 +126,12 @@ Useful options:
 2. **Prepare Directories**
 
 	* Create:
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/`
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build`
+		`Apotheosis/Apotheosis/modules/opencv/`
+		`Apotheosis/Apotheosis/modules/opencv/build`
 	* Extract `opencv-4.13.0` into
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/opencv-4.13.0`
+		`Apotheosis/Apotheosis/modules/opencv/opencv-4.13.0`
 	* Extract `opencv_contrib-4.13.0` into
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/opencv_contrib-4.13.0`
+		`Apotheosis/Apotheosis/modules/opencv/opencv_contrib-4.13.0`
 	* install cuDNN
 		Default install path `C:/Program Files/NVIDIA/CUDNN/v9.17`
 
@@ -148,9 +139,9 @@ Useful options:
 
 	* Open CMake GUI
 	* Source code:
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/opencv-4.13.0`
+		`Apotheosis/Apotheosis/modules/opencv/opencv-4.13.0`
 	* Build directory:
-		`sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build`
+		`Apotheosis/Apotheosis/modules/opencv/build`
 	* Click **Configure**
 		(Choose "Visual Studio 18 2026", x64)
 
@@ -164,15 +155,15 @@ Useful options:
 		* `CUDA_FAST_MATH` = ON
 		* `WITH_CUDNN` = ON
 		* `CUDNN_LIBRARY` =
-			`.../sunone_aimbot_2/sunone_aimbot_2/modules/cudnn/lib/x64/cudnn.lib`
+			`.../Apotheosis/Apotheosis/modules/cudnn/lib/x64/cudnn.lib`
 		* `CUDNN_INCLUDE_DIR` =
-			`.../sunone_aimbot_2/sunone_aimbot_2/modules/cudnn/include`
+			`.../Apotheosis/Apotheosis/modules/cudnn/include`
 		* `CUDA_ARCH_BIN` =
 			See [CUDA Wikipedia](https://en.wikipedia.org/wiki/CUDA) for your GPU.
 			Example for RTX 3080-Ti: `8.6`
 		* `OPENCV_DNN_CUDA` = ON
 		* `OPENCV_EXTRA_MODULES_PATH` =
-			`.../sunone_aimbot_2/sunone_aimbot_2/modules/opencv/opencv_contrib-4.13.0/modules`
+			`.../Apotheosis/Apotheosis/modules/opencv/opencv_contrib-4.13.0/modules`
 		* `BUILD_opencv_world` = ON
 	* Uncheck:
 
@@ -185,7 +176,7 @@ Useful options:
 
 5. **Build in Visual Studio**
 
-   * Open `sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build/OpenCV.sln`
+   * Open `Apotheosis/Apotheosis/modules/opencv/build/OpenCV.sln`
      or click "Open Project" in CMake
    * Set build config: **x64 | Release**
    * Build `ALL_BUILD` target (can take up to 2 hours)
@@ -194,71 +185,45 @@ Useful options:
 6. **Copy Resulting DLLs**
 
    * DLLs:
-     `sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build/install/x64/vc*/bin/`
+     `Apotheosis/Apotheosis/modules/opencv/build/install/x64/vc*/bin/`
    * LIBs:
-     `sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build/install/x64/vc*/lib/`
+     `Apotheosis/Apotheosis/modules/opencv/build/install/x64/vc*/lib/`
    * Includes:
-     `sunone_aimbot_2/sunone_aimbot_2/modules/opencv/build/install/include/opencv2`
+     `Apotheosis/Apotheosis/modules/opencv/build/install/include/opencv2`
    * Copy needed DLLs (`opencv_world4130.dll`, etc.) next to your project’s executable.
 
-## 4. Notes on OpenCV for CUDA/DML
+## 4. Notes on OpenCV
 
-* **For CUDA build (TensorRT backend):**
-
-  * You **must** build OpenCV with CUDA support (see the guide above).
-  * Place all built DLLs (e.g., `opencv_world4130.dll`) next to your executable or in the `modules` folder.
-* **For DML build (DirectML backend):**
-
-  * Use prebuilt OpenCV package (include/lib/dll) if you **only** plan to use DirectML.
-  * OpenCV runtime for DML must not import CUDA (`cudnn/cublas/npp`) or GStreamer (`gst*`) DLLs.
-  * If you want to use both CUDA and DML modes in the same executable, you should always use your custom OpenCV build with CUDA enabled (it will work for both modes).
-* **Note:**
-  If you run the CUDA backend with non-CUDA OpenCV DLLs, the program will not work and may crash due to missing symbols.
+* You **must** build OpenCV with CUDA support (see §3). This is non-optional now that the binary fuses DML + TensorRT.
+* Place all built DLLs (e.g., `opencv_world4130.dll`) next to your executable. CMake will copy them automatically when `AIMBOT_COPY_RUNTIME_DLLS=ON` (the default).
+* Running the produced `ai.exe` against non-CUDA OpenCV DLLs will crash on startup due to missing symbols.
 
 ## 5. Configure and Build Project
 
-After sections 2-4 are complete, configure one backend with CMake.
+After sections 2-4 are complete, configure the project with CMake:
 
-Use separate build directories for each backend:
+```powershell
+cmake -S . -B build/cuda -G "Visual Studio 18 2026" -A x64 `
+  -DCMAKE_CUDA_FLAGS="--allow-unsupported-compiler" `
+  -DCUDA_NVCC_FLAGS="--allow-unsupported-compiler"
+cmake --build build/cuda --config Release
+```
 
-* **DML (DirectML):**
-
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File tools/setup_opencv_dml.ps1
-  Remove-Item build/dml -Recurse -Force -ErrorAction SilentlyContinue
-  cmake -S . -B build/dml -G "Visual Studio 18 2026" -A x64 -DAIMBOT_USE_CUDA=OFF
-  cmake --build build/dml --config Release
-  ```
-
-  For DML build, OpenCV must be built **without CUDA** and **without GStreamer**.
-  The setup script downloads prebuilt OpenCV and places it in
-  `sunone_aimbot_2/modules/opencv/prebuilt/opencv/build` (auto-detected by CMake).
-
-* **CUDA (TensorRT):**
-
-  ```powershell
-  cmake -S . -B build/cuda -G "Visual Studio 18 2026" -A x64 `
-    -DAIMBOT_USE_CUDA=ON `
-    -DCMAKE_CUDA_FLAGS="--allow-unsupported-compiler" `
-    -DCUDA_NVCC_FLAGS="--allow-unsupported-compiler"
-  cmake --build build/cuda --config Release
-  ```
-
-Only `Visual Studio 18 2026` is supported for this project.
+Only `Visual Studio 18 2026` is supported for this project. The binary bundles both DirectML and TensorRT; users pick between them at runtime from the overlay (HOME key) — no second build needed.
 
 If your dependencies are stored in non-default paths, pass CMake cache variables, for example:
 
 ```powershell
-cmake -S . -B build/dml -G "Visual Studio 18 2026" -A x64 `
+cmake -S . -B build/cuda -G "Visual Studio 18 2026" -A x64 `
   -DAIMBOT_OPENCV_INCLUDE_DIR="C:/opencv/include" `
   -DAIMBOT_OPENCV_LIBRARY="C:/opencv/lib/opencv_world4130.lib" `
   -DAIMBOT_ONNXRUNTIME_DIR="C:/packages/Microsoft.ML.OnnxRuntime.DirectML.1.22.0" `
   -DAIMBOT_CPPWINRT_INCLUDE_DIR="C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/cppwinrt"
 ```
 
-You can open the generated solution from the build folder (`build/dml` or `build/cuda`) if you prefer building from Visual Studio UI.
+You can open the generated solution from `build/cuda/` if you prefer building from Visual Studio UI.
 
-Run `ai.exe` from `<build-dir>/Release/`.
+Run `ai.exe` from `build/cuda/Release/`.
 
 ## 6. Exporting AI Models
 

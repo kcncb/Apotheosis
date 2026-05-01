@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>Apotheosis · 调参文档</title>
+<style>
+  :root {
+    --bg-page: #0b0c10;
+    --bg-card: rgba(20, 22, 28, 0.96);
+    --border-subtle: #2a2d36;
+    --text: #e8ecf3;
+    --text-muted: #98a2b3;
+    --text-dim: #6b7384;
+    --accent: #3b82f6;
+    --accent-warm: #f59e0b;
+    --accent-bad: #ef4444;
+    --accent-good: #10b981;
+    --code-bg: #15171d;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg-page);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14.5px;
+    line-height: 1.75;
+  }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(10, 11, 16, 0.92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 14px 32px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .topbar h1 { margin: 0; font-size: 18px; font-weight: 700; }
+  .topbar .sub { color: var(--text-muted); font-size: 12.5px; }
+  .topbar .back {
+    margin-left: auto;
+    display: inline-block; padding: 7px 14px;
+    background: #1a1d24; color: var(--text);
+    text-decoration: none; font-size: 12.5px; font-weight: 600;
+    border: 1px solid var(--border-subtle); border-radius: 6px;
+  }
+  .topbar .back:hover { background: #22262f; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: calc(100vh - 60px);
+  }
+
+  /* ---- TOC ---- */
+  .toc {
+    position: sticky; top: 65px;
+    align-self: start;
+    height: calc(100vh - 80px); overflow: auto;
+    padding: 24px 8px 24px 24px;
+    border-right: 1px solid var(--border-subtle);
+    font-size: 13px;
+  }
+  .toc .toc-group {
+    color: var(--text-dim); text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.06em;
+    margin: 18px 0 6px 0;
+  }
+  .toc a {
+    display: block; padding: 4px 8px; margin: 2px 0;
+    color: var(--text-muted); text-decoration: none;
+    border-left: 2px solid transparent; border-radius: 0 4px 4px 0;
+  }
+  .toc a:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+  .toc a.active { color: var(--text); border-left-color: var(--accent); background: rgba(59,130,246,0.08); }
+
+  /* ---- main ---- */
+  main { padding: 28px 36px 80px 36px; min-width: 0; }
+
+  h2 {
+    margin: 36px 0 12px 0; padding-bottom: 8px;
+    font-size: 22px; font-weight: 700;
+    border-bottom: 1px solid var(--border-subtle);
+    scroll-margin-top: 80px;
+  }
+  h3 {
+    margin: 24px 0 8px 0; font-size: 17px; font-weight: 600;
+    color: #d6dde8; scroll-margin-top: 80px;
+  }
+  h4 { margin: 16px 0 6px 0; font-size: 14.5px; color: var(--text-muted); }
+
+  p { margin: 8px 0; color: var(--text); }
+  .lead { color: var(--text-muted); font-size: 14px; }
+
+  code {
+    background: var(--code-bg); border: 1px solid var(--border-subtle);
+    padding: 1px 6px; border-radius: 4px;
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 12.5px; color: #ffd692;
+  }
+  b { color: #ffffff; }
+  em { color: var(--text-muted); font-style: normal; }
+
+  /* ---- callouts ---- */
+  .note, .warn, .tip, .pitfall {
+    margin: 14px 0; padding: 12px 16px;
+    border-left: 4px solid; border-radius: 0 6px 6px 0;
+    background: var(--bg-card); font-size: 13.5px;
+  }
+  .note    { border-color: var(--accent);      }
+  .tip     { border-color: var(--accent-good); }
+  .warn    { border-color: var(--accent-warm); }
+  .pitfall { border-color: var(--accent-bad);  }
+  .note::before    { content: "💡 提示  · ";  font-weight: 700; color: var(--accent); }
+  .tip::before     { content: "✅ 经验  · ";  font-weight: 700; color: var(--accent-good); }
+  .warn::before    { content: "⚠️ 注意  · ";  font-weight: 700; color: var(--accent-warm); }
+  .pitfall::before { content: "❌ 常见坑 · ";  font-weight: 700; color: var(--accent-bad); }
+
+  /* ---- param table ---- */
+  table.params {
+    border-collapse: collapse; width: 100%;
+    margin: 12px 0; font-size: 13px;
+  }
+  table.params th, table.params td {
+    border: 1px solid var(--border-subtle);
+    padding: 8px 10px; vertical-align: top; text-align: left;
+  }
+  table.params th {
+    background: #14171e; color: var(--text-muted);
+    font-weight: 600; font-size: 12px;
+  }
+  table.params tr:nth-child(odd) td { background: rgba(255,255,255,0.015); }
+  table.params td:nth-child(1) { white-space: nowrap; }
+  table.params td:nth-child(2) { white-space: nowrap; color: var(--text-muted); font-family: monospace; }
+
+  /* ---- step list ---- */
+  ol.steps {
+    counter-reset: step;
+    list-style: none; padding: 0;
+  }
+  ol.steps > li {
+    counter-increment: step;
+    position: relative;
+    padding: 10px 0 10px 50px;
+    margin: 10px 0;
+    border-left: 1px dashed var(--border-subtle);
+    margin-left: 16px;
+  }
+  ol.steps > li::before {
+    content: counter(step);
+    position: absolute; left: -16px; top: 8px;
+    width: 30px; height: 30px;
+    background: var(--accent); color: #fff;
+    border-radius: 50%; font-weight: 700; font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  }
+  ol.steps > li b { color: #ffffff; }
+
+  /* ---- "what / why / how" stripe ---- */
+  .wwh {
+    display: grid; grid-template-columns: 110px 1fr; gap: 8px 16px;
+    margin: 8px 0 16px 0; padding: 12px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle); border-radius: 6px;
+    font-size: 13.5px;
+  }
+  .wwh .k { color: var(--text-dim); font-size: 12px; padding-top: 2px; }
+  .wwh .v { color: var(--text); }
+
+  /* ---- two-column compare ---- */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+  .compare > div {
+    padding: 10px 14px; border-radius: 6px; font-size: 13px;
+    border: 1px solid var(--border-subtle); background: var(--bg-card);
+  }
+  .compare .bad  { border-left: 3px solid var(--accent-bad); }
+  .compare .good { border-left: 3px solid var(--accent-good); }
+
+  hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 30px 0; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Apotheosis · 调参文档</h1>
+  <span class="sub">— 从零到能用的完整流程，每个参数都讲清"为什么"</span>
+  <a class="back" href="launcher_preview.html">← 返回 UI 预览</a>
+</div>
+
+<div class="layout">
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc" id="toc">
+    <div class="toc-group">入门</div>
+    <a href="#intro">这份文档怎么用</a>
+    <a href="#mental-model">系统的整体心智模型</a>
+    <a href="#sop">推荐调参顺序 (SOP)</a>
+
+    <div class="toc-group">采集与检测</div>
+    <a href="#capture">画面采集</a>
+    <a href="#detection">检测分辨率与阈值</a>
+    <a href="#class-bucket">类别分桶 (删除/过滤/瞄准)</a>
+
+    <div class="toc-group">瞄准热键</div>
+    <a href="#hotkey-keys">按键绑定</a>
+    <a href="#hotkey-classes">瞄准类别 + Y 偏移</a>
+    <a href="#fov">视野 / 动态 FOV</a>
+    <a href="#pid">PID 与 Flick/Track 双模式</a>
+    <a href="#kalman">Kalman 兜底 + 类别覆盖</a>
+    <a href="#aim-lock">吸附锁死力度</a>
+    <a href="#yoffset-decay">Y 偏移距离衰减</a>
+    <a href="#hysteresis">目标切换迟滞</a>
+    <a href="#threat">威胁度优先级</a>
+    <a href="#trigger">智能扳机 (自动开火)</a>
+    <a href="#crosshair-detect">准星找色</a>
+
+    <div class="toc-group">深度遮罩</div>
+    <a href="#depth">深度推理 + 抑制占比</a>
+
+    <div class="toc-group">硬件输入</div>
+    <a href="#input">输入设备</a>
+
+    <div class="toc-group">调试与回放</div>
+    <a href="#replay">瞄准轨迹回放</a>
+    <a href="#dynamic-fov-readout">动态 FOV 实时读数</a>
+
+    <div class="toc-group">附录</div>
+    <a href="#troubleshoot">常见故障速查</a>
+    <a href="#glossary">术语表</a>
+  </nav>
+
+  <!-- ===================== MAIN ===================== -->
+  <main>
+
+    <!-- ============ 入门 ============ -->
+    <h2 id="intro">这份文档怎么用</h2>
+    <p class="lead">
+      Apotheosis 是一个把"识别 → 跟踪 → 控制 → 反馈"四段流水线串起来的实时系统。每个模块都至少有 3 个相互耦合的旋钮，从零盲调几乎一定走偏。这份文档的目标是：
+    </p>
+    <ul>
+      <li>每个参数都讲三件事：<b>它是什么</b> · <b>它为什么存在</b> · <b>怎么影响表现</b>。</li>
+      <li>给一份从零到能用的<b>顺序</b>——你按这个顺序调，每一步只动一组参数，前一步不稳后一步不动。</li>
+      <li>常见坑写在每一节末尾的红框里。</li>
+    </ul>
+
+    <div class="tip">
+      第一次接触强烈建议先读 <a href="#mental-model">系统心智模型</a> 和 <a href="#sop">推荐调参顺序</a>，再跳到具体模块。
+    </div>
+
+    <!-- ============ 心智模型 ============ -->
+    <h2 id="mental-model">系统的整体心智模型</h2>
+    <p>
+      把整个 ai.exe 想象成五条<b>独立的线程</b>，通过几个共享原子量串起来：
+    </p>
+    <ol>
+      <li><b>采集线程</b>：把屏幕（或网络流）抓成 <code>detection_resolution × detection_resolution</code> 的方块图。</li>
+      <li><b>检测线程</b>：YOLO（DML 或 TRT 后端）跑一帧，输出 <code>boxes + class_ids</code>。可选叠一层「深度遮罩抑制」。</li>
+      <li><b>跟踪线程</b>：<code>MultiTargetTracker</code> 把这些 box 关联到长生命周期的 <code>track</code>，挑一个作为 <b>locked target</b>。</li>
+      <li><b>鼠标线程</b>：根据 locked target 的 pivot 跑 PID + Kalman，输出鼠标 dx/dy；同时跑智能扳机判断是否开枪。</li>
+      <li><b>叠层线程</b>：渲染所有调试信息（不参与控制循环）。</li>
+    </ol>
+    <p>
+      关键观察：<b>检测的"瞄准锚点"（pivot）和鼠标的"控制目标点"是同一个值</b>。锚点抖一下，鼠标就抖一下；锚点跳到墙上，鼠标就把你瞄准线拉到墙上。所以——
+    </p>
+    <div class="note">
+      <b>调参的核心原则</b>：先把 pivot 调稳（采集 + 检测 + tracker 部分），<b>再</b>调 PID / Kalman / 扳机。pivot 不稳的情况下调 PID 是在拟合噪声。
+    </div>
+
+    <!-- ============ SOP ============ -->
+    <h2 id="sop">推荐调参顺序 (SOP)</h2>
+    <p>
+      照这个顺序走。除非上一阶段稳定，<b>不要</b>跳到下一阶段。
+    </p>
+    <ol class="steps">
+      <li><b>第一步：采集稳</b><br>选好 capture 后端，确认<code>采集 FPS</code>不掉帧、画面无撕裂。<a href="#capture">详细 →</a></li>
+      <li><b>第二步：检测准</b><br>调<code>confidence_threshold</code>到刚好不丢真目标也不出虚警；调好<code>NMS</code>。把无关类别先丢"删除"桶。<a href="#detection">详细 →</a></li>
+      <li><b>第三步：类别选对</b><br>把要瞄的类别挪到"瞄准"桶，给每类设合理的<code>Y 偏移</code>（头≈0.15，胸≈0.45）。<a href="#class-bucket">详细 →</a></li>
+      <li><b>第四步：FOV 设大点</b><br>先把 FOV 开到舒适最大值（130×90 左右），<b>不要</b>立刻打开动态 FOV。<a href="#fov">详细 →</a></li>
+      <li><b>第五步：单模式 PID 走稳</b><br>关掉 Flick/Track 双模式，只调<b>Flick</b> 那一组。先 P，再 D，I 几乎一直 0。能跟上目标就够了，宁慢勿过冲。<a href="#pid">详细 →</a></li>
+      <li><b>第六步：Kalman 兜底</b><br>开 Kalman，调<code>reset 超时</code>和<code>Warmup</code>。让目标短暂消失时鼠标不要乱跑。<a href="#kalman">详细 →</a></li>
+      <li><b>第七步：增强稳定性</b><br>开<a href="#hysteresis">切换迟滞</a>+<a href="#yoffset-decay">Y 偏移衰减</a>。两件事都是"近距离防抖"。</li>
+      <li><b>第八步：解决长得像的目标干扰</b><br>开<a href="#threat">威胁度优先级</a>+<a href="#depth">深度遮罩</a>。</li>
+      <li><b>第九步：极致跟枪</b><br>开 Flick/Track 双模式：Flick 高 P 用第五步的值；Track 把 P 砍半，加 D。<a href="#pid">详细 →</a></li>
+      <li><b>第十步：动态 FOV</b><br>先把基线 FOV 调到能稳定锁主目标的最小值，再开动态 FOV，调内边距系数到 1.10~1.30。<a href="#fov">详细 →</a></li>
+      <li><b>第十一步：智能扳机</b><br>最后一步。前面任何一项不稳，都不要开扳机——只会越打越错。<a href="#trigger">详细 →</a></li>
+    </ol>
+
+    <hr>
+
+    <!-- ============ 采集 ============ -->
+    <h2 id="capture">画面采集</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">把屏幕画面变成检测器吃的张量。</div>
+      <div class="k">为什么有</div><div class="v">不同采集方式（UDP / TCP / OpenCV）在延迟、稳定性、部署复杂度和外部采集设备兼容性上取舍不同。</div>
+      <div class="k">影响</div><div class="v">直接决定<b>端到端延迟</b>和<b>掉帧率</b>。系统其他所有部分都建立在采集稳定的前提上。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>capture_method</td><td>udp_capture</td><td>三选一：<code>udp_capture</code>（外部机器 UDP 推流）/ <code>tcp_capture</code>（TCP 推流，稳定优先）/ <code>opencv_capture</code>（摄像头、采集卡、RTSP/文件流）。旧的 DXGI / WinRT 采集入口已不再作为配置选项。</td></tr>
+        <tr><td>udp_ip / udp_port</td><td>-</td><td>UDP 推流监听地址和端口。用外部机器采集时最常调。</td></tr>
+        <tr><td>tcp_ip / tcp_port</td><td>-</td><td>TCP 推流地址和端口。网络波动大时比 UDP 更稳，但延迟可能更高。</td></tr>
+        <tr><td>opencv_capture_index / api</td><td>0 / DSHOW</td><td>OpenCV 采集设备号与 API：<code>DSHOW / MSMF / FFMPEG / ANY</code>。采集卡优先试 DSHOW，网络流优先 FFMPEG。</td></tr>
+        <tr><td>opencv_capture_url</td><td>空</td><td>可选连接 URL，例如 RTSP、HTTP 或视频文件路径。填写后通常会覆盖设备号的意义。</td></tr>
+        <tr><td>opencv_capture_width / height / fps</td><td>0 / 0 / 0</td><td>OpenCV 输入请求分辨率和帧率。0 表示让设备或流自行决定。</td></tr>
+        <tr><td>detection_resolution</td><td>320</td><td>截下来后压成的方形边长。<b>必须是 160 / 320 / 640 之一</b>。值越大检测越准但 GPU 负担线性涨。</td></tr>
+        <tr><td>capture_fps</td><td>60</td><td>采集线程节流上限。设过高反而会让 GPU 抢占检测时间。和你显示器刷新率匹配即可。</td></tr>
+        <tr><td>circle_mask</td><td>true</td><td>把方框外的圆角用黑掩遮罩。多数游戏 UI（雷达、技能图标）在四个角，开它能减虚警。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li>在游戏里跑一局，把"采集预览"窗口对着屏幕看是否流畅。<b>有撕裂、黑屏或卡顿</b>优先换采集后端。</li>
+      <li>如果用 <code>udp_capture</code> 或 <code>tcp_capture</code>，先把 IP / 端口对好——进游戏看不到画面通常就是这里的问题。</li>
+      <li>如果用 <code>opencv_capture</code>，先试 <code>DSHOW</code>，不出图再试 <code>MSMF</code>；RTSP/文件流优先填 <code>opencv_capture_url</code> 并选 <code>FFMPEG</code>。</li>
+      <li><code>detection_resolution</code> 默认 320 适合大多数情况。<b>瞄远距离或小目标</b>提到 640；<b>追求最低延迟</b>降到 160。</li>
+    </ol>
+
+    <div class="pitfall">
+      切换 <code>detection_resolution</code> 后 tracker 会自动 reset。所以如果你正在调 Kalman 千万别中途改这个值，否则之前调的全白调。
+    </div>
+
+    <!-- ============ 检测 ============ -->
+    <h2 id="detection">检测分辨率与阈值</h2>
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>backend</td><td>TRT</td><td>TRT 比 DML 快 2–4 倍但只能在 NVIDIA。无 CUDA 自动 fallback 到 DML。</td></tr>
+        <tr><td>ai_model</td><td>sunxds_0.5.6.engine</td><td>YOLO 引擎文件。<b>每个模型有自己的类别 id</b>——换模型后必须重新做"类别分桶"。</td></tr>
+        <tr><td>confidence_threshold</td><td>0.10</td><td>低于这个置信度的检测直接丢。<b>这是降虚警的第一道闸</b>。</td></tr>
+        <tr><td>nms_threshold</td><td>0.50</td><td>非极大值抑制 IoU 阈值。值越小同一个目标越不容易被拆成两个框，但贴在一起的两人越容易被合并成一个。</td></tr>
+        <tr><td>max_detections</td><td>100</td><td>每帧最多输出多少个 box。够用就行，过大白白吃 NMS 算力。</td></tr>
+        <tr><td>dml_device_id</td><td>0</td><td>DML 后端使用的显卡序号。多显卡机器可用它指定 DirectML 设备。</td></tr>
+        <tr><td>export_enable_fp8</td><td>false</td><td>导出 TensorRT engine 时是否尝试 FP8。仅在显卡、TensorRT 和模型都支持时才有意义。</td></tr>
+        <tr><td>export_enable_fp16</td><td>true</td><td>导出 TensorRT engine 时启用 FP16。大多数 NVIDIA 显卡都建议保持开启。</td></tr>
+        <tr><td>fixed_input_size</td><td>false</td><td>导出/推理时是否固定输入尺寸。需要和模型、engine 构建方式一致。</td></tr>
+        <tr><td>use_cuda_graph</td><td>false</td><td>TRT 路径的 CUDA Graph 优化开关。可降低调度开销，但和双缓冲流水线二选一。</td></tr>
+        <tr><td>use_double_buffer</td><td>false</td><td>双缓冲流水线：让第 N 帧 CPU 后处理与第 N+1 帧 GPU 预处理/推理重叠。吞吐更好，但会换来约 1 帧延迟。</td></tr>
+        <tr><td>use_pinned_memory</td><td>false</td><td>使用页锁定内存加速 CPU↔GPU 传输。内存很紧或驱动异常时保持关闭；要压榨传输性能时再单独测试打开。</td></tr>
+        <tr><td>gpuMemoryReserveMB</td><td>2048</td><td>给系统和游戏预留的显存预算，避免推理把显存吃满导致游戏掉帧。</td></tr>
+        <tr><td>enableGpuExclusiveMode</td><td>true</td><td>GPU 资源保护开关。资源紧张时优先保证游戏和系统仍有余量。</td></tr>
+        <tr><td>capture_use_cuda</td><td>true</td><td>采集预处理尽量走 CUDA。关闭后更多工作落到 CPU，兼容性可能更好但延迟通常更高。</td></tr>
+        <tr><td>cpuCoreReserveCount</td><td>4</td><td>预留给系统和游戏的 CPU 核心数量，避免检测线程把 CPU 榨满。</td></tr>
+        <tr><td>systemMemoryReserveMB</td><td>2048</td><td>预留系统内存，防止长时间运行时因内存压力卡顿。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li>站桩看真实目标，调高 <code>confidence_threshold</code> 直到刚好不丢识别（通常 0.15 ~ 0.30）。</li>
+      <li>对着空场景（没人）看 1 分钟。如果偶尔出虚警，再上调 0.05；如果连真目标都丢，下调 0.05。</li>
+      <li>如果两个目标贴在一起经常被合并：把 <code>nms_threshold</code> 从 0.50 降到 0.40。</li>
+      <li>TRT 后端先保持 <code>use_cuda_graph=false</code> 和 <code>use_double_buffer=false</code> 调准功能；稳定后再单独测试性能开关，两个不要同时开。</li>
+    </ol>
+
+    <!-- ============ 类别分桶 ============ -->
+    <h2 id="class-bucket">类别分桶（删除 / 过滤 / 瞄准）</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">每个模型类别可被分到三个桶。</div>
+      <div class="k">为什么有</div><div class="v">同一个模型可能输出 80 个类别（COCO），其中只有 person/head 真正有意义。</div>
+      <div class="k">影响</div><div class="v">"删除"=NMS 后立刻丢，下游完全不知道；"过滤"=保留可见但不进瞄准候选池；"瞄准"=可被锁定。</div>
+    </div>
+
+    <div class="compare">
+      <div class="bad"><b>错误用法</b><br>把 <code>chair / dog / bottle</code> 留在"过滤"桶，本以为不影响——但 tracker 仍然花时间维护它们的轨迹。</div>
+      <div class="good"><b>正确用法</b><br>不需要的类别<b>一律设成"删除"</b>。"过滤"只用于 debug 期间想看见检测框但暂时不想瞄的类别。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>桶</th><th>配置值</th><th>进入哪些流程</th></tr></thead>
+      <tbody>
+        <tr><td>删除</td><td><code>Delete</code></td><td>NMS 后立刻丢弃，不进 tracker、不显示、不参与瞄准。</td></tr>
+        <tr><td>过滤</td><td><code>Filter</code></td><td>保留在检测缓冲，可用于调试显示、深度遮罩观察等，但不会进入瞄准候选池。</td></tr>
+        <tr><td>瞄准</td><td><code>Aim</code></td><td>进入 tracker 和锁定候选池，是否被某个热键使用还要看该热键的 <code>aim_classes</code>。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      模型切换后系统会按模型元数据同步类别表：旧类别尽量保留桶设置，新出现的类别默认进"删除"。类别名优先来自 ONNX 元数据，其次读取同名 <code>.json</code> / <code>.names</code> 旁路文件，最后退回 <code>class_N</code>。
+    </div>
+
+    <!-- ============ 按键 ============ -->
+    <h2 id="hotkey-keys">按键绑定</h2>
+    <p>
+      Apotheosis <b>只允许鼠标四键</b>触发瞄准：左/右/侧键 X1/X2。键盘键和数字键全部不接受——这是为了防止误触发以及兼容硬件输入设备。
+    </p>
+    <div class="warn">
+      可以创建多个热键，按下时<b>列表里第一个匹配的生效</b>。同时按多个会按列表顺序选。所以"主瞄"放上面、"仅头瞄"放下面是常见配置。
+    </div>
+
+    <!-- ============ 类别 + Y 偏移 ============ -->
+    <h2 id="hotkey-classes">瞄准类别 + Y 偏移</h2>
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>aim_classes</td><td>[]</td><td>本热键关心的类别列表，<b>顺序就是优先级</b>。</td></tr>
+        <tr><td>y_offset</td><td>0.50</td><td>每类独立。0=瞄 bbox 顶（头）、0.5=中心（胸）、1=底（脚）。</td></tr>
+        <tr><td>aim_class_kalman_N</td><td>关闭</td><td>每个瞄准类别可独立覆盖 Kalman 的位置噪声、速度噪声、测量噪声、速度衰减和最大速度。用于同一热键同时瞄 head/body 时避免一套参数两边都不合适。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>典型配置</h4>
+    <ul>
+      <li>头部专精：<code>head: y=0.10</code> 单独一项。</li>
+      <li>主瞄混合：<code>head: y=0.15</code>（优先一）+ <code>person: y=0.40</code>（优先二，胸口偏上）。</li>
+    </ul>
+
+    <div class="tip">
+      Y 偏移设 0 容易瞄到头顶帽子上方的空位（bbox 通常会包到帽子）。<b>头瞄留 0.10 ~ 0.20 的余量</b>更稳。
+    </div>
+
+    <!-- ============ FOV ============ -->
+    <h2 id="fov">视野 / FOV / 动态 FOV</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">"瞄准区域"——准星周围多大范围内的检测才算候选。</div>
+      <div class="k">为什么有</div><div class="v">没有 FOV，所有屏幕上的目标都会被认作候选，背后转身的人会被优先锁。</div>
+      <div class="k">影响</div><div class="v">FOV 大 → 反应灵活但易误锁；FOV 小 → 钉死主目标但闪不过去。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>FOV X / FOV Y</td><td>106 / 74</td><td>椭圆区域的<b>直径</b>，单位是检测分辨率像素。<br>例如 detection_resolution=320，FOV X=106 → 区域横向占屏宽 106/320 ≈ 1/3。</td></tr>
+        <tr><td>dynamic_fov_enabled</td><td>off</td><td>开启后 FOV 按瞄准距离动态收缩。</td></tr>
+        <tr><td>dynamic_fov_margin_frac</td><td>1.10</td><td>收紧时 = bbox × 这个倍数。1.10 ≈ "正好框住识别框留 10% 余量"。</td></tr>
+        <tr><td>dynamic_fov_min_radius_frac</td><td>0.20</td><td>收缩下限 = 基线 FOV × 这个比例。防止极小目标导致 FOV 几乎归零。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>动态 FOV 是怎么工作的</h4>
+    <p>每帧（在 tracker 跑之前）：</p>
+    <ol>
+      <li>取上一帧锁定目标的 pivot 与 bbox。</li>
+      <li>算 <code>err = |pivot - 准星|</code>。</li>
+      <li>shrink_alpha = <code>clamp(1 - err / 基线半径, 0, 1)</code>。
+        <ul><li>err = 0（瞄准） → alpha=1 → 收最紧</li>
+          <li>err ≥ 基线半径（边缘） → alpha=0 → 用基线最大值</li></ul></li>
+      <li>有效 FOV = <code>lerp(基线, bbox × margin, alpha)</code>。</li>
+    </ol>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li><b>关掉</b>动态 FOV。把 FOV X/Y 调到能舒适锁住主目标的<b>最小</b>值（不是最大！）。常见 80×60 ~ 130×90。</li>
+      <li>能稳定锁住目标后，<b>开</b>动态 FOV。</li>
+      <li><code>margin_frac</code> 默认 1.10。<b>跟枪经常在收缩瞬间丢锁</b>就提到 1.20、1.30。</li>
+      <li><code>min_radius_frac</code> 一般不动。如果常打远距离小目标，可以提到 0.30。</li>
+      <li>在调试面板「动态 FOV (实时)」看实时数值，确认收缩在合理范围（不要看到 5×5 这种极小数）。</li>
+    </ol>
+
+    <!-- ============ PID ============ -->
+    <h2 id="pid">PID 与 Flick/Track 双模式</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">把"目标 - 准星 = 误差"映射成"鼠标 dx/dy"的控制器。</div>
+      <div class="k">为什么有</div><div class="v">误差大就要发力赶过去（P），但发力过猛会过冲（用 D 阻尼），稳态偏差用 I 抹平（实战中几乎不用）。</div>
+      <div class="k">影响</div><div class="v">P 太大 → 振荡 / 抖动；P 太小 → 跟不上；D 太大 → 反应迟钝；I 太大 → 总在准星上反复横跳。</div>
+    </div>
+
+    <h3>三个增益的物理意义</h3>
+    <table class="params">
+      <thead><tr><th>项</th><th>响应</th><th>常见取值</th></tr></thead>
+      <tbody>
+        <tr><td>P (Proportional)</td><td>当前误差 × P → 立刻响应</td><td>0.4 ~ 1.5</td></tr>
+        <tr><td>D (Derivative)</td><td>误差变化率 × D → 阻尼</td><td>0.05 ~ 0.30</td></tr>
+        <tr><td>I (Integral)</td><td>误差累计 × I → 消静差</td><td>0（绝大多数情况）</td></tr>
+      </tbody>
+    </table>
+
+    <div class="tip">
+      <b>I 几乎永远是 0</b>。鼠标系统是无静差的（你松手目标就停），不需要积分。开 I 只会带来"目标就在准星但鼠标还在动"的恶心震荡。
+    </div>
+
+    <h3>Flick / Track 双模式</h3>
+    <p>
+      同一套 PID 没法同时满足"远距离一刀甩到位"和"近距离贴脸不抖"。双模式按当前误差大小自动切换：
+    </p>
+    <ul>
+      <li><b>Flick</b>（误差 &gt; 阈值 + 迟滞）：高 P，激进甩枪。</li>
+      <li><b>Track</b>（误差 &lt; 阈值 - 迟滞）：低 P + 高 D，平滑跟随。</li>
+      <li>中间区维持上一帧模式，<b>切换瞬间清空 PID 积分</b>避免阶跃。</li>
+    </ul>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>flick_track_enabled</td><td>off</td><td>主开关。关掉时只用 Flick 一组（即上面的 P/I/D）。</td></tr>
+        <tr><td>pid_track_p / i / d</td><td>0.30 / 0.0 / 0.10</td><td>Track 模式的三个增益。</td></tr>
+        <tr><td>flick_track_threshold_px</td><td>30.0</td><td>切换阈值，单位检测像素。误差 &gt; 30 → Flick；&lt; 30 → Track。</td></tr>
+        <tr><td>flick_track_hysteresis_px</td><td>8.0</td><td>迟滞带，防边界震荡。设 0 会在阈值附近反复切换。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li><b>先关双模式</b>。在站桩目标上调 Flick 那组：P 从 0.5 起步，每次 +0.1 直到刚要过冲；D 从 0 起，每次 +0.05 直到过冲消失。I 别动。</li>
+      <li>实战 5 局看跟枪稳定后，再考虑双模式。</li>
+      <li>开 <code>flick_track_enabled</code>。Track 的 P 取 Flick 的 1/2，Track 的 D 取 Flick 的 2 倍。</li>
+      <li>在调试面板看「实时模式」标签——如果 90% 时间在 Track，说明<code>threshold_px</code>设大了。一般训练靶场误差对应 30~50 px。</li>
+      <li><code>hysteresis_px</code> 通常 8~12。看到模式标签每秒切几次说明小了。</li>
+    </ol>
+
+    <div class="pitfall">
+      把 Flick 的 P 调到看起来"刚刚好"，结果实战中目标稍微一动就过冲——因为<b>站桩目标的误差变化率很低</b>，D 项几乎不工作。一定要在<b>动目标</b>上验。
+    </div>
+
+    <!-- ============ Kalman ============ -->
+    <h2 id="kalman">Kalman 兜底 + 类别覆盖</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">基于运动学（位置 + 速度）做"目标短暂消失时下一帧在哪"的预测。</div>
+      <div class="k">为什么有</div><div class="v">检测会偶尔丢一两帧（被烟雾、UI 遮挡），如果 PID 直接停止鼠标会"卡一下"。</div>
+      <div class="k">影响</div><div class="v">参数错了会把鼠标"甩飞"——丢检测的瞬间 Kalman 按速度外推，预测错了鼠标就跟着跑。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>kalman_enabled</td><td>true</td><td>总开关。关掉则丢检测瞬间鼠标立刻停。</td></tr>
+        <tr><td>process_noise_position</td><td>40</td><td>"模型相信目标位置变化的不确定度"。大 → 更信测量、不信预测。</td></tr>
+        <tr><td>process_noise_velocity</td><td>1800</td><td>同上但对速度。大 → 允许速度突变（适合无规律行人）。</td></tr>
+        <tr><td>measurement_noise</td><td>35</td><td>"模型相信测量本身有多吵"。大 → 平滑但延迟；小 → 灵敏但抖。</td></tr>
+        <tr><td>velocity_damping</td><td>0.08</td><td>速度自衰减系数。无观测时速度按 (1-d) 每帧衰减，防止外推飞出去。</td></tr>
+        <tr><td>max_velocity</td><td>20000</td><td>速度硬上限（px/秒）。防止误检测产生瞬时跳变让模型估出疯狂速度。</td></tr>
+        <tr><td>warmup_frames</td><td>2</td><td>前 N 帧只观测不外推。新锁目标时给模型几帧"热身"。</td></tr>
+        <tr><td>compensate_detection_delay</td><td>true</td><td>检测有 ~1 帧延迟，开它会向前外推一点补偿。</td></tr>
+        <tr><td>additional_prediction_ms</td><td>0</td><td>额外向前预测多少毫秒。负数 = 故意滞后。</td></tr>
+        <tr><td>reset_timeout_sec</td><td>0.50</td><td>多久没看到目标就放弃 Kalman 预测。设大鼠标会被"幽灵"拖很远。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>每个 aim class 还能单独覆盖</h3>
+    <p>
+      头部和身体的运动学很不一样：身体走直线慢，头一甩就 90 度。所以每个 <code>HotkeyAimClass</code> 可以独立打开"Kalman 覆盖"，给 head 一组更"信任测量、允许更高速度"的参数：
+    </p>
+    <ul>
+      <li>head 推荐：<code>process_noise_position=30</code>, <code>process_noise_velocity=2400</code>, <code>measurement_noise=18</code>, <code>max_velocity=30000</code>。</li>
+      <li>body 用默认即可。</li>
+    </ul>
+
+    <div class="warn">
+      切换到不同类别的目标时，Kalman 状态<b>会自动 reset</b>（因为参数变了）。不必担心"head 学的快速运动会污染 body 的预测"。
+    </div>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li>关掉双模式 PID 干扰，先单独看 Kalman。</li>
+      <li><code>warmup_frames</code> 设 2-3，让 Kalman 不在第一帧就乱预测。</li>
+      <li>故意让目标短暂走到掩体后看鼠标行为：<b>原地等回来</b>=参数偏保守；<b>追到掩体后</b>=参数偏激进。</li>
+      <li><code>reset_timeout_sec</code> 0.3 ~ 0.6 之间。0.5 一般够。</li>
+      <li>看到鼠标在目标重新出现的<b>瞬间往反方向猛甩</b>——降 <code>velocity_damping</code> 到 0.15+ 帮速度更快归零。</li>
+    </ol>
+
+    <!-- ============ Aim lock ============ -->
+    <h2 id="aim-lock">吸附锁死力度 (aim_lock_strength)</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">目标越靠近准星时 PID 增益的额外放大。</div>
+      <div class="k">为什么有</div><div class="v">PID 在小误差时输出小，最后一两像素总磨蹭——给个"磁吸"加成解决。</div>
+      <div class="k">影响</div><div class="v">数值 0..1，0 关闭。0.4 是温和磁吸，0.8+ 会让人感觉"鼠标自己动"。</div>
+    </div>
+    <p>公式：<code>boost = 1 + strength × R² / (R² + err²)</code>，<code>R = 0.12 × detection_resolution</code>。</p>
+
+    <!-- ============ Y offset decay ============ -->
+    <h2 id="yoffset-decay">Y 偏移距离衰减</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">bbox 越大（=越近），Y 偏移越靠近 0.5。</div>
+      <div class="k">为什么有</div><div class="v">远处 bbox 50 px 高，y_offset=0.45 → 锚点上下浮动 ±2 px；近处 bbox 500 px 高，同 y_offset → ±20 px。近距离锚点会抖得厉害。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>低高度比 (low_frac)</td><td>0.10</td><td>bbox_h / 屏高 ≤ 这个值时不衰减（远）。</td></tr>
+        <tr><td>高高度比 (high_frac)</td><td>0.40</td><td>bbox_h / 屏高 ≥ 这个值时完全收到 0.5（近）。</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ Hysteresis ============ -->
+    <h2 id="hysteresis">目标切换迟滞</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">同优先级类别之间换锁时的"必须好出多少分 + 持续多少帧"门槛。</div>
+      <div class="k">为什么有</div><div class="v">两个目标贴在一起时，每帧的"谁更优"会因像素噪声反复切换，鼠标在两人之间来回弹。</div>
+      <div class="k">影响</div><div class="v">两个旋钮都越大 → 越粘 → 反应越慢。<b>更高优先级类别仍然立刻抢锁</b>，迟滞只在同级之间生效。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>切换分差阈值</td><td>0.15</td><td>挑战者必须比当前锁定好出此比例（按半对角线归一化）才有资格抢锁。</td></tr>
+        <tr><td>连续优势帧数</td><td>3</td><td>挑战者必须连续这么多帧保持分差优势。</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ Threat ============ -->
+    <h2 id="threat">威胁度优先级</h2>
+    <p>
+      启发式给每个 track 算 [0,1] 的"威胁分"，乘进锁定打分：
+    </p>
+    <ul>
+      <li><b>类别提示</b>：head &gt; person &gt; 其他。</li>
+      <li><b>运动方向</b>：朝准星运动 → 高分；背离 → 低分。</li>
+      <li><b>历史置信</b>：被持续追踪很久的 track 比新冒出来的更可信。</li>
+    </ul>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>threat_priority_enabled</td><td>off</td><td>主开关。</td></tr>
+        <tr><td>threat_weight</td><td>0.50</td><td>权重 [0,1]。0=完全忽略，1=高威胁打分变 0、低威胁打分翻倍。</td></tr>
+        <tr><td>threat_head_class_id</td><td>-1</td><td>告诉启发式哪个类别算 head。-1 表示未指定。</td></tr>
+        <tr><td>threat_body_class_id</td><td>-1</td><td>告诉启发式哪个类别算 body / person。-1 表示未指定。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      威胁度不是新模型，而是生产启发式：类别层级 + 目标相对准星的运动方向 + 追踪命中帧数共同影响锁定排名。<code>threat_weight=0</code> 等价于关闭这部分乘子。
+    </div>
+
+    <!-- ============ Trigger ============ -->
+    <h2 id="trigger">智能扳机（自动开火）</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">满足"准星在命中区 + 枪口稳定"时自动按下左键，保持指定时长后释放。</div>
+      <div class="k">为什么有</div><div class="v">把"瞄到位才开火"这个判断从人脑卸到代码上。比无脑 trigger 更克制、更像人。</div>
+      <div class="k">影响</div><div class="v">直接通过当前输入设备（WIN32 / KMBOX / MAKCU / GHUB / Arduino）按下左键，<b>不是只点亮 UI</b>。</div>
+    </div>
+
+    <h3>三个开火门</h3>
+    <ol>
+      <li><b>命中概率门</b>：pivot 到准星距离 ≤ bbox 短边 × <code>hit_radius_frac</code> 的范围内。</li>
+      <li><b>稳定门</b>：最近 N 帧鼠标位移 RMS ≤ <code>variance_max_px</code>。</li>
+      <li><b>冷却门</b>：上一发释放后过了至少同等长度的时间。</li>
+    </ol>
+    <p>三门同时开 → 按下左键，保持 <code>fire_duration_ms</code>，到点释放。</p>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>smart_trigger_enabled</td><td>off</td><td>总开关。</td></tr>
+        <tr><td>hit_radius_frac</td><td>0.55</td><td>命中区 = bbox 短边 × 此值 / 2。0.55 ≈ 留 45% 安全边。</td></tr>
+        <tr><td>variance_max_px</td><td>6.0</td><td>最近 N 帧鼠标 RMS 位移上限，单位检测像素。超过 = 还在甩枪不开火。</td></tr>
+        <tr><td>window_frames</td><td>8</td><td>RMS 窗口帧数。</td></tr>
+        <tr><td>min_prob</td><td>0.70</td><td>命中概率门槛 [0,1]。</td></tr>
+        <tr><td>fire_duration_ms</td><td>40</td><td>每次按下保持多久。<b>单发 40ms · 长按喷射 200ms+</b>。释放后强制同等冷却（占空比 ≤ 50%）。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>五重防护：按键绝不卡住</h4>
+    <ol>
+      <li>到点正常释放（PID 步内）。</li>
+      <li>检测断流 → checkAndResetPredictions watchdog 兜底释放。</li>
+      <li>松开瞄准热键 → clearQueuedMoves → 强制释放。</li>
+      <li>切换热键 / 改参数 → updateParams → 强制释放。</li>
+      <li>会话结束 / 析构 → 第一行就释放。</li>
+    </ol>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li><b>所有其他模块都稳定后</b>再开扳机。前面任何一项不稳，扳机只会越打越错。</li>
+      <li>从默认值起步。先开站桩目标看是否能稳定单点。</li>
+      <li>如果<b>错过该开火的窗口</b>：降 <code>min_prob</code> 到 0.55，或提 <code>hit_radius_frac</code> 到 0.65。</li>
+      <li>如果<b>在不该开火时也开</b>（比如目标穿越准星但其实瞄的是另一目标）：提 <code>min_prob</code> 到 0.80，或降 <code>variance_max_px</code> 到 4.0。</li>
+      <li><code>fire_duration_ms</code>：手枪/单发武器 30~50；连射武器 150~250。</li>
+    </ol>
+
+    <div class="warn">
+      <code>fire_duration_ms</code> 太短（&lt;20ms）某些游戏可能识别不到点击；太长（&gt;500ms）冷却也跟着延长，节奏会很怪。
+    </div>
+
+    <!-- ============ 准星找色 ============ -->
+    <h2 id="crosshair-detect">准星找色</h2>
+    <p>
+      游戏里的准星不一定在屏幕几何中心（开镜偏移、抖枪、后坐力补偿）。开启后系统会找屏幕中心 ROI 内符合 HSV 颜色的小色块作为<b>动态准星</b>，PID 误差以这个色块位置为参考点。
+    </p>
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>采样矩形 W/H</td><td>40/40</td><td>从屏幕中心抠多大的方框找色。</td></tr>
+        <tr><td>面积过滤 min/max</td><td>2/200</td><td>找到的色块面积范围（像素）。</td></tr>
+        <tr><td>颜色 HSV 段</td><td>红色双段</td><td>HSV 色相在 0/180 处会回环，红色需要两段。</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ 深度 ============ -->
+    <h2 id="depth">深度推理 + 抑制占比</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">用 Depth Anything 估每个像素的深度，把"远端/被遮挡"区域生成一张二值遮罩。落在遮罩里的 detection 直接丢。</div>
+      <div class="k">为什么有</div><div class="v">解决"识别框压在墙上 / 远处贴图被误识别"。</div>
+      <div class="k">影响</div><div class="v">仅 TRT 后端可用。增加约 2~5ms GPU 时间。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>depth_inference_enabled</td><td>true</td><td>主开关。</td></tr>
+        <tr><td>depth_mask_enabled</td><td>false</td><td>是否真正用遮罩抑制 detection（仅 enable 推理只是显示用）。</td></tr>
+        <tr><td>depth_mask_near_percent</td><td>20</td><td>把深度直方图的多少百分比像素视为"近端"。</td></tr>
+        <tr><td>depth_mask_invert</td><td>false</td><td>反转——某些游戏深度方向相反时切换。</td></tr>
+        <tr><td>depth_mask_expand</td><td>0</td><td>遮罩做形态学膨胀的核半径。</td></tr>
+        <tr><td>depth_mask_hold_frames</td><td>0</td><td>遮罩抑制保持帧数。0 = 跟当前帧；&gt;0 给被遮罩像素 N 帧 TTL。</td></tr>
+        <tr><td>depth_mask_suppression_ratio</td><td>0.30</td><td>bbox 内被遮罩覆盖的<b>像素占比</b>必须 ≥ 此值才丢弃。0=任何 1 像素命中即丢（旧行为，易抖）；1=永不丢。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li>开 <code>depth_inference_enabled</code> 但<b>先不开</b> mask，看深度图叠层是否合理。</li>
+      <li>合理后开 <code>depth_mask_enabled</code>，调 <code>near_percent</code> 让墙/天空被遮罩、玩家不被遮罩。</li>
+      <li>如果发现玩家偶尔被深度抹掉一帧导致丢锁：把 <code>suppression_ratio</code> 从 0.30 提到 0.50。</li>
+      <li>如果墙边 detection 跳来跳去：把 <code>suppression_ratio</code> 提到 0.40 + <code>hold_frames</code> 设 5。</li>
+    </ol>
+
+    <!-- ============ 输入设备 ============ -->
+    <h2 id="input">输入设备</h2>
+    <p>
+      六选一：<code>WIN32 / GHUB / ARDUINO / KMBOX_NET / KMBOX_A / MAKCU</code>。隐蔽性顺序大致是 KMBOX/MAKCU &gt; ARDUINO &gt; GHUB &gt; WIN32。
+    </p>
+    <ul>
+      <li><b>WIN32</b>：直接 SendInput，0 硬件成本，但容易被反作弊识别。</li>
+      <li><b>GHUB</b>：调罗技驱动 DLL，比 WIN32 略好。</li>
+      <li><b>ARDUINO</b>：通过串口让 Arduino 模拟 USB HID。需要硬件。</li>
+      <li><b>KMBOX_NET / KMBOX_A</b>：KMBox 系列硬件设备，网络 / USB-A 两种连接方式。</li>
+      <li><b>MAKCU</b>：另一种硬件 mouse-injector。</li>
+    </ul>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>arduino_port / baudrate</td><td>COM0 / 115200</td><td>Arduino 串口与波特率。</td></tr>
+        <tr><td>arduino_16_bit_mouse</td><td>false</td><td>启用 16-bit 鼠标位移协议。只有固件也支持时才打开。</td></tr>
+        <tr><td>arduino_enable_keys</td><td>false</td><td>允许 Arduino 路径派发按键。智能扳机需要硬件侧支持左键按下/释放。</td></tr>
+        <tr><td>kmbox_net_ip / port / uuid</td><td>10.42.42.42 / 1984 / DEADC0DE</td><td>KMBOX_NET 连接参数。</td></tr>
+        <tr><td>kmbox_a_pidvid</td><td>空</td><td>KMBOX_A USB 设备匹配信息。多设备时用于指定目标硬件。</td></tr>
+        <tr><td>makcu_port / baudrate</td><td>COM0 / 115200</td><td>MAKCU 串口与波特率。</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      所有"按键"操作（包括智能扳机的左键自动开火）都<b>统一通过当前选中的输入设备</b>派发。换设备无需改任何应用层逻辑。
+    </div>
+
+    <!-- ============ 回放 ============ -->
+    <h2 id="replay">瞄准轨迹回放（调试神器）</h2>
+    <p>
+      在调试面板开启"启用环形录制"，系统会把每帧的 detections + locked id + pivot + 热键状态推到一个环形缓冲（保留 N 秒）。点"快照并慢放"会浮出一个 ImGui 窗口，按 0.25x（或你设的速度）重放最近 N 秒：
+    </p>
+    <ul>
+      <li>橙色框 = 当前帧的锁定目标</li>
+      <li>蓝色框 = 其他检测</li>
+      <li>红点 = pivot 锚点（PID 的目标点）</li>
+      <li>红框边 = 该帧瞄准热键被按下</li>
+    </ul>
+    <p>
+      <b>调 PID 时极其有用</b>：你能直观看到鼠标"为什么过冲"、"为什么粘不住"——是 pivot 跳了一下，还是 PID 拉过头了。
+    </p>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>replay_record_enabled</td><td>false</td><td>启用环形录制。关闭时<b>无任何分配</b>。</td></tr>
+        <tr><td>replay_seconds</td><td>10</td><td>缓冲长度。10 秒大约够覆盖一次完整对枪。</td></tr>
+        <tr><td>replay_playback_speed</td><td>0.25</td><td>0.25x 慢放最常用。</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ 动态 FOV 读数 ============ -->
+    <h2 id="dynamic-fov-readout">动态 FOV 实时读数</h2>
+    <p>
+      调试面板有个"动态 FOV (实时)"块，显示当前生效的 FOV 直径。开了动态 FOV 但读数始终是 0×0 = mouse 循环还没有跑过任何 tick（一般是没按热键）。读数比基线明显小很多 = 收缩生效中。
+    </p>
+
+    <hr>
+
+    <!-- ============ Troubleshoot ============ -->
+    <h2 id="troubleshoot">常见故障速查</h2>
+    <table class="params">
+      <thead><tr><th>症状</th><th>最可能原因</th><th>看哪</th></tr></thead>
+      <tbody>
+        <tr><td>鼠标完全不动</td><td>没按瞄准热键 / 输入设备未连接 / 类别没分到"瞄准"桶</td><td>调试日志 + 硬件页连接状态</td></tr>
+        <tr><td>瞄到墙上</td><td>bbox 一半被墙挡，pivot 在几何中心 → 落在墙上</td><td>开<a href="#depth">深度遮罩</a> + 检查 pivot 已基于可见像素重心</td></tr>
+        <tr><td>两人挤在一起鼠标在两人间反复</td><td>没开<a href="#hysteresis">切换迟滞</a>，或同优先级</td><td>把次要的人调低优先级 / 加大迟滞</td></tr>
+        <tr><td>近距离锚点上下抖</td><td>没开<a href="#yoffset-decay">Y 偏移衰减</a></td><td>开衰减，调 high_frac=0.40</td></tr>
+        <tr><td>过冲</td><td>P 太大 / D 太小</td><td>开<a href="#replay">回放</a>看慢动作</td></tr>
+        <tr><td>跟不上目标</td><td>P 太小，或 Track 模式被错误激活</td><td>看调试面板的"实时模式"标签</td></tr>
+        <tr><td>目标短暂消失后鼠标乱飞</td><td>Kalman <code>velocity_damping</code> 太小 / <code>max_velocity</code> 太大</td><td>提高 damping 到 0.20</td></tr>
+        <tr><td>智能扳机不开火</td><td>三门有一门没满足</td><td>看 prob/rms 实时值，逐项排查</td></tr>
+        <tr><td>智能扳机一直开火停不下来</td><td>不可能 — 五重释放都失效要么是 bug，要么是输入设备本身锁死了</td><td>检查输入设备硬件 + 看日志</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ Glossary ============ -->
+    <h2 id="glossary">术语表</h2>
+    <table class="params">
+      <thead><tr><th>术语</th><th>解释</th></tr></thead>
+      <tbody>
+        <tr><td>pivot / 锚点</td><td>tracker 给每个 detection 算出来的"应该瞄准这里"的点。受 y_offset、Y 偏移衰减、深度可见像素重心三者影响。</td></tr>
+        <tr><td>locked target / 锁定目标</td><td>tracker 当前选定要交给 PID 的那一个 track。</td></tr>
+        <tr><td>track</td><td>tracker 维护的一个长生命周期实体，由若干帧的 detection 关联而成，有 id、bbox、velocity、hits、missed 等状态。</td></tr>
+        <tr><td>detection</td><td>YOLO 单帧输出的一个 bbox + 类别 id。</td></tr>
+        <tr><td>检测分辨率 / detection space</td><td>所有坐标计算的"虚拟分辨率"。一个 320 detection_resolution 的系统所有 px 都在 320×320 内。</td></tr>
+        <tr><td>FOV</td><td>检测分辨率内的椭圆瞄准区域，<b>不是</b>游戏里那个 FOV°。</td></tr>
+        <tr><td>flick / 甩枪</td><td>大角度快速挪准星，对应高 P PID。</td></tr>
+        <tr><td>track / 跟枪</td><td>小幅度持续跟随目标，对应低 P + 高 D。</td></tr>
+      </tbody>
+    </table>
+
+    <p style="text-align:center; color:var(--text-dim); font-size:12px; margin-top:60px;">
+      — End of Tuning Guide —
+    </p>
+
+  </main>
+</div>
+
+<script>
+  // Highlight TOC entry as user scrolls
+  const links = document.querySelectorAll('.toc a');
+  const sections = Array.from(links).map(a => document.querySelector(a.getAttribute('href')))
+                                    .filter(Boolean);
+  function onScroll() {
+    const y = window.scrollY + 120;
+    let active = sections[0];
+    for (const sec of sections) {
+      if (sec.offsetTop <= y) active = sec;
+      else break;
+    }
+    links.forEach(l => l.classList.remove('active'));
+    const activeLink = Array.from(links).find(l => l.getAttribute('href') === '#' + active.id);
+    if (activeLink) activeLink.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+</script>
+</body>
+</html>
