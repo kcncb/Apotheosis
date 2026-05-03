@@ -210,7 +210,7 @@
     <a href="#hotkey-keys">按键绑定</a>
     <a href="#hotkey-classes">瞄准类别 + Y 偏移</a>
     <a href="#fov">视野 / 动态 FOV</a>
-    <a href="#pid">PID 与 Flick/Track 双模式</a>
+    <a href="#speed">速度增益（speed_x/y）</a>
     <a href="#kalman">Kalman 兜底 + 类别覆盖</a>
     <a href="#aim-lock">吸附锁死力度</a>
     <a href="#yoffset-decay">Y 偏移距离衰减</a>
@@ -281,11 +281,11 @@
       <li><b>第二步：检测准</b><br>调<code>confidence_threshold</code>到刚好不丢真目标也不出虚警；调好<code>NMS</code>。把无关类别先丢"删除"桶。<a href="#detection">详细 →</a></li>
       <li><b>第三步：类别选对</b><br>把要瞄的类别挪到"瞄准"桶，给每类设合理的<code>Y 偏移</code>（头≈0.15，胸≈0.45）。<a href="#class-bucket">详细 →</a></li>
       <li><b>第四步：FOV 设大点</b><br>先把 FOV 开到舒适最大值（130×90 左右），<b>不要</b>立刻打开动态 FOV。<a href="#fov">详细 →</a></li>
-      <li><b>第五步：单模式 PID 走稳</b><br>关掉 Flick/Track 双模式，只调<b>Flick</b> 那一组。先 P，再 D，I 几乎一直 0。能跟上目标就够了，宁慢勿过冲。<a href="#pid">详细 →</a></li>
+      <li><b>第五步：标定 lock_strength 上限</b><br>speed 暂打满到 1.0，<code>lock_radius_px</code> 选 12（吸附锁死）或 50（动态锁死），按住热键锁移动靶慢慢加 <code>lock_strength</code>，<b>屏幕刚好不抖时的最大值</b>就是该游戏 / 该灵敏度 / 该 DPI / 该倍镜 / 该主辅机配置下永远不变的"锁死力度"。<a href="#aim-lock">详细 →</a></li>
       <li><b>第六步：Kalman 兜底</b><br>开 Kalman，调<code>reset 超时</code>和<code>Warmup</code>。让目标短暂消失时鼠标不要乱跑。<a href="#kalman">详细 →</a></li>
-      <li><b>第七步：增强稳定性</b><br>开<a href="#hysteresis">切换迟滞</a>+<a href="#yoffset-decay">Y 偏移衰减</a>。两件事都是"近距离防抖"。</li>
-      <li><b>第八步：解决长得像的目标干扰</b><br>开<a href="#threat">威胁度优先级</a>+<a href="#depth">深度遮罩</a>。</li>
-      <li><b>第九步：极致跟枪</b><br>开 Flick/Track 双模式：Flick 高 P 用第五步的值；Track 把 P 砍半，加 D。<a href="#pid">详细 →</a></li>
+      <li><b>第七步：回降速度</b><br>锁死定下来之后再把 <code>speed_x</code> / <code>speed_y</code> 从 1.0 往回降，控制器手感"刚好跟得上但不过冲"即可——一般落在 0.5 ~ 0.8 之间。开了动态锁死的话可以适当上抬到 0.7+。<a href="#speed">详细 →</a></li>
+      <li><b>第八步：增强稳定性</b><br>开<a href="#hysteresis">切换迟滞</a>+<a href="#yoffset-decay">Y 偏移衰减</a>。两件事都是"近距离防抖"。</li>
+      <li><b>第九步：解决长得像的目标干扰</b><br>开<a href="#threat">威胁度优先级</a>+<a href="#depth">深度遮罩</a>。</li>
       <li><b>第十步：动态 FOV</b><br>先把基线 FOV 调到能稳定锁主目标的最小值，再开动态 FOV，调内边距系数到 1.10~1.30。<a href="#fov">详细 →</a></li>
       <li><b>第十一步：智能扳机</b><br>最后一步。前面任何一项不稳，都不要开扳机——只会越打越错。<a href="#trigger">详细 →</a></li>
     </ol>
@@ -303,13 +303,14 @@
     <table class="params">
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
-        <tr><td>capture_method</td><td>udp_capture</td><td>三选一：<code>udp_capture</code>（外部机器 UDP 推流）/ <code>tcp_capture</code>（TCP 推流，稳定优先）/ <code>opencv_capture</code>（摄像头、采集卡、RTSP/文件流）。旧的 DXGI / WinRT 采集入口已不再作为配置选项。</td></tr>
-        <tr><td>udp_ip / udp_port</td><td>-</td><td>UDP 推流监听地址和端口。用外部机器采集时最常调。</td></tr>
-        <tr><td>tcp_ip / tcp_port</td><td>-</td><td>TCP 推流地址和端口。网络波动大时比 UDP 更稳，但延迟可能更高。</td></tr>
-        <tr><td>opencv_capture_index / api</td><td>0 / DSHOW</td><td>OpenCV 采集设备号与 API：<code>DSHOW / MSMF / FFMPEG / ANY</code>。采集卡优先试 DSHOW，网络流优先 FFMPEG。</td></tr>
-        <tr><td>opencv_capture_url</td><td>空</td><td>可选连接 URL，例如 RTSP、HTTP 或视频文件路径。填写后通常会覆盖设备号的意义。</td></tr>
-        <tr><td>opencv_capture_width / height / fps</td><td>0 / 0 / 0</td><td>OpenCV 输入请求分辨率和帧率。0 表示让设备或流自行决定。</td></tr>
-        <tr><td>detection_resolution</td><td>320</td><td>截下来后压成的方形边长。<b>必须是 160 / 320 / 640 之一</b>。值越大检测越准但 GPU 负担线性涨。</td></tr>
+        <tr><td>capture_method</td><td>udp_capture</td><td>三选一：<code>udp_capture</code>（外部机器 MJPEG/UDP 推流）/ <code>tcp_capture</code>（TCP 推流，稳定优先）/ <code>capture_card</code>（DirectShow 采集卡 / 虚拟摄像头）。旧的 DXGI / WinRT / OpenCV 采集入口已删除。</td></tr>
+        <tr><td>udp_ip / udp_port</td><td>0.0.0.0 / 1234</td><td>UDP 推流监听地址和端口。<code>0.0.0.0</code> = 接受任意发送方。端口范围 1..65535。</td></tr>
+        <tr><td>tcp_ip / tcp_port</td><td>0.0.0.0 / 1235</td><td>TCP 推流监听地址和端口。网络波动大时比 UDP 更稳，但延迟通常更高。</td></tr>
+        <tr><td>capture_card_index</td><td>0</td><td>DirectShow 设备列表中的索引。多设备时改这个选目标采集卡。</td></tr>
+        <tr><td>capture_card_format</td><td>AUTO</td><td>请求像素格式：<code>AUTO / NV12 / MJPG / YUY2 / RGB32</code>。AUTO 让设备自行选择；解码瓶颈时强制 <code>MJPG</code> 或 <code>NV12</code> 测试。</td></tr>
+        <tr><td>capture_card_width / height / fps</td><td>0 / 0 / 0</td><td>请求采集分辨率和帧率。0 = 让设备自行决定。</td></tr>
+        <tr><td>capture_card_crop_width / height</td><td>0 / 0</td><td>从采集帧中央截取的尺寸。0 = 用完整采集画面（无裁剪）。</td></tr>
+        <tr><td>detection_resolution</td><td>320</td><td>截下来后压成的方形边长。允许 32..2048，常用 <code>160 / 320 / 640</code>。值越大检测越准但 GPU 负担线性涨。</td></tr>
         <tr><td>capture_fps</td><td>60</td><td>采集线程节流上限。设过高反而会让 GPU 抢占检测时间。和你显示器刷新率匹配即可。</td></tr>
         <tr><td>circle_mask</td><td>true</td><td>把方框外的圆角用黑掩遮罩。多数游戏 UI（雷达、技能图标）在四个角，开它能减虚警。</td></tr>
       </tbody>
@@ -318,8 +319,8 @@
     <h4>调参步骤</h4>
     <ol class="steps">
       <li>在游戏里跑一局，把"采集预览"窗口对着屏幕看是否流畅。<b>有撕裂、黑屏或卡顿</b>优先换采集后端。</li>
-      <li>如果用 <code>udp_capture</code> 或 <code>tcp_capture</code>，先把 IP / 端口对好——进游戏看不到画面通常就是这里的问题。</li>
-      <li>如果用 <code>opencv_capture</code>，先试 <code>DSHOW</code>，不出图再试 <code>MSMF</code>；RTSP/文件流优先填 <code>opencv_capture_url</code> 并选 <code>FFMPEG</code>。</li>
+      <li>如果用 <code>udp_capture</code> 或 <code>tcp_capture</code>，先把 IP / 端口对好——进游戏看不到画面通常就是这里的问题。两者均支持 GPU JPEG 解码（在 CUDA 构建上自动启用）。</li>
+      <li>如果用 <code>capture_card</code>：从 <code>capture_card_index = 0</code> 起，<code>format = AUTO</code>，<code>width/height/fps = 0</code> 让设备自报；不出图就强制 <code>MJPG</code> 或 <code>NV12</code> 重试。需要中央裁剪时填 <code>capture_card_crop_width/height</code>。</li>
       <li><code>detection_resolution</code> 默认 320 适合大多数情况。<b>瞄远距离或小目标</b>提到 640；<b>追求最低延迟</b>降到 160。</li>
     </ol>
 
@@ -454,59 +455,50 @@
       <li>在调试面板「动态 FOV (实时)」看实时数值，确认收缩在合理范围（不要看到 5×5 这种极小数）。</li>
     </ol>
 
-    <!-- ============ PID ============ -->
-    <h2 id="pid">PID 与 Flick/Track 双模式</h2>
+    <!-- ============ Speed gain ============ -->
+    <h2 id="speed">速度增益（speed_x / speed_y / lock_strength）</h2>
     <div class="wwh">
-      <div class="k">是什么</div><div class="v">把"目标 - 准星 = 误差"映射成"鼠标 dx/dy"的控制器。</div>
-      <div class="k">为什么有</div><div class="v">误差大就要发力赶过去（P），但发力过猛会过冲（用 D 阻尼），稳态偏差用 I 抹平（实战中几乎不用）。</div>
-      <div class="k">影响</div><div class="v">P 太大 → 振荡 / 抖动；P 太小 → 跟不上；D 太大 → 反应迟钝；I 太大 → 总在准星上反复横跳。</div>
+      <div class="k">是什么</div><div class="v">把"目标 - 准星 = 误差"映射成"鼠标 dx/dy"的<b>三参数比例控制器</b>。<br>移动量 = <code>speed × err × mult</code>。</div>
+      <div class="k">为什么有</div><div class="v">早期版本是 PID + Flick/Track 双模式，参数互相耦合且难调。现在简化为：远距比例增益 + 近距吸附两个旋钮，没有积分、没有微分、没有 per-tick 钳位——大移动一次推到位，色控枪 / 后座补偿不被限速。</div>
+      <div class="k">影响</div><div class="v"><code>speed</code> 太大 → 过冲 / 振荡；太小 → 跟不上目标。<code>lock_strength</code> 控制最后一两像素的"咬死"，独立于 speed。</div>
     </div>
-
-    <h3>三个增益的物理意义</h3>
-    <table class="params">
-      <thead><tr><th>项</th><th>响应</th><th>常见取值</th></tr></thead>
-      <tbody>
-        <tr><td>P (Proportional)</td><td>当前误差 × P → 立刻响应</td><td>0.4 ~ 1.5</td></tr>
-        <tr><td>D (Derivative)</td><td>误差变化率 × D → 阻尼</td><td>0.05 ~ 0.30</td></tr>
-        <tr><td>I (Integral)</td><td>误差累计 × I → 消静差</td><td>0（绝大多数情况）</td></tr>
-      </tbody>
-    </table>
-
-    <div class="tip">
-      <b>I 几乎永远是 0</b>。鼠标系统是无静差的（你松手目标就停），不需要积分。开 I 只会带来"目标就在准星但鼠标还在动"的恶心震荡。
-    </div>
-
-    <h3>Flick / Track 双模式</h3>
-    <p>
-      同一套 PID 没法同时满足"远距离一刀甩到位"和"近距离贴脸不抖"。双模式按当前误差大小自动切换：
-    </p>
-    <ul>
-      <li><b>Flick</b>（误差 &gt; 阈值 + 迟滞）：高 P，激进甩枪。</li>
-      <li><b>Track</b>（误差 &lt; 阈值 - 迟滞）：低 P + 高 D，平滑跟随。</li>
-      <li>中间区维持上一帧模式，<b>切换瞬间清空 PID 积分</b>避免阶跃。</li>
-    </ul>
 
     <table class="params">
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
-        <tr><td>flick_track_enabled</td><td>off</td><td>主开关。关掉时只用 Flick 一组（即上面的 P/I/D）。</td></tr>
-        <tr><td>pid_track_p / i / d</td><td>0.30 / 0.0 / 0.10</td><td>Track 模式的三个增益。</td></tr>
-        <tr><td>flick_track_threshold_px</td><td>30.0</td><td>切换阈值，单位检测像素。误差 &gt; 30 → Flick；&lt; 30 → Track。</td></tr>
-        <tr><td>flick_track_hysteresis_px</td><td>8.0</td><td>迟滞带，防边界震荡。设 0 会在阈值附近反复切换。</td></tr>
+        <tr><td>speed_x</td><td>0.6</td><td>横向比例增益，钳位 [0, 1]。每帧 dx = <code>speed_x × err_x × mult</code>。</td></tr>
+        <tr><td>speed_y</td><td>0.6</td><td>纵向比例增益，钳位 [0, 1]。一般和 X 接近，但有些游戏 Y 灵敏度需要单独调小。</td></tr>
+        <tr><td>lock_strength</td><td>0.0</td><td>近距吸附力度，钳位 [0, 1]。<b>= 0 时短路整个动态锁死分支</b>，回退成纯 P 控制（用于先标定 speed 基线）。详见<a href="#aim-lock">吸附锁死</a>。</td></tr>
+        <tr><td>lock_radius_px</td><td>25</td><td>吸附 / 动态锁死的<b>生效半径（检测像素）</b>，钳位 [0, 200]。0 = 用旧的 0.08×检测分辨率。</td></tr>
       </tbody>
     </table>
 
-    <h4>调参步骤</h4>
+    <p>核心公式：</p>
+    <pre><code>move_x = speed_x × (target_x - cursor_x) × mult
+mult   = 1 + 4 × lock_strength × atten × R² / (R² + err²)   (lock_strength &gt; 0)
+mult   = 1                                                  (lock_strength = 0, 短路)
+R      = lock_radius_px                                     (用户可调, 0 时回退 0.08×detection)
+atten  = 1.0  (Path A：新检测帧)
+       = 0.65 (Path B：准星找色 / Kalman 外推 → 后座补推)</code></pre>
+
+    <div class="tip">
+      <b>没有 PID，没有 I/D，没有 Flick/Track</b>。如果你看到老资料提到 <code>pid_p / pid_d / flick_track_enabled / pid_track_p</code> 等键名，那是已经移除的旧实现。
+    </div>
+
+    <h4>调参步骤（按外部资料的"先标锁死再调速度"流程）</h4>
     <ol class="steps">
-      <li><b>先关双模式</b>。在站桩目标上调 Flick 那组：P 从 0.5 起步，每次 +0.1 直到刚要过冲；D 从 0 起，每次 +0.05 直到过冲消失。I 别动。</li>
-      <li>实战 5 局看跟枪稳定后，再考虑双模式。</li>
-      <li>开 <code>flick_track_enabled</code>。Track 的 P 取 Flick 的 1/2，Track 的 D 取 Flick 的 2 倍。</li>
-      <li>在调试面板看「实时模式」标签——如果 90% 时间在 Track，说明<code>threshold_px</code>设大了。一般训练靶场误差对应 30~50 px。</li>
-      <li><code>hysteresis_px</code> 通常 8~12。看到模式标签每秒切几次说明小了。</li>
+      <li><b>速度先打满</b>：<code>speed_x</code> = <code>speed_y</code> = 1.0（新钳位上限），<code>lock_strength</code> = 0.1。</li>
+      <li>进训练场，离目标近一些，按住热键锁<b>移动靶</b>（斜上 / 斜下扫过去）。</li>
+      <li>慢慢加大 <code>lock_strength</code>。随着这个值变大，屏幕开始抖——<b>屏幕刚好不抖时的最大值</b>就是你的锁死力度上限。</li>
+      <li>这个 lock_strength 在<b>同游戏 / 同灵敏度 / 同 DPI / 同倍镜 / 同主辅机配置</b>下永远不变；以上任意一项变了就要重新标。</li>
+      <li>锁死定下来之后再调 speed：<code>speed_x</code> / <code>speed_y</code> 从 0 ~ 1 之间挑（一般 0.5 起步，跟不上 +0.1）。</li>
     </ol>
+    <div class="tip">
+      <b>开了动态锁死后</b>第 3 步的"不抖临界"会偏低（动态锁死本身已经在近距放大），通常比纯吸附锁死再降 0.05 ~ 0.10。具体见 <a href="#aim-lock">吸附锁死</a>。
+    </div>
 
     <div class="pitfall">
-      把 Flick 的 P 调到看起来"刚刚好"，结果实战中目标稍微一动就过冲——因为<b>站桩目标的误差变化率很低</b>，D 项几乎不工作。一定要在<b>动目标</b>上验。
+      站桩调出来的 <code>speed</code> 在实战中容易过冲——<b>动目标的误差变化率高得多</b>。一定要在动目标上验。如果实战明显过冲，<code>speed</code> 回退一档，依赖 Kalman 的预测把跟枪的"超前量"补回来，而不是靠加大增益。
     </div>
 
     <!-- ============ Kalman ============ -->
@@ -556,13 +548,47 @@
     </ol>
 
     <!-- ============ Aim lock ============ -->
-    <h2 id="aim-lock">吸附锁死力度 (aim_lock_strength)</h2>
+    <h2 id="aim-lock">吸附锁死 / 动态锁死 (lock_strength + lock_radius_px)</h2>
     <div class="wwh">
-      <div class="k">是什么</div><div class="v">目标越靠近准星时 PID 增益的额外放大。</div>
-      <div class="k">为什么有</div><div class="v">PID 在小误差时输出小，最后一两像素总磨蹭——给个"磁吸"加成解决。</div>
-      <div class="k">影响</div><div class="v">数值 0..1，0 关闭。0.4 是温和磁吸，0.8+ 会让人感觉"鼠标自己动"。</div>
+      <div class="k">是什么</div><div class="v">目标越靠近准星，比例增益就被额外放大——产生"磁吸"效果。<code>lock_radius_px</code> 决定"靠近"的判定半径。</div>
+      <div class="k">为什么有</div><div class="v">纯 <code>speed × err</code> 在小误差时输出极小，最后一两像素总在准星周围磨蹭。给个距离衰减的乘子解决。</div>
+      <div class="k">影响</div><div class="v"><code>lock_strength</code> 数值 [0, 1]，0 关闭并短路整个分支；0.3~0.5 是温和磁吸，0.8+ 明显感觉"鼠标自己动"。<code>lock_radius_px</code> 决定 R 大小，<b>外部资料里的"锁死范围 8~16"和"动态锁死阈值 40~65"指的就是这个</b>。</div>
     </div>
-    <p>公式：<code>boost = 1 + strength × R² / (R² + err²)</code>，<code>R = 0.12 × detection_resolution</code>。</p>
+    <p>公式：</p>
+    <pre><code>mult = 1 + 4 × lock_strength × atten × R² / (R² + err²)
+R    = lock_radius_px            (用户调；默认 25)
+atten = 1.0   Path A (新检测帧)
+       0.65  Path B (准星找色 / Kalman 外推 → 后座补推)</code></pre>
+
+    <p>
+      解读：err = 0（咬住目标）→ <code>mult = 1 + 4 × lock × atten</code>，lock=1 atten=1 时增益变 5×；err = R 时 <code>mult = 1 + 2 × lock × atten</code>；err ≫ R 时 <code>mult → 1</code> 吸附无效。<code>R</code> 越小吸附区越窄、越靠近准星才放大；越大整张图都偏锁，开高 lock 更易抖。
+    </p>
+
+    <h3>两种风格对照</h3>
+    <table class="params">
+      <thead><tr><th>风格</th><th>lock_radius_px</th><th>lock_strength 起点</th><th>speed_x / speed_y 起点</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>吸附锁死（近距咬死）</td><td>8 ~ 16</td><td>0.30</td><td>0.50 / 0.50</td><td>R 小，只有最后一两像素吸；远距完全靠 speed。</td></tr>
+        <tr><td>动态锁死（中远距过渡）</td><td>40 ~ 65</td><td>0.20 ~ 0.30</td><td>0.65 ~ 0.75</td><td>R 大，吸附覆盖整个目标核心。<b>开了之后 lock 要降一档</b>否则抖；同时 speed 可适当上抬。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>近点跳拉抖动的解决（动态锁死专用）</h3>
+    <div class="wwh">
+      <div class="k">现象</div><div class="v">把动态锁死开起来后，近距打跳枪 / 拉枪，准星会肉眼可见地抖。</div>
+      <div class="k">原因</div><div class="v">大 R 让吸附区覆盖了整个目标，准星在跳拉过程中频繁穿越 R，乘子在 1 ~ (1+4·lock) 之间剧烈切换。</div>
+      <div class="k">解法</div>
+      <div class="v">
+        <ol style="margin:0; padding-left:1.2em;">
+          <li>把原来标好的 lock_strength（比如 0.35）<b>降一档到 0.25</b>，到不抖为止。</li>
+          <li>同时把 speed_x / speed_y 从 0.5 抬到 0.7 ~ 0.75，把"远点跟枪能力"补回来。</li>
+          <li><code>lock_radius_px</code> 控在 40 ~ 65，越小越不容易触发；越大触发更频繁但吸附区更大。</li>
+        </ol>
+      </div>
+    </div>
+    <div class="tip">
+      <b>Path B 自动衰减 0.65×</b>：准星找色 / Kalman 外推这两条路径在控制器里会自动把 lock 系数打 0.65 折，专门用来抑制后座位移被锁死放大成"准星抖"。<b>不需要为 Path B 单独调任何参数</b>，它对 Path A 的标定值是透明的。
+    </div>
 
     <!-- ============ Y offset decay ============ -->
     <h2 id="yoffset-decay">Y 偏移距离衰减</h2>
@@ -591,9 +617,24 @@
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
         <tr><td>切换分差阈值</td><td>0.15</td><td>挑战者必须比当前锁定好出此比例（按半对角线归一化）才有资格抢锁。</td></tr>
-        <tr><td>连续优势帧数</td><td>3</td><td>挑战者必须连续这么多帧保持分差优势。</td></tr>
+        <tr><td>连续优势帧数 (lock_switch_min_frames)</td><td>3</td><td>挑战者必须连续这么多帧保持分差优势。<b>外部资料里的"切换目标延迟"指的就是这个</b>，单位是帧——UI 滑条右侧实时显示 ≈ XX ms @ 当前捕获 fps。</td></tr>
+        <tr><td>锁定保持帧数 (lock_hold_min_frames)</td><td>10</td><td>锁定后强制保持目标的最少帧数；期间忽略所有切换条件，抑制抖枪 / 火焰 / 烟雾导致的乱切。</td></tr>
       </tbody>
     </table>
+
+    <h3>切换目标延迟的推荐区间</h3>
+    <p>外部资料推荐 <b>20 ~ 100 ms</b>（太小乱锁，太大不锁）。换算成帧数：</p>
+    <table class="params">
+      <thead><tr><th>捕获 fps</th><th>20 ms</th><th>50 ms</th><th>100 ms</th></tr></thead>
+      <tbody>
+        <tr><td>60</td><td>1 ~ 2 帧</td><td>3 帧</td><td>6 帧</td></tr>
+        <tr><td>120</td><td>2 ~ 3 帧</td><td>6 帧</td><td>12 帧</td></tr>
+        <tr><td>240</td><td>5 帧</td><td>12 帧</td><td>24 帧</td></tr>
+      </tbody>
+    </table>
+    <div class="tip">
+      UI 现在直接在滑条右侧打 <code>≈ XX ms @ N fps</code>，不用心算。改捕获分辨率 / 捕获方式（UDP / TCP / OpenCV）会改变实际 fps，反过来影响这两个滑条的"实际 ms"——换捕获方式后回来确认下。
+    </div>
 
     <!-- ============ Threat ============ -->
     <h2 id="threat">威胁度优先级</h2>
@@ -678,9 +719,11 @@
     <table class="params">
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
-        <tr><td>采样矩形 W/H</td><td>40/40</td><td>从屏幕中心抠多大的方框找色。</td></tr>
-        <tr><td>面积过滤 min/max</td><td>2/200</td><td>找到的色块面积范围（像素）。</td></tr>
-        <tr><td>颜色 HSV 段</td><td>红色双段</td><td>HSV 色相在 0/180 处会回环，红色需要两段。</td></tr>
+        <tr><td>crosshair_rect_w / h</td><td>40 / 40</td><td>从屏幕中心抠多大的方框找色（像素）。</td></tr>
+        <tr><td>crosshair_min_pixel_count</td><td>4</td><td>ROI 内符合 HSV 的像素数下限。低于此值视为没找到——抑制噪声 / 单像素误命中。</td></tr>
+        <tr><td>crosshair_close_radius</td><td>1</td><td><code>MORPH_CLOSE</code> 的核半径（像素）。0 = 关闭；1~3 适合渐变 / 中心带白点的准星样式；&gt;5 容易把红色噪点合到一起。</td></tr>
+        <tr><td>颜色 HSV 段</td><td>红色双段</td><td>HSV 色相在 0/180 处会回环，纯红色需要两段（0~10 + 160~179）。每段独立 enabled，便于在面板里临时关掉一段做实验。</td></tr>
+        <tr><td>每热键开关</td><td>off</td><td><code>crosshair_detect_enabled</code> 在每个 hotkey 里独立打开；调色板和 ROI 是全局共享的。</td></tr>
       </tbody>
     </table>
 
@@ -782,8 +825,8 @@
         <tr><td>瞄到墙上</td><td>bbox 一半被墙挡，pivot 在几何中心 → 落在墙上</td><td>开<a href="#depth">深度遮罩</a> + 检查 pivot 已基于可见像素重心</td></tr>
         <tr><td>两人挤在一起鼠标在两人间反复</td><td>没开<a href="#hysteresis">切换迟滞</a>，或同优先级</td><td>把次要的人调低优先级 / 加大迟滞</td></tr>
         <tr><td>近距离锚点上下抖</td><td>没开<a href="#yoffset-decay">Y 偏移衰减</a></td><td>开衰减，调 high_frac=0.40</td></tr>
-        <tr><td>过冲</td><td>P 太大 / D 太小</td><td>开<a href="#replay">回放</a>看慢动作</td></tr>
-        <tr><td>跟不上目标</td><td>P 太小，或 Track 模式被错误激活</td><td>看调试面板的"实时模式"标签</td></tr>
+        <tr><td>过冲</td><td><code>speed_x/y</code> 太大；或 <code>lock_strength</code> 过强把已经接近的目标吸过头</td><td>开<a href="#replay">回放</a>看慢动作；先把 <code>lock_strength</code> 设 0 单独验 speed</td></tr>
+        <tr><td>跟不上目标</td><td><code>speed_x/y</code> 太小；或 Kalman 预测被关闭导致没有超前量</td><td>提 speed 0.1 一档；确认 <code>kalman_enabled</code> 开</td></tr>
         <tr><td>目标短暂消失后鼠标乱飞</td><td>Kalman <code>velocity_damping</code> 太小 / <code>max_velocity</code> 太大</td><td>提高 damping 到 0.20</td></tr>
         <tr><td>智能扳机不开火</td><td>三门有一门没满足</td><td>看 prob/rms 实时值，逐项排查</td></tr>
         <tr><td>智能扳机一直开火停不下来</td><td>不可能 — 五重释放都失效要么是 bug，要么是输入设备本身锁死了</td><td>检查输入设备硬件 + 看日志</td></tr>
@@ -801,8 +844,8 @@
         <tr><td>detection</td><td>YOLO 单帧输出的一个 bbox + 类别 id。</td></tr>
         <tr><td>检测分辨率 / detection space</td><td>所有坐标计算的"虚拟分辨率"。一个 320 detection_resolution 的系统所有 px 都在 320×320 内。</td></tr>
         <tr><td>FOV</td><td>检测分辨率内的椭圆瞄准区域，<b>不是</b>游戏里那个 FOV°。</td></tr>
-        <tr><td>flick / 甩枪</td><td>大角度快速挪准星，对应高 P PID。</td></tr>
-        <tr><td>track / 跟枪</td><td>小幅度持续跟随目标，对应低 P + 高 D。</td></tr>
+        <tr><td>flick / 甩枪</td><td>大角度快速挪准星。当前实现下由 <code>speed_x/y</code> 直接驱动，无单独模式。</td></tr>
+        <tr><td>track / 跟枪</td><td>小幅度持续跟随目标。靠 Kalman 预测 + <code>lock_strength</code> 吸附完成，不再依赖 PID 双模式。</td></tr>
       </tbody>
     </table>
 

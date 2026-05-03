@@ -37,6 +37,7 @@
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="crosshair\crosshair_detector.cpp" />
+    <ClCompile Include="crosshair\crosshair_runtime.cpp" />
     <ClCompile Include="keyboard\keyboard_listener.cpp" />
     <ClCompile Include="keyboard\keycodes.cpp" />
     <ClCompile Include="mem\cpu_affinity_manager.cpp" />
@@ -110,10 +111,11 @@
     <ClInclude Include="imgui\imstb_textedit.h" />
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="include\other_tools.h" />
-    <ClInclude Include="mouse\pid_controller.h" />
+    <ClInclude Include="mouse\aim_controller.h" />
     <ClInclude Include="detector\model_inspector.h" />
     <ClInclude Include="runtime\active_hotkey.h" />
     <ClInclude Include="crosshair\crosshair_detector.h" />
+    <ClInclude Include="crosshair\crosshair_runtime.h" />
     <ClInclude Include="keyboard\keyboard_listener.h" />
     <ClInclude Include="keyboard\keycodes.h" />
     <ClInclude Include="mem\cpu_affinity_manager.h" />

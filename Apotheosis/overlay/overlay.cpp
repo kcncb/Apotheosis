@@ -29,6 +29,7 @@
 #include "overlay.h"
 #include "overlay/draw_settings.h"
 #include "overlay/config_dirty.h"
+#include "overlay/overlay_image.h"
 #include "include/other_tools.h"
 #include "config.h"
 #include "keycodes.h"
@@ -84,6 +85,88 @@ static bool g_autoResizeEnabled = true;
 static ImGuiStyle g_baseStyle{};
 static bool g_baseStyleReady = false;
 static float g_runtimeUiScale = -1.0f;
+
+static OverlayImage g_logo{};
+static HICON g_logoIconBig = NULL;
+static HICON g_logoIconSmall = NULL;
+
+static void LoadOverlayLogo()
+{
+    if (g_logo.srv || !g_pd3dDevice)
+        return;
+
+    // Look in the executable directory first, then fall back to the working dir.
+    char modulePath[MAX_PATH] = {};
+    if (::GetModuleFileNameA(NULL, modulePath, MAX_PATH) > 0)
+    {
+        if (char* slash = std::strrchr(modulePath, '\\'))
+            slash[1] = '\0';
+        std::string p = std::string(modulePath) + "apotheosis_logo.png";
+        if (OverlayImage_LoadFromFile(p.c_str(), g_pd3dDevice, g_logo))
+            return;
+    }
+    OverlayImage_LoadFromFile("apotheosis_logo.png", g_pd3dDevice, g_logo);
+}
+
+static void ApplyOverlayWindowIcon()
+{
+    if (!g_hwnd) return;
+
+    char modulePath[MAX_PATH] = {};
+    std::string path = "apotheosis_logo.png";
+    if (::GetModuleFileNameA(NULL, modulePath, MAX_PATH) > 0)
+    {
+        if (char* slash = std::strrchr(modulePath, '\\'))
+            slash[1] = '\0';
+        std::string p = std::string(modulePath) + "apotheosis_logo.png";
+        if (::GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES)
+            path = p;
+    }
+
+    g_logoIconBig = OverlayImage_LoadHIconFromFile(path.c_str());
+    if (g_logoIconBig)
+    {
+        ::SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_logoIconBig));
+        ::SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_logoIconBig));
+    }
+}
+
+static void DrawSidebarBrand(float availWidth)
+{
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+
+    const float logoSize = std::clamp(availWidth * 0.55f, 36.0f, 84.0f);
+    const float blockH = logoSize + 18.0f + 6.0f; // logo + text line + bottom margin
+
+    // Subtle bottom gold separator.
+    const ImU32 goldHi = IM_COL32(240, 210, 130, 235);
+    const ImU32 gold = IM_COL32(212, 175, 95, 200);
+
+    if (g_logo.srv)
+    {
+        const float cx = pos.x + (availWidth - logoSize) * 0.5f;
+        ImGui::SetCursorScreenPos(ImVec2(cx, pos.y));
+        ImGui::Image(reinterpret_cast<ImTextureID>(g_logo.srv), ImVec2(logoSize, logoSize));
+    }
+    else
+    {
+        ImGui::Dummy(ImVec2(0.0f, logoSize));
+    }
+
+    // "APOTHEOSIS" wordmark in gold.
+    const char* brand = "APOTHEOSIS";
+    const ImVec2 ts = ImGui::CalcTextSize(brand);
+    const float tx = pos.x + (availWidth - ts.x) * 0.5f;
+    const float ty = pos.y + logoSize + 2.0f;
+    draw->AddText(ImVec2(tx, ty), goldHi, brand);
+
+    // Hairline separator under the brand.
+    const float sepY = ty + ts.y + 4.0f;
+    draw->AddLine(ImVec2(pos.x + 4.0f, sepY), ImVec2(pos.x + availWidth - 4.0f, sepY), gold, 1.0f);
+
+    ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + blockH));
+}
 
 std::vector<std::string> availableModels;
 std::vector<std::string> key_names;
@@ -221,6 +304,11 @@ static void ApplyTheme_RoseDark()
     const ImVec4 textDim = RGBA(143, 160, 182, 255);
     const ImVec4 bright = RGBA(245, 245, 245, 255);
 
+    // Apotheosis gold accent palette (sampled from logo).
+    const ImVec4 gold = RGBA(212, 175, 95, 255);
+    const ImVec4 goldHi = RGBA(240, 210, 130, 255);
+    const ImVec4 goldDim = RGBA(160, 125, 55, 255);
+
     c[ImGuiCol_Text] = text;
     c[ImGuiCol_TextDisabled] = textDim;
 
@@ -245,27 +333,27 @@ static void ApplyTheme_RoseDark()
     c[ImGuiCol_ScrollbarGrabHovered] = RGBA(122, 122, 122, 210);
     c[ImGuiCol_ScrollbarGrabActive] = RGBA(145, 145, 145, 232);
 
-    c[ImGuiCol_CheckMark] = bright;
-    c[ImGuiCol_SliderGrab] = RGBA(236, 236, 236, 236);
-    c[ImGuiCol_SliderGrabActive] = bright;
+    c[ImGuiCol_CheckMark] = goldHi;
+    c[ImGuiCol_SliderGrab] = gold;
+    c[ImGuiCol_SliderGrabActive] = goldHi;
 
     c[ImGuiCol_Button] = RGBA(14, 14, 14, 246);
-    c[ImGuiCol_ButtonHovered] = RGBA(20, 20, 20, 250);
-    c[ImGuiCol_ButtonActive] = RGBA(28, 28, 28, 252);
+    c[ImGuiCol_ButtonHovered] = RGBA(28, 24, 14, 250);
+    c[ImGuiCol_ButtonActive] = RGBA(48, 38, 18, 252);
 
-    c[ImGuiCol_Header] = RGBA(18, 18, 18, 244);
-    c[ImGuiCol_HeaderHovered] = RGBA(24, 24, 24, 250);
-    c[ImGuiCol_HeaderActive] = RGBA(32, 32, 32, 252);
+    c[ImGuiCol_Header] = RGBA(40, 32, 14, 200);
+    c[ImGuiCol_HeaderHovered] = RGBA(60, 48, 20, 220);
+    c[ImGuiCol_HeaderActive] = RGBA(86, 68, 28, 235);
 
     c[ImGuiCol_Separator] = stroke;
-    c[ImGuiCol_SeparatorHovered] = strokeHi;
-    c[ImGuiCol_SeparatorActive] = RGBA(168, 168, 168, 228);
+    c[ImGuiCol_SeparatorHovered] = RGBA(212, 175, 95, 160);
+    c[ImGuiCol_SeparatorActive] = RGBA(240, 210, 130, 220);
 
     c[ImGuiCol_Tab] = RGBA(14, 14, 14, 248);
-    c[ImGuiCol_TabHovered] = RGBA(22, 22, 22, 250);
-    c[ImGuiCol_TabActive] = RGBA(30, 30, 30, 252);
+    c[ImGuiCol_TabHovered] = RGBA(40, 32, 14, 250);
+    c[ImGuiCol_TabActive] = RGBA(70, 56, 22, 252);
     c[ImGuiCol_TabUnfocused] = RGBA(12, 12, 12, 240);
-    c[ImGuiCol_TabUnfocusedActive] = RGBA(22, 22, 22, 248);
+    c[ImGuiCol_TabUnfocusedActive] = RGBA(40, 32, 14, 248);
 
     c[ImGuiCol_ResizeGrip] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripHovered] = RGBA(0, 0, 0, 0);
@@ -280,12 +368,12 @@ static void ApplyTheme_RoseDark()
     c[ImGuiCol_TableRowBg] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_TableRowBgAlt] = RGBA(255, 255, 255, 6);
 
-    c[ImGuiCol_NavHighlight] = RGBA(255, 255, 255, 110);
-    c[ImGuiCol_NavWindowingHighlight] = RGBA(255, 255, 255, 90);
+    c[ImGuiCol_NavHighlight] = RGBA(240, 210, 130, 160);
+    c[ImGuiCol_NavWindowingHighlight] = RGBA(240, 210, 130, 130);
     c[ImGuiCol_NavWindowingDimBg] = RGBA(0, 0, 0, 110);
 
-    c[ImGuiCol_TextSelectedBg] = RGBA(255, 255, 255, 56);
-    c[ImGuiCol_DragDropTarget] = RGBA(255, 255, 255, 188);
+    c[ImGuiCol_TextSelectedBg] = RGBA(212, 175, 95, 80);
+    c[ImGuiCol_DragDropTarget] = RGBA(240, 210, 130, 220);
 }
 
 struct OverlayTabItem
@@ -345,18 +433,24 @@ static bool DrawSidebarTabButton(const char* label, bool selected)
 
     ImU32 rowBg = IM_COL32(0, 0, 0, 0);
     if (selected)
-        rowBg = IM_COL32(60, 60, 60, 190);
+        rowBg = IM_COL32(56, 44, 18, 220);
     else if (hovered)
-        rowBg = IM_COL32(28, 28, 28, 210);
+        rowBg = IM_COL32(32, 28, 16, 210);
 
     if ((rowBg >> IM_COL32_A_SHIFT) != 0)
         draw->AddRectFilled(pos, max, rowBg, 0.0f);
     if (selected)
-        draw->AddRect(pos, max, IM_COL32(255, 255, 255, 76), 0.0f, 0, 1.0f);
+    {
+        // Left gold accent bar + thin gold border for the active row.
+        draw->AddRectFilled(pos, ImVec2(pos.x + 3.0f, max.y), IM_COL32(240, 210, 130, 240), 0.0f);
+        draw->AddRect(pos, max, IM_COL32(212, 175, 95, 200), 0.0f, 0, 1.0f);
+    }
 
     const float textY = pos.y + (size.y - ImGui::GetTextLineHeight()) * 0.5f;
-    const ImU32 textCol = selected ? IM_COL32(245, 245, 245, 255) : (hovered ? IM_COL32(226, 226, 226, 255) : IM_COL32(192, 200, 214, 240));
-    draw->AddText(ImVec2(pos.x + style.FramePadding.x + 2.0f, textY), textCol, label);
+    const ImU32 textCol = selected ? IM_COL32(245, 222, 156, 255)
+                                   : (hovered ? IM_COL32(232, 226, 210, 255)
+                                              : IM_COL32(192, 200, 214, 240));
+    draw->AddText(ImVec2(pos.x + style.FramePadding.x + 6.0f, textY), textCol, label);
 
     return pressed;
 }
@@ -935,6 +1029,9 @@ void OverlayThread()
 
     SetupImGui();
 
+    LoadOverlayLogo();
+    ApplyOverlayWindowIcon();
+
     // Launcher semantics: show the window immediately on process start so the
     // user can pick backend/model and click Start. The window stays visible
     // for the whole session 閳?there is no toggle hotkey anymore.
@@ -1008,8 +1105,8 @@ void OverlayThread()
             ImGui::BeginChild("##options_nav", ImVec2(sidebarWidth, h - static_cast<float>(DRAG_BAR_HEIGHT_PX)), true,
                 ImGuiWindowFlags_AlwaysUseWindowPadding | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-            ImGui::TextUnformatted(u8"Apotheosis 控制台");
-            ImGui::Dummy(ImVec2(0.0f, 2.0f));
+            DrawSidebarBrand(ImGui::GetContentRegionAvail().x);
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
             const char* lastGroup = nullptr;
             for (int i = 0; i < tabCount; ++i)
@@ -1019,7 +1116,7 @@ void OverlayThread()
                 {
                     if (lastGroup)
                         ImGui::Dummy(ImVec2(0.0f, 2.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(165, 180, 199, 228));
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(212, 175, 95, 235));
                     ImGui::TextUnformatted(group);
                     ImGui::PopStyleColor();
                 }
@@ -1040,7 +1137,9 @@ void OverlayThread()
             ImGui::BeginChild("##options_content", ImVec2(0.0f, h - static_cast<float>(DRAG_BAR_HEIGHT_PX)), true,
                 ImGuiWindowFlags_AlwaysUseWindowPadding | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(240, 210, 130, 255));
             ImGui::TextUnformatted(kOverlayTabs[activeTab].label);
+            ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(143, 160, 182, 255));
             ImGui::TextWrapped("%s", kOverlayTabs[activeTab].description);
             ImGui::PopStyleColor();
@@ -1073,6 +1172,10 @@ void OverlayThread()
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    OverlayImage_Release(g_logo);
+    if (g_logoIconBig) { ::DestroyIcon(g_logoIconBig); g_logoIconBig = NULL; }
+    if (g_logoIconSmall) { ::DestroyIcon(g_logoIconSmall); g_logoIconSmall = NULL; }
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

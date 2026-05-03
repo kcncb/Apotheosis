@@ -5,8 +5,7 @@
 #include <cstring>
 #include <iostream>
 
-#include <opencv2/cudawarping.hpp>
-#include <opencv2/core/cuda_stream_accessor.hpp>
+#include "gpu_color_ops.h"
 
 UDPCapture::UDPCapture(int width, int height, const std::string& ip, int port)
     : width_(width)
@@ -148,13 +147,13 @@ cv::Mat UDPCapture::GetNextFrameCpu()
     return frame;
 }
 
-cv::cuda::GpuMat UDPCapture::GetNextFrameGpu()
+GpuImage UDPCapture::GetNextFrameGpu()
 {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (gpu_frame_queue_.empty())
-        return cv::cuda::GpuMat();
+        return GpuImage();
 
-    cv::cuda::GpuMat frame = std::move(gpu_frame_queue_.front());
+    GpuImage frame = std::move(gpu_frame_queue_.front());
     gpu_frame_queue_.pop();
     return frame;
 }
@@ -261,19 +260,24 @@ void UDPCapture::ReceiveThread()
                     decode_src = pinned_jpeg_buffer_;
                 }
 
-                cv::cuda::GpuMat decoded;
+                GpuImage decoded;
                 if (gpu_decoder_->decode(decode_src, jpeg_size, decoded, decode_stream_))
                 {
                     // Sender is expected to emit frames already at width_/height_
                     // (configured detection_resolution). If it doesn't, resize
                     // on GPU so downstream sees a consistent square frame.
-                    cv::cuda::GpuMat finalFrame = decoded;
-                    if (!decoded.empty() && (decoded.cols != width_ || decoded.rows != height_))
+                    GpuImage finalFrame = decoded;
+                    if (!decoded.empty() && (decoded.cols() != width_ || decoded.rows() != height_))
                     {
-                        cv::cuda::Stream cvStream = cv::cuda::StreamAccessor::wrapStream(decode_stream_);
-                        cv::cuda::GpuMat resized;
-                        cv::cuda::resize(decoded, resized, cv::Size(width_, height_), 0, 0, cv::INTER_LINEAR, cvStream);
-                        finalFrame = resized;
+                        GpuImage resized;
+                        if (resized.create(height_, width_, 3))
+                        {
+                            launch_resize_bgr_u8_bilinear(
+                                decoded.data(), decoded.step(), decoded.cols(), decoded.rows(),
+                                resized.data(), resized.step(), width_, height_,
+                                decode_stream_);
+                            finalFrame = std::move(resized);
+                        }
                     }
 
                     // Flush decode+resize before handing to the detector
@@ -317,7 +321,7 @@ void UDPCapture::ReceiveThread()
                         frame_queue_.pop();
                         dropped_frames_++;
                     }
-                    frame_queue_.push(frame.clone());
+                    frame_queue_.push(std::move(frame));
                     received_frames_++;
                 }
             }

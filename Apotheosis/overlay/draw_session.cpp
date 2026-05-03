@@ -292,7 +292,11 @@ void draw_session()
 
     if (OverlayUI::BeginSection(u8"检测预览", "session_section_preview"))
     {
-        draw_detection_preview();
+        if (ImGui::Checkbox(u8"启用独立检测预览窗口", &config.show_window))
+        {
+            OverlayConfig_MarkDirty();
+        }
+        ImGui::TextDisabled(u8"勾选后会在控制台外浮出一个可拖动 / 缩放的预览窗口。");
         OverlayUI::EndSection();
     }
 }

@@ -17,11 +17,12 @@ This file is a fresh project-orientation note for AI assistants. It is based on 
 - CMake expects local dependencies under:
   - `packages/Microsoft.ML.OnnxRuntime.DirectML.*`
   - `packages/Microsoft.AI.DirectML.*`
-  - `Apotheosis/modules/opencv/build/install`
+  - `Apotheosis/modules/opencv/prebuilt/opencv/build` (stock OpenCV release, no CUDA modules)
   - `Apotheosis/modules/TensorRT-10.15.1.29`
 - CUDA is enabled unconditionally in CMake and uses CUDA Toolkit 12.9 style paths/options.
+- `CUDA_ARCHITECTURES` is set to `75-real;80-real;86-real;89-real;120-real` so the project's own kernels run on Turing through Blackwell client GPUs without driver JIT.
 - Runtime DLL copying is controlled by `AIMBOT_COPY_RUNTIME_DLLS` and copies OpenCV, ONNX Runtime, DirectML, TensorRT, cuDNN, and `ghub_mouse.dll` when present.
-- `tools/build_opencv_cuda.ps1` is the local helper for building the vendored OpenCV CUDA install.
+- The project does NOT use OpenCV's CUDA modules (cudawarping/cudaimgproc/cudaarithm). All GPU image work goes through `Apotheosis/mem/gpu_image.{h,cpp}` (`GpuImage` / `GpuFrame`), `Apotheosis/capture/gpu_color_ops.{cu,h}` (BGRA->BGR, bilinear resize), and `Apotheosis/detector/cuda_preprocess.{cu,h}` (fused fp16 preprocess), with NPP / nvJPEG / TensorRT / cuDNN handling the rest.
 
 ## Runtime Architecture
 

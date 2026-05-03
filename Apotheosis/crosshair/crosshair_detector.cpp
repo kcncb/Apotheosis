@@ -98,47 +98,33 @@ std::optional<cv::Point2f> CrosshairDetector::detect(
     for (const auto& band : settings.colors)
         accumulate_band(hsv, band, mask, scratch);
 
-    // One morphological open to reject single-pixel noise.
-    static const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
+    // Single-pixel noise removal — cheap and shape-agnostic.
+    static const cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, openKernel);
 
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    if (contours.empty())
-        return std::nullopt;
-
-    const int minArea = std::max(1, settings.min_area);
-    const int maxArea = std::max(minArea, settings.max_area);
-
-    const cv::Point2f roiCenter(roi.width * 0.5f, roi.height * 0.5f);
-    std::optional<cv::Point2f> bestLocal;
-    float bestDist2 = std::numeric_limits<float>::max();
-
-    for (const auto& c : contours)
+    // Optional CLOSE to bridge gradient-induced gaps (e.g. dot whose centre
+    // fades to white doesn't pass HSV → ring is incomplete). Keep the
+    // kernel small so we don't merge separate red noise into the crosshair.
+    if (settings.close_radius > 0)
     {
-        const double area = cv::contourArea(c);
-        if (area < minArea || area > maxArea)
-            continue;
-        cv::Moments mu = cv::moments(c);
-        if (mu.m00 <= 0.0)
-            continue;
-        const cv::Point2f local(static_cast<float>(mu.m10 / mu.m00),
-                                static_cast<float>(mu.m01 / mu.m00));
-        const float dx = local.x - roiCenter.x;
-        const float dy = local.y - roiCenter.y;
-        const float d2 = dx * dx + dy * dy;
-        if (d2 < bestDist2)
-        {
-            bestDist2 = d2;
-            bestLocal = local;
-        }
+        const int r = std::min(settings.close_radius, 7);
+        const int k = 2 * r + 1;
+        cv::Mat closeKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(k, k));
+        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, closeKernel);
     }
 
-    if (!bestLocal)
+    // Density centroid of ALL red pixels in the ROI. Shape-agnostic: a
+    // ring + centre dot, a single fading dot, and a thin cross all have
+    // their pixel mass distributed symmetrically around the aim point, so
+    // the moments centroid lands on it without any contour heuristics.
+    const cv::Moments m = cv::moments(mask, true);
+    if (m.m00 < static_cast<double>(std::max(1, settings.min_pixel_count)))
         return std::nullopt;
 
-    return cv::Point2f(bestLocal->x + static_cast<float>(roi.x),
-                       bestLocal->y + static_cast<float>(roi.y));
+    const float local_x = static_cast<float>(m.m10 / m.m00);
+    const float local_y = static_cast<float>(m.m01 / m.m00);
+    return cv::Point2f(local_x + static_cast<float>(roi.x),
+                       local_y + static_cast<float>(roi.y));
 }
 
 } // namespace crosshair

@@ -80,6 +80,12 @@ struct TrackerUpdate
     float lock_switch_score_margin = 0.15f;
     int lock_switch_min_frames = 3;
 
+    // Minimum number of frames a lock must persist after acquisition. While
+    // the hold counter is non-zero the tracker keeps the current lock
+    // unconditionally (no priority preempt, no eligibility-driven hand-off).
+    // 0 disables.
+    int lock_hold_min_frames = 10;
+
     // y_offset distance/size decay. Large bboxes (close targets) suffer more
     // pivot jitter from a fixed y_offset because the same fraction maps to
     // many pixels. When enabled, the per-class y_offset is linearly blended
@@ -171,7 +177,8 @@ private:
                        int   threat_body_class_id,
                        int& outRank,
                        double& outScore,
-                       float& outThreat) const;
+                       float& outThreat,
+                       bool is_locked = false) const;
 
     std::vector<TrackState> tracks_;
     int nextId_ = 1;
@@ -184,6 +191,12 @@ private:
     // advantage. Reset on lock change / reset() / resolution change.
     int challengerTrackId_ = -1;
     int challengerStreak_ = 0;
+
+    // Minimum-hold counter. Set to `lock_hold_min_frames` whenever the
+    // locked track id changes; decremented every update cycle. While > 0
+    // the same-rank / higher-rank / eligibility logic is bypassed and the
+    // current lock is preserved verbatim.
+    int lockHoldRemaining_ = 0;
 
     // Threat-priority parameters captured from the latest TrackerUpdate so
     // chooseBestTrack (which is also called outside update()) can apply the

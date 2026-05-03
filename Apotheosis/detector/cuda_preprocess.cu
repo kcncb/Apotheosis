@@ -1,179 +1,121 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <opencv2/core/cuda.hpp>
-#include <opencv2/core/cuda_types.hpp>
 
-static __global__ void hwc_to_chw_norm_kernel(
-    const float* __restrict__ srcHwc, int srcStepFloats,
-    float* __restrict__ dstChw,
-    int width, int height)
-{
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    const int hw = height * width;
-    const int idx = y * width + x;
-
-    const float* p = srcHwc + y * srcStepFloats + x * 3;
-
-    dstChw[0 * hw + idx] = p[2]; // R
-    dstChw[1 * hw + idx] = p[1]; // G
-    dstChw[2 * hw + idx] = p[0]; // B
-}
-
-void launch_hwc_to_chw_norm(
-    const cv::cuda::GpuMat& hwcFloat3,
-    float* dstChw,
-    int width,
-    int height,
-    cudaStream_t stream)
-{
-    const dim3 block(16, 16);
-    const dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
-
-    const int stepFloats = static_cast<int>(hwcFloat3.step) / sizeof(float);
-    const float* srcPtr = reinterpret_cast<const float*>(hwcFloat3.ptr<float>());
-
-    hwc_to_chw_norm_kernel<<<grid, block, 0, stream>>>(
-        srcPtr, stepFloats, dstChw, width, height
-    );
-}
+#include "cuda_preprocess.h"
 
 // ---------------------------------------------------------------------------
-// Fused preprocess: uint8 BGR HWC -> float CHW RGB / 255
+// Fused preprocess: uint8 BGR/BGRA/GRAY HWC (any source size) ->
+//   bilinear resize to side x side
+//   -> BGR->RGB (or GRAY broadcast)
+//   -> /255
+//   -> half CHW written into the engine's __half input binding.
+//
+// This replaces the prior chain of (cv::cuda::cvtColor + cv::cuda::resize +
+// fused convert kernel). One launch, no intermediate GpuMat, and it does not
+// depend on the OpenCV CUDA modules being built for the current GPU's compute
+// capability — nvcc emits a kernel image for whatever arch this project's
+// CMAKE_CUDA_ARCHITECTURES targets.
 // ---------------------------------------------------------------------------
-static __global__ void fused_bgr_u8_to_chw_rgb_f32_kernel(
-    const unsigned char* __restrict__ src, int srcStepBytes,
-    float* __restrict__ dst, int side)
-{
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= side || y >= side) return;
-
-    const int hw = side * side;
-    const int idx = y * side + x;
-
-    const unsigned char* p = src + y * srcStepBytes + x * 3;
-    constexpr float kInv255 = 1.0f / 255.0f;
-
-    dst[0 * hw + idx] = static_cast<float>(p[2]) * kInv255; // R
-    dst[1 * hw + idx] = static_cast<float>(p[1]) * kInv255; // G
-    dst[2 * hw + idx] = static_cast<float>(p[0]) * kInv255; // B
-}
-
-void launch_fused_bgr_u8_to_chw_rgb_f32(
-    const cv::cuda::GpuMat& bgrU8,
-    float* dstChw,
-    int side,
-    cudaStream_t stream)
-{
-    const dim3 block(16, 16);
-    const dim3 grid((side + block.x - 1) / block.x, (side + block.y - 1) / block.y);
-
-    const int stepBytes = static_cast<int>(bgrU8.step);
-    const unsigned char* srcPtr = bgrU8.ptr<unsigned char>();
-
-    fused_bgr_u8_to_chw_rgb_f32_kernel<<<grid, block, 0, stream>>>(
-        srcPtr, stepBytes, dstChw, side
-    );
-}
-
-static __global__ void fused_bgr_u8_to_chw_rgb_f16_kernel(
-    const unsigned char* __restrict__ src, int srcStepBytes,
+static __global__ void resize_bgr_u8_to_chw_rgb_f16_kernel(
+    const unsigned char* __restrict__ src,
+    int srcStepBytes, int srcW, int srcH, int srcChannels,
     __half* __restrict__ dst, int side)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= side || y >= side) return;
 
+    // Pixel-center sampling, matches OpenCV INTER_LINEAR semantics.
+    const float scaleX = static_cast<float>(srcW) / static_cast<float>(side);
+    const float scaleY = static_cast<float>(srcH) / static_cast<float>(side);
+    const float fx = (static_cast<float>(x) + 0.5f) * scaleX - 0.5f;
+    const float fy = (static_cast<float>(y) + 0.5f) * scaleY - 0.5f;
+
+    const int x0 = max(0, min(srcW - 1, static_cast<int>(floorf(fx))));
+    const int y0 = max(0, min(srcH - 1, static_cast<int>(floorf(fy))));
+    const int x1 = min(srcW - 1, x0 + 1);
+    const int y1 = min(srcH - 1, y0 + 1);
+    const float ax = fx - floorf(fx);
+    const float ay = fy - floorf(fy);
+
+    const float w00 = (1.0f - ax) * (1.0f - ay);
+    const float w01 = ax * (1.0f - ay);
+    const float w10 = (1.0f - ax) * ay;
+    const float w11 = ax * ay;
+
+    const unsigned char* p00 = src + y0 * srcStepBytes + x0 * srcChannels;
+    const unsigned char* p01 = src + y0 * srcStepBytes + x1 * srcChannels;
+    const unsigned char* p10 = src + y1 * srcStepBytes + x0 * srcChannels;
+    const unsigned char* p11 = src + y1 * srcStepBytes + x1 * srcChannels;
+
+    constexpr float kInv255 = 1.0f / 255.0f;
     const int hw = side * side;
     const int idx = y * side + x;
 
-    const unsigned char* p = src + y * srcStepBytes + x * 3;
-    constexpr float kInv255 = 1.0f / 255.0f;
+    float r;
+    float g;
+    float b;
+    if (srcChannels == 1)
+    {
+        const float v = (p00[0] * w00 + p01[0] * w01 + p10[0] * w10 + p11[0] * w11) * kInv255;
+        r = v;
+        g = v;
+        b = v;
+    }
+    else
+    {
+        // src is BGR or BGRA (alpha is dropped). Swap to RGB on store.
+        const float bv = (p00[0] * w00 + p01[0] * w01 + p10[0] * w10 + p11[0] * w11) * kInv255;
+        const float gv = (p00[1] * w00 + p01[1] * w01 + p10[1] * w10 + p11[1] * w11) * kInv255;
+        const float rv = (p00[2] * w00 + p01[2] * w01 + p10[2] * w10 + p11[2] * w11) * kInv255;
+        r = rv;
+        g = gv;
+        b = bv;
+    }
 
-    dst[0 * hw + idx] = __float2half(static_cast<float>(p[2]) * kInv255); // R
-    dst[1 * hw + idx] = __float2half(static_cast<float>(p[1]) * kInv255); // G
-    dst[2 * hw + idx] = __float2half(static_cast<float>(p[0]) * kInv255); // B
+    dst[0 * hw + idx] = __float2half(r);
+    dst[1 * hw + idx] = __float2half(g);
+    dst[2 * hw + idx] = __float2half(b);
 }
 
-void launch_fused_bgr_u8_to_chw_rgb_f16(
-    const cv::cuda::GpuMat& bgrU8,
+void launch_resize_bgr_u8_to_chw_rgb_f16(
+    const GpuFrame& src,
     __half* dstChw,
     int side,
     cudaStream_t stream)
 {
+    if (src.empty()) return;
     const dim3 block(16, 16);
     const dim3 grid((side + block.x - 1) / block.x, (side + block.y - 1) / block.y);
 
-    const int stepBytes = static_cast<int>(bgrU8.step);
-    const unsigned char* srcPtr = bgrU8.ptr<unsigned char>();
-
-    fused_bgr_u8_to_chw_rgb_f16_kernel<<<grid, block, 0, stream>>>(
-        srcPtr, stepBytes, dstChw, side
+    resize_bgr_u8_to_chw_rgb_f16_kernel<<<grid, block, 0, stream>>>(
+        src.data, static_cast<int>(src.step),
+        src.cols, src.rows, src.channels,
+        dstChw, side
     );
-}
-
-// ---------------------------------------------------------------------------
-// Transpose [1, C, N] (fp16/fp32) -> [N, C] fp32
-// ---------------------------------------------------------------------------
-template <typename SrcT>
-static __global__ void transpose_cn_to_nc_kernel(
-    const SrcT* __restrict__ src,
-    float* __restrict__ dst,
-    int C, int N)
-{
-    const int n = blockIdx.x * blockDim.x + threadIdx.x;
-    const int c = blockIdx.y * blockDim.y + threadIdx.y;
-    if (n >= N || c >= C) return;
-
-    const SrcT v = src[c * N + n];
-    float f;
-    if constexpr (sizeof(SrcT) == 2)
-        f = __half2float(*reinterpret_cast<const __half*>(&v));
-    else
-        f = static_cast<float>(v);
-
-    dst[n * C + c] = f;
-}
-
-void launch_transpose_decode_cast(
-    const void* srcCN,
-    float* dstNC,
-    int C,
-    int N,
-    bool isHalf,
-    cudaStream_t stream)
-{
-    const dim3 block(32, 8);
-    const dim3 grid((N + block.x - 1) / block.x, (C + block.y - 1) / block.y);
-
-    if (isHalf)
-    {
-        transpose_cn_to_nc_kernel<__half><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __half*>(srcCN), dstNC, C, N
-        );
-    }
-    else
-    {
-        transpose_cn_to_nc_kernel<float><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const float*>(srcCN), dstNC, C, N
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Fused decode + filter: [1, C, N] (fp16/fp32) -> compact [K, 6] candidates
 // ---------------------------------------------------------------------------
 template <typename SrcT>
-__device__ __forceinline__ float read_cn(const SrcT* src, int c, int n, int N)
+__device__ __forceinline__ float load_value(const SrcT* src, int idx)
 {
-    const SrcT v = src[c * N + n];
+    const SrcT v = src[idx];
     if constexpr (sizeof(SrcT) == 2)
         return __half2float(*reinterpret_cast<const __half*>(&v));
     else
         return static_cast<float>(v);
+}
+
+template <typename SrcT>
+__device__ __forceinline__ float read_cn(const SrcT* src, int c, int n, int C, int N, bool cnLayout)
+{
+    // cnLayout=true  -> model output is [1, C, N], element (c,n) at c*N + n
+    // cnLayout=false -> model output is [1, N, C] (transposed export), element
+    //                   (c,n) at n*C + c
+    const int idx = cnLayout ? (c * N + n) : (n * C + c);
+    return load_value<SrcT>(src, idx);
 }
 
 template <typename SrcT>
@@ -183,6 +125,7 @@ static __global__ void decode_and_filter_kernel(
     float confThreshold,
     float imgScale,
     int maxCandidates,
+    bool cnLayout,
     int* __restrict__ counter,
     float* __restrict__ dst)
 {
@@ -195,7 +138,7 @@ static __global__ void decode_and_filter_kernel(
     #pragma unroll 4
     for (int c = 0; c < nc; ++c)
     {
-        const float s = read_cn<SrcT>(src, 4 + c, n, N);
+        const float s = read_cn<SrcT>(src, 4 + c, n, C, N, cnLayout);
         if (s > bestScore) { bestScore = s; bestClass = c; }
     }
 
@@ -204,10 +147,10 @@ static __global__ void decode_and_filter_kernel(
     // Keep coords in model-space; the CPU cols==6 decode path applies
     // img_scale consistently for both this and the EfficientNMS plugin path.
     (void)imgScale;
-    const float cx = read_cn<SrcT>(src, 0, n, N);
-    const float cy = read_cn<SrcT>(src, 1, n, N);
-    const float ow = read_cn<SrcT>(src, 2, n, N);
-    const float oh = read_cn<SrcT>(src, 3, n, N);
+    const float cx = read_cn<SrcT>(src, 0, n, C, N, cnLayout);
+    const float cy = read_cn<SrcT>(src, 1, n, C, N, cnLayout);
+    const float ow = read_cn<SrcT>(src, 2, n, C, N, cnLayout);
+    const float oh = read_cn<SrcT>(src, 3, n, C, N, cnLayout);
 
     const int idx = atomicAdd(counter, 1);
     if (idx >= maxCandidates) return;
@@ -230,6 +173,7 @@ void launch_decode_and_filter(
     float confThreshold,
     float imgScale,
     int maxCandidates,
+    bool cnLayout,
     int* dstCounter,
     float* dstCandidates,
     cudaStream_t stream)
@@ -245,7 +189,7 @@ void launch_decode_and_filter(
         decode_and_filter_kernel<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(srcCN),
             C, N, numClasses, confThreshold, imgScale,
-            maxCandidates, dstCounter, dstCandidates
+            maxCandidates, cnLayout, dstCounter, dstCandidates
         );
     }
     else
@@ -253,7 +197,7 @@ void launch_decode_and_filter(
         decode_and_filter_kernel<float><<<grid, block, 0, stream>>>(
             reinterpret_cast<const float*>(srcCN),
             C, N, numClasses, confThreshold, imgScale,
-            maxCandidates, dstCounter, dstCandidates
+            maxCandidates, cnLayout, dstCounter, dstCandidates
         );
     }
 }

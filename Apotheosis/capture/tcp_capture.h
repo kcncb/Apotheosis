@@ -2,12 +2,15 @@
 #define TCP_CAPTURE_H
 
 #include "capture.h"
+#include "gpu_jpeg_decoder.h"
 
+#include <cuda_runtime.h>
 #include <opencv2/opencv.hpp>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -23,6 +26,7 @@ public:
     ~TCPCapture();
 
     cv::Mat GetNextFrameCpu() override;
+    GpuImage GetNextFrameGpu() override;
 
     bool Initialize();
     void Cleanup();
@@ -35,6 +39,7 @@ public:
 private:
     void ReceiveThread();
     bool ParseMJPEGFrame(std::vector<uint8_t>& data, cv::Mat& frame);
+    bool DecodeJpegGpu(const uint8_t* jpeg, size_t jpeg_size);
 
     int width_;
     int height_;
@@ -52,6 +57,12 @@ private:
     std::thread receive_thread_;
     std::mutex frame_mutex_;
     std::queue<cv::Mat> frame_queue_;
+    std::queue<GpuImage> gpu_frame_queue_;
+
+    uint8_t* pinned_jpeg_buffer_{ nullptr };
+    size_t pinned_jpeg_capacity_{ 0 };
+    std::unique_ptr<capture::GpuJpegDecoder> gpu_decoder_;
+    cudaStream_t decode_stream_{ nullptr };
 
     static const int MAX_FRAME_SIZE = 8 * 1024 * 1024;
     static const int MAX_QUEUE_SIZE = 5;

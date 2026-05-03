@@ -10,15 +10,15 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "AimbotTarget.h"
+#include "aim_controller.h"
 #include "aim_kalman.h"
-#include "pid_controller.h"
+#include "bezier_aim_controller.h"
 
 // Forward declarations so that mouse.h stays light.
 class Arduino;
@@ -36,14 +36,12 @@ struct MouseRuntimeParams
     int fovX = 106;
     int fovY = 74;
 
-    aim::PidGains pid{};
+    aim::AimGains aim{};
 
-    // Optional second PID gain set used by the Flick/Track state machine.
-    // When `flick_track_enabled` is false, `pid` is used unconditionally.
-    bool          flick_track_enabled = false;
-    aim::PidGains pid_track{};
-    float         flick_track_threshold_px = 30.0f;
-    float         flick_track_hysteresis_px = 8.0f;
+    // 瞄准曲线 (Bezier 轨迹模式)。bezier_enabled = false 时所有相关字段
+    // 静默忽略,driveAimToTarget 沿用现有 Direct 路径。
+    bool bezier_enabled = false;
+    aim::BezierParams bezier{};
 
     // Smart trigger inputs. Mirrors HotkeyProfile fields; MouseThread reads
     // them on each step to actually dispatch left-button down/up to the
@@ -63,9 +61,6 @@ struct MouseRuntimeParams
     float kalman_additional_prediction_ms = 0.0f;
     float kalman_reset_timeout_sec = 0.5f;
 
-    // Snap-lock aim assist. 0 disables; 1 = maximum adhesion. See
-    // HotkeyProfile::aim_lock_strength for the gain-shaping formula.
-    float aim_lock_strength = 0.0f;
 };
 
 class MouseThread
@@ -83,25 +78,33 @@ public:
     MouseThread(const MouseThread&) = delete;
     MouseThread& operator=(const MouseThread&) = delete;
 
-    // Apply new runtime parameters. Resets PID and Kalman whenever
-    // non-trivial changes are detected so a hotkey swap starts from a clean
-    // controller state.
+    // Apply new runtime parameters. Resets the aim controller and Kalman
+    // whenever non-trivial changes are detected so a hotkey swap starts
+    // from a clean controller state.
     void updateParams(const MouseRuntimeParams& params);
 
     // Pivot coordinates are in detection-image space (same resolution as
-    // screen_width/height). moveMouseToObservedTarget runs one PID step using
-    // the observation and updates the Kalman model; moveMouseToPredictedTarget
-    // extrapolates the Kalman model forward without feeding it any new data,
-    // used while the detector is stuttering and Kalman fallback is enabled.
-    void moveMouseToObservedTarget(double pivotX, double pivotY);
-    bool moveMouseToPredictedTarget();
-    void clearQueuedMoves();
+    // screen_width/height). moveMouseToObservedTarget runs one controller
+    // step using the observation and updates the Kalman model;
+    // moveMouseToPredictedTarget extrapolates the Kalman model forward
+    // without feeding it any new data, used while the detector is
+    // stuttering and Kalman fallback is enabled.
+    // `targetPivot{X,Y}` is the head/body anchor the tracker chose. `crosshair{X,Y}`
+    // is where the visible reticle is right now — pass detection-image centre
+    // when crosshair-color is off / stale, otherwise the detected position.
+    void moveMouseToObservedTarget(double targetPivotX, double targetPivotY,
+                                   double crosshairX, double crosshairY);
+    bool moveMouseToPredictedTarget(double crosshairX, double crosshairY);
 
-    // Override the aim reference point (PID "center") for the next movement.
-    // Coordinates are in detection-image space. Pass std::nullopt to revert
-    // to the static image center. Fed by the crosshair color detector so the
-    // aimbot chases the player's real reticle instead of the image midpoint.
-    void setDynamicAimCenter(std::optional<std::pair<double, double>> center);
+    // Push a controller step using the supplied target/pivot WITHOUT
+    // touching the Kalman model. Used by the loop to react to a fresh
+    // crosshair snapshot between detection events: the target hasn't
+    // moved (no new observation) but the visible reticle did (recoil),
+    // so err must be recomputed and a corrective move issued. Feeding
+    // this re-push into Kalman would double-count the same observation.
+    void moveMouseUsingLastTarget(double targetX, double targetY,
+                                  double crosshairX, double crosshairY);
+    void clearQueuedMoves();
 
     void resetPrediction();
     void checkAndResetPredictions();
@@ -123,7 +126,11 @@ public:
     void setMakcuConnection(MakcuConnection* makcu);
     void setGHubMouse(GhubMouse* ghub);
 
-    std::mutex input_method_mutex;
+    // Recursive: a high-level aim op (moveMouseToObservedTarget, etc.) holds
+    // this lock while driveAimToTarget → updateSmartTrigger may chain into
+    // sendLeft{Down,Up}ToDriver, which re-enters the same lock on the same
+    // thread. A non-recursive mutex was UB and crashed on fire.
+    std::recursive_mutex input_method_mutex;
 
 private:
     struct Move
@@ -139,14 +146,17 @@ private:
     double currentDetectionDelaySec() const;
     double currentPredictionLookaheadSec(double detectionDelaySec) const;
 
-    // Pushes a PID step to the driver based on the current target position
-    // in screen-space. Does NOT touch the Kalman model; the caller decides
-    // whether the target position came from an observation or from an
-    // extrapolation.
-    void drivePidToTarget(double targetX, double targetY);
+    // Pushes a controller step to the driver based on the current target
+    // position in screen-space. Does NOT touch the Kalman model; the caller
+    // decides whether the target position came from an observation or from
+    // an extrapolation. The pivot (crosshair) defaults to detection-image
+    // centre; pass an explicit pivot when crosshair-color is active.
+    void driveAimToTarget(double targetX, double targetY,
+                          double pivotX, double pivotY,
+                          double lock_attenuation = 1.0);
 
     // Update the smart-trigger classification given the current pivot and
-    // the latest queued mouse step. Called from drivePidToTarget. Writes
+    // the latest queued mouse step. Called from driveAimToTarget. Writes
     // through to g_smart_trigger_ready / g_smart_trigger_hit_prob (in
     // mouse.cpp).
     void updateSmartTrigger(double errPx, int dx, int dy);
@@ -176,20 +186,8 @@ private:
     double center_x_ = 160.0;
     double center_y_ = 160.0;
 
-    // Crosshair-override reference point, mutated from the mouse loop thread
-    // before each moveMouseTo* call. Atomics keep the read inside
-    // drivePidToTarget lock-free.
-    std::atomic<bool> dynamic_center_valid_{ false };
-    std::atomic<double> dynamic_center_x_{ 0.0 };
-    std::atomic<double> dynamic_center_y_{ 0.0 };
-
-    aim::PidController2D pid_{};
-
-    // Flick/Track mode tracking. `pid_mode_track_` reflects which gain set
-    // was applied on the previous step so the boundary uses hysteresis (not
-    // a single threshold) to flip. Reset on parameter change so a hotkey
-    // swap starts in Flick mode.
-    bool pid_mode_track_ = false;
+    aim::AimController aim_{};
+    aim::BezierTrajectoryController bezier_aim_{};
 
     // Smart trigger. Recent dx/dy steps in a fixed-capacity ring (sized by
     // params_.smart_trigger_window_frames). `locked_bbox_half_extent_px_`

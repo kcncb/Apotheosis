@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <unordered_set>
@@ -17,6 +18,7 @@
 #include "overlay/ui_sections.h"
 #include "draw_settings.h"
 #include "Apotheosis.h"
+#include "capture/capture.h"
 #include "runtime/active_hotkey.h"
 
 namespace
@@ -195,8 +197,8 @@ bool draw_param_override_block(HotkeyProfile& hk)
 
     if (OverlayUI::BeginSubsection(u8"视野 / FOV"))
     {
-        changed |= ImGui::SliderInt("FOV X", &hk.fovX, 10, 160);
-        changed |= ImGui::SliderInt("FOV Y", &hk.fovY, 10, 160);
+        changed |= ImGui::SliderInt("FOV X", &hk.fovX, 10, 640);
+        changed |= ImGui::SliderInt("FOV Y", &hk.fovY, 10, 640);
         changed |= ImGui::Checkbox(u8"启用动态 FOV", &hk.dynamic_fov_enabled);
         ImGui::BeginDisabled(!hk.dynamic_fov_enabled);
         changed |= ImGui::SliderFloat(u8"内边距系数", &hk.dynamic_fov_margin_frac, 1.00f, 2.00f, "%.2f");
@@ -211,25 +213,194 @@ bool draw_param_override_block(HotkeyProfile& hk)
         OverlayUI::EndSubsection();
     }
 
-    if (OverlayUI::BeginSubsection("PID"))
+    if (OverlayUI::BeginSubsection(u8"瞄准"))
     {
-        changed |= ImGui::SliderFloat("P X", &hk.pid_p_x, 0.0f, 5.0f, "%.3f");
-        changed |= ImGui::SliderFloat("P Y", &hk.pid_p_y, 0.0f, 5.0f, "%.3f");
-        hk.pid_p = (hk.pid_p_x + hk.pid_p_y) * 0.5f;
-        changed |= ImGui::SliderFloat("I", &hk.pid_i, 0.0f, 2.0f, "%.3f");
-        changed |= ImGui::SliderFloat("D", &hk.pid_d, 0.0f, 2.0f, "%.3f");
-        ImGui::Separator();
-        changed |= ImGui::Checkbox(u8"启用 Flick / Track 双模式", &hk.flick_track_enabled);
-        ImGui::BeginDisabled(!hk.flick_track_enabled);
-        changed |= ImGui::SliderFloat("P X##trk", &hk.pid_track_p_x, 0.0f, 5.0f, "%.3f");
-        changed |= ImGui::SliderFloat("P Y##trk", &hk.pid_track_p_y, 0.0f, 5.0f, "%.3f");
-        hk.pid_track_p = (hk.pid_track_p_x + hk.pid_track_p_y) * 0.5f;
-        changed |= ImGui::SliderFloat("I##trk", &hk.pid_track_i, 0.0f, 2.0f, "%.3f");
-        changed |= ImGui::SliderFloat("D##trk", &hk.pid_track_d, 0.0f, 2.0f, "%.3f");
-        changed |= ImGui::SliderFloat(u8"切换阈值 (px)", &hk.flick_track_threshold_px, 0.0f, 256.0f, "%.1f");
-        changed |= ImGui::SliderFloat(u8"切换迟滞 (px)", &hk.flick_track_hysteresis_px, 0.0f, 64.0f, "%.1f");
+        changed |= ImGui::SliderFloat(u8"X 速度",   &hk.speed_x,       0.0f, 1.0f, "%.3f");
+        changed |= ImGui::SliderFloat(u8"Y 速度",   &hk.speed_y,       0.0f, 1.0f, "%.3f");
+        changed |= ImGui::SliderFloat(u8"锁死力度", &hk.lock_strength, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"= 0 时关闭动态锁死，纯 P 控制 (按文档先标定速度，再加锁死)。");
+        changed |= ImGui::SliderFloat(u8"锁死范围 (px)", &hk.lock_radius_px, 4.0f, 80.0f, "%.1f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"动态锁死阈值 / 吸附半径 (检测像素)。文档建议 8-16 (吸附锁死) 或 40-65 (动态锁死)。\n值越小=吸附区越窄、越靠近准星才放大；越大=整张图都偏锁，开了力度更易抖。");
+        ImGui::TextDisabled(u8"远距用速度，近距叠加锁死吸附；无 PID/无钳位");
+        OverlayUI::EndSubsection();
+    }
+
+    if (OverlayUI::BeginSubsection(u8"瞄准曲线"))
+    {
+        // 模式
+        int mode = static_cast<int>(hk.aim_trajectory_mode);
+        const char* mode_items[] = { u8"直线 (Direct)", u8"贝塞尔轨迹 (Bezier)" };
+        if (ImGui::Combo(u8"轨迹模式", &mode, mode_items, IM_ARRAYSIZE(mode_items)))
+        {
+            hk.aim_trajectory_mode = (mode == 1) ? AimTrajectoryMode::Bezier
+                                                 : AimTrajectoryMode::Direct;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"Direct: 鼠标走直线靠近目标 (现有行为)。\n"
+                              u8"Bezier: 鼠标按下方编辑器中的曲线轨迹靠近目标，更接近人手运动。");
+
+        const bool bezier_on = (hk.aim_trajectory_mode == AimTrajectoryMode::Bezier);
+        ImGui::BeginDisabled(!bezier_on);
+
+        // 预设
+        struct CurvePreset
+        {
+            const char* label;
+            float cx1, cy1, cx2, cy2;
+        };
+        static const CurvePreset kPresets[] = {
+            { u8"重置 (直线)",   0.33f,  0.00f, 0.66f,  0.00f },
+            { u8"右弧",          0.30f,  0.30f, 0.70f,  0.20f },
+            { u8"左弧",          0.30f, -0.30f, 0.70f, -0.20f },
+            { u8"S 形 (右起)",   0.25f,  0.30f, 0.75f, -0.30f },
+            { u8"Z 形 (左起)",   0.25f, -0.30f, 0.75f,  0.30f },
+            { u8"先慢后快",      0.55f,  0.00f, 0.85f,  0.00f },
+            { u8"先快后慢",      0.15f,  0.00f, 0.45f,  0.00f },
+            { u8"高弧右抛",      0.20f,  0.55f, 0.55f,  0.40f },
+            { u8"低弧左拐",      0.20f, -0.45f, 0.55f, -0.55f },
+            { u8"轻微右偏",      0.30f,  0.10f, 0.70f,  0.05f },
+            { u8"轻微左偏",      0.30f, -0.10f, 0.70f, -0.05f },
+            { u8"过冲(略超调)",  0.40f,  0.00f, 0.95f,  0.20f },
+        };
+        ImGui::TextUnformatted(u8"曲线预设:");
+        const int presets_per_row = 4;
+        for (int i = 0; i < IM_ARRAYSIZE(kPresets); ++i)
+        {
+            if ((i % presets_per_row) != 0)
+                ImGui::SameLine();
+            if (ImGui::SmallButton(kPresets[i].label))
+            {
+                hk.bezier_cx1 = kPresets[i].cx1;
+                hk.bezier_cy1 = kPresets[i].cy1;
+                hk.bezier_cx2 = kPresets[i].cx2;
+                hk.bezier_cy2 = kPresets[i].cy2;
+                changed = true;
+            }
+        }
+
+        // 编辑器画布
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 canvas_size(280.0f, 180.0f);
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##bezier_curve_canvas", canvas_size);
+        const bool canvas_hovered = ImGui::IsItemHovered();
+        const ImVec2 cmin = origin;
+        const ImVec2 cmax = ImVec2(origin.x + canvas_size.x, origin.y + canvas_size.y);
+
+        // 归一化坐标 → 屏幕坐标。x∈[0,1] 映射到画布宽,y∈[-1,1] 映射到画布高
+        // (上 = +y,下 = -y)。
+        auto normToScreen = [&](float nx, float ny) -> ImVec2
+        {
+            const float pad = 12.0f;
+            const float w = canvas_size.x - 2.0f * pad;
+            const float h = canvas_size.y - 2.0f * pad;
+            const float cy = canvas_size.y * 0.5f;
+            return ImVec2(cmin.x + pad + nx * w,
+                          cmin.y + cy - ny * (h * 0.5f));
+        };
+        auto screenToNorm = [&](const ImVec2& s) -> ImVec2
+        {
+            const float pad = 12.0f;
+            const float w = canvas_size.x - 2.0f * pad;
+            const float h = canvas_size.y - 2.0f * pad;
+            const float cy = canvas_size.y * 0.5f;
+            return ImVec2((s.x - cmin.x - pad) / w,
+                          (cmin.y + cy - s.y) / (h * 0.5f));
+        };
+
+        // 背景 + 边框 + 中线
+        dl->AddRectFilled(cmin, cmax, IM_COL32(20, 20, 28, 200), 4.0f);
+        dl->AddRect(cmin, cmax, IM_COL32(80, 80, 100, 200), 4.0f);
+        const ImVec2 mid_l = ImVec2(cmin.x, (cmin.y + cmax.y) * 0.5f);
+        const ImVec2 mid_r = ImVec2(cmax.x, (cmin.y + cmax.y) * 0.5f);
+        dl->AddLine(mid_l, mid_r, IM_COL32(60, 60, 70, 200), 1.0f);
+
+        // 起终点
+        const ImVec2 p0 = normToScreen(0.0f, 0.0f);
+        const ImVec2 p3 = normToScreen(1.0f, 0.0f);
+        dl->AddCircleFilled(p0, 4.0f, IM_COL32(160, 160, 160, 255));
+        dl->AddCircleFilled(p3, 4.0f, IM_COL32(160, 160, 160, 255));
+
+        // 控制点 (可拖)
+        ImVec2 p1 = normToScreen(hk.bezier_cx1, hk.bezier_cy1);
+        ImVec2 p2 = normToScreen(hk.bezier_cx2, hk.bezier_cy2);
+
+        // 拖拽: 鼠标按下时找到最近的可拖控制点 (P1/P2),拖动直至释放。
+        static int drag_idx = -1; // 0=P1, 1=P2, -1=none
+        static ImGuiID drag_owner = 0;
+        const ImGuiID curve_id = ImGui::GetID("##bezier_curve_canvas");
+        if (canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            const ImVec2 m = ImGui::GetMousePos();
+            const float d1 = std::hypot(m.x - p1.x, m.y - p1.y);
+            const float d2 = std::hypot(m.x - p2.x, m.y - p2.y);
+            const float pick = 16.0f;
+            if (d1 <= pick && d1 <= d2)        { drag_idx = 0; drag_owner = curve_id; }
+            else if (d2 <= pick)               { drag_idx = 1; drag_owner = curve_id; }
+        }
+        if (drag_idx >= 0 && drag_owner == curve_id)
+        {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            {
+                drag_idx = -1;
+                drag_owner = 0;
+            }
+            else
+            {
+                const ImVec2 m = ImGui::GetMousePos();
+                const ImVec2 n = screenToNorm(m);
+                float nx = std::clamp(n.x, 0.0f, 1.0f);
+                float ny = std::clamp(n.y, -1.0f, 1.0f);
+                if (drag_idx == 0) { hk.bezier_cx1 = nx; hk.bezier_cy1 = ny; }
+                else                { hk.bezier_cx2 = nx; hk.bezier_cy2 = ny; }
+                p1 = normToScreen(hk.bezier_cx1, hk.bezier_cy1);
+                p2 = normToScreen(hk.bezier_cx2, hk.bezier_cy2);
+                changed = true;
+            }
+        }
+
+        // 控制柄 (P0-P1, P3-P2 虚线)
+        dl->AddLine(p0, p1, IM_COL32(120, 120, 120, 160), 1.0f);
+        dl->AddLine(p3, p2, IM_COL32(120, 120, 120, 160), 1.0f);
+
+        // 曲线本体
+        dl->AddBezierCubic(p0, p1, p2, p3, IM_COL32(255, 165, 60, 255), 2.0f, 64);
+
+        // 控制点圆点
+        const ImU32 col_p1 = (drag_idx == 0) ? IM_COL32(120, 220, 120, 255)
+                                             : IM_COL32(80, 200, 255, 255);
+        const ImU32 col_p2 = (drag_idx == 1) ? IM_COL32(120, 220, 120, 255)
+                                             : IM_COL32(255, 120, 200, 255);
+        dl->AddCircleFilled(p1, 6.0f, col_p1);
+        dl->AddCircleFilled(p2, 6.0f, col_p2);
+
+        ImGui::TextDisabled(u8"X = 进度 (0=起点, 1=目标)。Y = 横向偏移 (单位=起终段长度)。");
+        ImGui::TextDisabled(u8"拖动两个控制点塑形,或点上方预设按钮。");
+
+        // 数值滑块 (备用,精确数值)
+        if (ImGui::TreeNode(u8"数值微调"))
+        {
+            changed |= ImGui::SliderFloat("P1.x", &hk.bezier_cx1, 0.0f, 1.0f, "%.3f");
+            changed |= ImGui::SliderFloat("P1.y", &hk.bezier_cy1, -1.0f, 1.0f, "%.3f");
+            changed |= ImGui::SliderFloat("P2.x", &hk.bezier_cx2, 0.0f, 1.0f, "%.3f");
+            changed |= ImGui::SliderFloat("P2.y", &hk.bezier_cy2, -1.0f, 1.0f, "%.3f");
+            ImGui::TreePop();
+        }
+
+        // 跟随 / 重锚
+        changed |= ImGui::SliderFloat(u8"目标跟随系数", &hk.bezier_follow_alpha, 0.0f, 1.0f, "%.3f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"锚定后曲线跟随最新目标的低通系数。\n"
+                              u8"0 = 完全保形 (目标横移会脱靶),1 = 每帧跟到位 (退化为直线)。\n"
+                              u8"默认 0.10~0.20 之间。");
+        changed |= ImGui::SliderFloat(u8"重锚阈值 (px)", &hk.bezier_reanchor_threshold_px, 4.0f, 400.0f, "%.0f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"目标瞬移超过该阈值时强制重新锚定曲线起点。\n防止换目标 / 跳变时鼠标走出诡异轨迹。");
+
         ImGui::EndDisabled();
-        changed |= ImGui::SliderFloat(u8"吸附锁死力度", &hk.aim_lock_strength, 0.0f, 1.0f, "%.2f");
         OverlayUI::EndSubsection();
     }
 
@@ -258,8 +429,25 @@ bool draw_param_override_block(HotkeyProfile& hk)
 
     if (OverlayUI::BeginSubsection(u8"目标切换迟滞"))
     {
-        changed |= ImGui::SliderFloat(u8"切换分差阈值", &hk.lock_switch_score_margin, 0.0f, 1.0f, "%.2f");
-        changed |= ImGui::SliderInt(u8"最少连续帧", &hk.lock_switch_min_frames, 0, 20);
+        changed |= ImGui::SliderFloat(u8"切换分差阈值", &hk.lock_switch_score_margin, 0.0f, 200.0f, "%.2f");
+        changed |= ImGui::SliderInt(u8"最少连续帧", &hk.lock_switch_min_frames, 0, 4000);
+        {
+            const int fps = std::max(1, captureFps.load());
+            const float ms_switch = 1000.0f * static_cast<float>(hk.lock_switch_min_frames) / static_cast<float>(fps);
+            ImGui::SameLine();
+            ImGui::TextDisabled(u8"\xe2\x89\x88 %.0f ms @ %d fps", ms_switch, fps);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(u8"切换目标延迟 (文档建议 20-100 ms)。太小乱锁，太大不锁。");
+        }
+        changed |= ImGui::SliderInt(u8"锁定保持帧数", &hk.lock_hold_min_frames, 0, 2400);
+        {
+            const int fps = std::max(1, captureFps.load());
+            const float ms_hold = 1000.0f * static_cast<float>(hk.lock_hold_min_frames) / static_cast<float>(fps);
+            ImGui::SameLine();
+            ImGui::TextDisabled(u8"\xe2\x89\x88 %.0f ms", ms_hold);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"锁定后强制保持目标的最少帧数。期间忽略所有切换条件,适合抑制抖枪 / 火焰造成的切换。0 关闭。");
         OverlayUI::EndSubsection();
     }
 

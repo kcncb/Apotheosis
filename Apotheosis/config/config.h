@@ -16,6 +16,15 @@ enum class ClassBucket
     Aim = 2,
 };
 
+// 瞄准轨迹模式。Direct = 现有非线性 P 控制器(直线靠近)。
+// Bezier = 用一条用户在 UI 里画好的三次贝塞尔曲线塑形从起点到目标的轨迹,
+// 输出仍交给同一份 speed_x/speed_y 比例缩放和子像素残差累积。
+enum class AimTrajectoryMode
+{
+    Direct = 0,
+    Bezier = 1,
+};
+
 struct ClassFilterState
 {
     int class_id = 0;
@@ -60,30 +69,37 @@ struct HotkeyProfile
     int fovX = 106;
     int fovY = 74;
 
-    float pid_p = 0.6f;
-    float pid_p_x = 0.6f;
-    float pid_p_y = 0.6f;
-    float pid_i = 0.0f;
-    float pid_d = 0.05f;
+    // 三参数瞄准控制器。
+    //   speed_x / speed_y: 远距追击的比例增益（move = speed * err * mult）
+    //   lock_strength    : 近距吸附力度 [0,1]，0 = 关闭，
+    //                      mult = 1 + 4 * lock_strength * R²/(R²+err²)
+    //                      R = 0.08 * 检测分辨率（隐藏常量）
+    // 没有积分/微分项，没有 Flick/Track 双模，没有 per-tick 钳位 ——
+    // 大移动一次推到位，准星找色控枪不被限速。
+    float speed_x = 0.6f;
+    float speed_y = 0.6f;
+    float lock_strength = 0.0f;
+    // 锁死范围 / 动态锁死阈值 (检测像素)。对应文档里"锁死范围 8-16"或
+    // "动态锁死阈值 40-65"。R 越小，吸附区越窄、越靠近准星才放大；R 越大，
+    // 整张图都偏吸附，开了锁死力度更容易抖。0 退化到 0.08 * 检测分辨率。
+    float lock_radius_px = 25.0f;
 
-    // Flick / Track dual-mode PID. When `flick_track_enabled` is true the
-    // controller switches between two gain sets based on the magnitude of
-    // the pivot-to-crosshair error in detection-pixel space:
-    //   - Far (err >= flick_track_threshold_px + hysteresis) → Flick gains
-    //     (pid_p/i/d above) — aggressive, designed for big swings.
-    //   - Near (err <= flick_track_threshold_px - hysteresis) → Track gains
-    //     (the *_track values below) — gentle, designed to hold on target.
-    // The hysteresis band prevents the controller from oscillating between
-    // modes on the boundary. When disabled, only the Flick gains are used,
-    // matching legacy behaviour exactly.
-    bool  flick_track_enabled = false;
-    float pid_track_p = 0.30f;
-    float pid_track_p_x = 0.30f;
-    float pid_track_p_y = 0.30f;
-    float pid_track_i = 0.0f;
-    float pid_track_d = 0.10f;
-    float flick_track_threshold_px = 30.0f;
-    float flick_track_hysteresis_px = 8.0f;
+    // 瞄准曲线 (Bezier 轨迹)。Direct 模式下后续字段全部忽略。Bezier 模式时
+    // 每次锁定开始或目标 ID 切换时,以当前 pivot 为起点、目标为终点锚定一条
+    // 三次贝塞尔(P0=(0,0), P3=(1,0), P1/P2 由用户拖)。归一化坐标系 X 沿
+    // 起→终方向,Y 垂直于该方向(单位 = 起终段长度)。每帧用当前 pivot 投
+    // 影到锚定段得到进度 p,采样曲线得到偏置位置喂给 speed_x/speed_y。
+    AimTrajectoryMode aim_trajectory_mode = AimTrajectoryMode::Direct;
+    float bezier_cx1 = 0.30f;
+    float bezier_cy1 = 0.25f;
+    float bezier_cx2 = 0.70f;
+    float bezier_cy2 = -0.15f;
+    // 目标移动平滑系数 [0,1]。0 = 锚定后不再跟随目标位置(快速横移会脱靶),
+    // 1 = 每帧完全跟随(等于直线)。中间值 ≈ 一阶低通,曲线形状随目标缓慢漂移。
+    float bezier_follow_alpha = 0.15f;
+    // 目标瞬移阈值 (px)。当锚定的 target 与最新 target 距离超过此值时强制
+    // 重锚 (engage 一次新曲线),避免目标切换造成的伪轨迹。
+    float bezier_reanchor_threshold_px = 60.0f;
 
     // Smart trigger — automatic fire. When enabled, the controller actually
     // dispatches a left-button press (whichever input driver is bound) the
@@ -121,12 +137,6 @@ struct HotkeyProfile
     float kalman_additional_prediction_ms = 0.0f;
     float kalman_reset_timeout_sec = 0.5f;
 
-    // 吸附锁死力度 [0.0, 1.0]。0 = 关闭；越大，目标越靠近准星时单帧
-    // PID 输出上限越低，形成类似"磁吸"的锁死效果。算法：使用
-    //   strength * R^2 / (R^2 + err^2)
-    // 在正常步长和近距步长之间插值。R 取 detection_resolution 的 12%。
-    float aim_lock_strength = 0.0f;
-
     // Per-hotkey crosshair color detection toggle. Global config still owns
     // the ROI size / color palette / area filters; each hotkey just opts in.
     bool crosshair_detect_enabled = false;
@@ -138,6 +148,12 @@ struct HotkeyProfile
     // — raise either to make the lock stickier when crowds overlap.
     float lock_switch_score_margin = 0.15f;
     int   lock_switch_min_frames = 3;
+
+    // Minimum lock hold duration in frames. After a lock is acquired the
+    // tracker will refuse to switch for this many frames regardless of
+    // priority changes or eligibility flips. Smooths out high-recoil /
+    // muzzle-flash scenarios. 0 disables (legacy behaviour).
+    int   lock_hold_min_frames = 10;
 
     // y_offset distance/size decay. When enabled, large bboxes (close
     // targets) blend the per-class y_offset toward 0.5 (geometric centre)
@@ -198,15 +214,13 @@ public:
     int udp_port = 0;
     std::string tcp_ip;
     int tcp_port = 0;
-    int opencv_capture_index = 0;
-    std::string opencv_capture_api = "DSHOW"; // DSHOW | MSMF | FFMPEG | ANY
-    std::string opencv_capture_url;           // optional connection URL (e.g. rtsp://...)
-    int opencv_capture_width = 0;             // 0 = let device decide
-    int opencv_capture_height = 0;
-    int opencv_capture_fps = 0;
-    std::string opencv_capture_format = "AUTO"; // AUTO | NV12 | MJPG | YUY2 | YUYV | RGB3 | BGR3
-    int opencv_capture_crop_width = 0;        // 0 = use full captured width
-    int opencv_capture_crop_height = 0;       // 0 = use full captured height
+    int capture_card_index = 0;
+    int capture_card_width = 0;             // 0 = let device decide
+    int capture_card_height = 0;
+    int capture_card_fps = 0;
+    std::string capture_card_format = "AUTO"; // AUTO | NV12 | MJPG | YUY2 | RGB32
+    int capture_card_crop_width = 0;        // 0 = use full captured width
+    int capture_card_crop_height = 0;       // 0 = use full captured height
     int detection_resolution = 320;
     int capture_fps = 60;
     bool circle_mask = true;
@@ -304,8 +318,13 @@ public:
     // the sampling rectangle, the color list, and the contour-area filters.
     int crosshair_rect_w = 40;
     int crosshair_rect_h = 40;
-    int crosshair_min_area = 2;
-    int crosshair_max_area = 200;
+    // Minimum red-pixel count inside the ROI for a detection to count
+    // (replaces the old contour-area filter — detector now uses a
+    // shape-agnostic mask-density centroid).
+    int crosshair_min_pixel_count = 4;
+    // MORPH_CLOSE radius (px). 0 = off. 1–3 covers most gradient/white-
+    // centred crosshair styles. >5 risks merging red noise.
+    int crosshair_close_radius = 1;
     std::vector<CrosshairColorProfileConfig> crosshair_colors; // defaults to red double-band
 
     // Aim hotkeys. Must contain at least one entry so the UI always has

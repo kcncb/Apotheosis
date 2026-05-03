@@ -18,6 +18,7 @@
 #include "keyboard_listener.h"
 #include "overlay.h"
 #include "overlay/app_log.h"
+#include "overlay/preview_window.h"
 #include "ghub.h"
 #include "other_tools.h"
 #include "mem/gpu_resource_manager.h"
@@ -439,10 +440,14 @@ int main()
             OverlayThread();
         });
 
+        PreviewWindow_Start();
+
         welcome_message();
 
         keyThread.join();
         overlayThread.join();
+
+        PreviewWindow_Stop();
 
         session.stop();
         g_inference_session = nullptr;

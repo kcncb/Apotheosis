@@ -49,9 +49,7 @@ extern std::atomic<bool>  g_smart_trigger_ready;
 extern std::atomic<float> g_smart_trigger_hit_prob;
 extern std::atomic<float> g_smart_trigger_recent_variance_px;
 
-// Flick/Track telemetry: which mode the controller is currently in and the
-// last computed crosshair-to-target error (in detection pixels).
-extern std::atomic<bool>  g_pid_mode_track;
+// Aim telemetry: latest crosshair-to-target error (in detection pixels).
 extern std::atomic<float> g_pid_last_err_px;
 
 void createInputDevices();

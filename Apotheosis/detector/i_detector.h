@@ -8,9 +8,9 @@
 #include <vector>
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
 
 #include "postProcess.h"
+#include "../mem/gpu_image.h"
 
 enum class DetectorBackend
 {
@@ -32,7 +32,7 @@ public:
     // Zero-copy GPU entry used by the nvJPEG capture path. Default no-op so
     // backends without a GPU path (DirectML today) fall through to the CPU
     // processFrame call at the call site.
-    virtual void processFrameGpu(const cv::cuda::GpuMat& /*frame*/) {}
+    virtual void processFrameGpu(GpuImage /*frame*/) {}
     virtual void inferenceThread() = 0;
 
     virtual int numberOfClasses() const = 0;

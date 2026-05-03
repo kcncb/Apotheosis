@@ -152,6 +152,47 @@ std::vector<Detection> postProcessYolo(
             }
         }
     }
+    else if (rows == numClasses + 4)
+    {
+        // Raw YOLOv8 layout [1, C, N], same layout as ONNX Runtime returns.
+        // DML already decodes this path; keep TRT compatible when we copy the
+        // native TensorRT output instead of using the GPU pre-decode fast path.
+        const int64_t N = cols;
+        const int64_t C = rows;
+        for (int64_t i = 0; i < N; ++i)
+        {
+            float maxScore = 0.0f;
+            int maxClassId = 0;
+            for (int c = 0; c < numClasses; ++c)
+            {
+                const float score = output[(4 + c) * N + i];
+                if (score > maxScore)
+                {
+                    maxScore = score;
+                    maxClassId = c;
+                }
+            }
+
+            if (maxScore <= confThreshold) continue;
+
+            const float cx = output[0 * N + i];
+            const float cy = output[1 * N + i];
+            const float ow = output[2 * N + i];
+            const float oh = output[3 * N + i];
+            const float half_ow = 0.5f * ow;
+            const float half_oh = 0.5f * oh;
+
+            Detection det;
+            det.box.x = toInt((cx - half_ow) * img_scale);
+            det.box.y = toInt((cy - half_oh) * img_scale);
+            det.box.width = toInt(ow * img_scale);
+            det.box.height = toInt(oh * img_scale);
+            det.confidence = maxScore;
+            det.classId = maxClassId;
+
+            detections.push_back(det);
+        }
+    }
     else
     {
         // Row-major [N=rows, C=cols] layout (GPU-transposed upstream). Each

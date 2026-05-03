@@ -125,7 +125,31 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
         return nullptr;
     }
     const char* inName = inputTensor->getName();
-    inputTensor->setType(nvinfer1::DataType::kHALF);
+
+    // FP16 IO contract: pin every network input AND output tensor to kHALF.
+    // The CUDA preprocess kernel writes __half directly into the input
+    // binding, and the GPU decode kernel reads outputs through a __half
+    // template specialization — without these pins TRT is free to keep
+    // input/output at FP32 (which is what was happening before: an engine
+    // built with kFP16 still shipped an FP32 output tensor, so the kernel
+    // dispatched its float branch and read the wrong stride).
+    //
+    // We deliberately do NOT force per-layer precision: shape tensors must
+    // be integer, Constant layers carry FP32 weights and refuse a kHALF
+    // pin, and reductions intentionally stay at higher precision. kFP16
+    // flag below already lets TRT pick FP16 for all the heavy compute; we
+    // only care that the IO surface matches our kernels.
+    for (int i = 0; i < network->getNbInputs(); ++i)
+    {
+        nvinfer1::ITensor* t = network->getInput(i);
+        if (t) t->setType(nvinfer1::DataType::kHALF);
+    }
+    for (int i = 0; i < network->getNbOutputs(); ++i)
+    {
+        nvinfer1::ITensor* t = network->getOutput(i);
+        if (t) t->setType(nvinfer1::DataType::kHALF);
+    }
+
     nvinfer1::Dims inDims = inputTensor->getDimensions();
     int H = (inDims.nbDims >= 4) ? inDims.d[2] : -1;
     int W = (inDims.nbDims >= 4) ? inDims.d[3] : -1;
@@ -159,13 +183,15 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
     cfg->addOptimizationProfile(profile);
 
 
-    // FP16-only build policy: the preprocess kernel writes __half directly
-    // into the input binding and the runtime refuses to initialize any
-    // non-kHALF input engine. Always set FP16; ignore the (now vestigial)
-    // export_enable_fp16 / export_enable_fp8 config flags.
-    if (config.verbose)
-        std::cout << "[TensorRT] Set FP16 (forced by FP16-only policy)" << std::endl;
+    // FP16 build policy. kFP16 lets TRT pick FP16 implementations for every
+    // op that supports it. Combined with the input+output kHALF pins above
+    // this gives us a fully FP16 IO surface (which the preprocess and GPU
+    // decode kernels assume), while leaving shape/Constant ops to their
+    // native dtype so the build doesn't fail. Disable kTF32 too so any
+    // residual FP32 reductions don't slide into TF32 silently.
+    std::cout << "[TensorRT] FP16 build: kFP16 (IO pinned to kHALF, kTF32 disabled)" << std::endl;
     cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
+    cfg->clearFlag(nvinfer1::BuilderFlag::kTF32);
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);

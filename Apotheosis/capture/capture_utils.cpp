@@ -1,5 +1,7 @@
 #include "capture_utils.h"
 
+#include <algorithm>
+
 cv::Mat apply_circle_mask(const cv::Mat& input)
 {
     static cv::Mat mask;

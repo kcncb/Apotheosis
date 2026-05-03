@@ -56,7 +56,9 @@ void draw_stats()
     nms_times[index_inf] = current_nms;
     index_inf = (index_inf + 1) % IM_ARRAYSIZE(inference_times);
 
-    float current_fps = static_cast<float>(captureFps.load());
+    const int source_fps = captureSourceFps.load();
+    const int process_fps = captureFps.load();
+    float current_fps = static_cast<float>(source_fps > 0 ? source_fps : process_fps);
     capture_fps_vals[index_fps] = current_fps;
     index_fps = (index_fps + 1) % IM_ARRAYSIZE(capture_fps_vals);
 
@@ -146,13 +148,10 @@ void draw_stats()
     {
         captureSource = "TCP " + config.tcp_ip + ":" + std::to_string(config.tcp_port);
     }
-    else if (config.capture_method == "opencv_capture")
+    else if (config.capture_method == "capture_card")
     {
-        if (!config.opencv_capture_url.empty())
-            captureSource = "OpenCV " + config.opencv_capture_api + " " + config.opencv_capture_url;
-        else
-            captureSource = "OpenCV " + config.opencv_capture_api + " #" +
-                            std::to_string(config.opencv_capture_index);
+        captureSource = "CaptureCard " + config.capture_card_format + " #" +
+                        std::to_string(config.capture_card_index);
     }
 
     if (OverlayUI::BeginSection(u8"采集详情", "stats_section_capture_details"))
@@ -182,6 +181,9 @@ void draw_stats()
         else
             ImGui::TextDisabled(u8"帧时间: 未知");
 
+        if (source_fps > 0)
+            ImGui::Text(u8"采集源 FPS: %d", source_fps);
+        ImGui::Text(u8"处理 FPS: %d", process_fps);
         ImGui::Text(u8"帧队列深度: %d", static_cast<int>(queueDepth));
         ImGui::Text(u8"圆形遮罩: %s", config.circle_mask ? u8"开" : u8"关");
 

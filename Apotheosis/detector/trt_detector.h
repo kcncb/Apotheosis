@@ -2,7 +2,6 @@
 #define TRT_DETECTOR_H
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
 #include <NvInfer.h>
 #include <array>
 #include <atomic>
@@ -15,12 +14,11 @@
 #include <thread>
 #include <chrono>
 #include <functional>
-#include <opencv2/cudawarping.hpp>
-#include <opencv2/cudaarithm.hpp>
 #include <cuda_runtime_api.h>
 
 #include "i_detector.h"
 #include "postProcess.h"
+#include "../mem/gpu_image.h"
 
 class TrtDetector : public IDetector
 {
@@ -33,7 +31,7 @@ public:
 
     bool initialize(const std::string& model_path) override;
     void processFrame(const cv::Mat& frame) override;
-    void processFrameGpu(const cv::cuda::GpuMat& frame) override;
+    void processFrameGpu(GpuImage frame) override;
     void inferenceThread() override;
 
     int numberOfClasses() const override { return numClasses; }
@@ -95,7 +93,7 @@ private:
     std::condition_variable inferenceCV;
     std::atomic<bool> shouldExit;
     cv::Mat currentFrame;
-    cv::cuda::GpuMat currentFrameGpu;
+    GpuImage currentFrameGpu;
     bool frameReady;
 
     enum class PendingFrameType
@@ -109,14 +107,9 @@ private:
     void loadEngine(const std::string& engineFile);
 
     void preProcess(const cv::Mat& frame);
-    void preProcess(const cv::cuda::GpuMat& frame);
+    void preProcess(const GpuImage& frame);
 
-    cv::cuda::GpuMat gpuFrameBuffer;
-    cv::cuda::GpuMat gpuResizedBuffer;
-    cv::cuda::GpuMat gpuFloatBuffer;
-    std::vector<cv::cuda::GpuMat> gpuChannelBuffers;
-
-    cv::cuda::Stream cvStream;
+    GpuImage gpuFrameBuffer;
 
     void postProcess(
         const float* output,
@@ -151,11 +144,15 @@ private:
     std::unordered_map<std::string, void*> transposedDeviceBuffers;
     std::unordered_map<std::string, size_t> transposedSizes;
     std::unordered_map<std::string, bool> outputNeedsTranspose;
+    // Per-output cached YOLO layout. cnLayout=true means model output is
+    // [1, C, N] (Ultralytics default), false means [1, N, C] (transposed
+    // export). outputC / outputN store the resolved channel and anchor counts
+    // so the inference loop and CUDA Graph capture both feed the kernel
+    // identical, layout-correct values.
+    std::unordered_map<std::string, bool> outputCnLayout;
+    std::unordered_map<std::string, int> outputC;
+    std::unordered_map<std::string, int> outputN;
     void freeTransposedBuffers();
-
-    cv::cuda::GpuMat resizedBuffer;
-    cv::cuda::GpuMat floatBuffer;
-    std::vector<cv::cuda::GpuMat> channelBuffers;
 
     // CUDA Events
     cudaEvent_t preprocessStartEvent = nullptr;

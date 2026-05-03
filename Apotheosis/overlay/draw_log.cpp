@@ -13,6 +13,26 @@ void draw_log()
             AppLog::Clear();
 
         ImGui::SameLine();
+        if (ImGui::Button(u8"复制全部"))
+        {
+            // Snapshot once and concatenate so the user gets exactly what
+            // they see in the panel — including any [错误]-prefixed lines.
+            // ImGui's clipboard handler (imgui_impl_win32) routes to the
+            // Win32 system clipboard, so a paste in another app works.
+            const std::vector<std::string> snap = AppLog::Snapshot();
+            std::string blob;
+            size_t total = 0;
+            for (const std::string& l : snap) total += l.size() + 1;
+            blob.reserve(total);
+            for (const std::string& l : snap)
+            {
+                blob.append(l);
+                blob.push_back('\n');
+            }
+            ImGui::SetClipboardText(blob.c_str());
+        }
+
+        ImGui::SameLine();
         ImGui::Checkbox(u8"自动滚动", &autoScroll);
 
         ImGui::Separator();

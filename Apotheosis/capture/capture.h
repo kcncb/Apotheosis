@@ -2,12 +2,13 @@
 #define CAPTURE_H
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
+
+#include "../mem/gpu_image.h"
 
 extern std::atomic<bool> detection_resolution_changed;
 extern std::atomic<bool> capture_method_changed;
@@ -20,6 +21,7 @@ extern int screenHeight;
 
 extern std::atomic<int> captureFrameCount;
 extern std::atomic<int> captureFps;
+extern std::atomic<int> captureSourceFps;
 extern std::chrono::time_point<std::chrono::high_resolution_clock> captureFpsStartTime;
 
 extern cv::Mat latestFrame;
@@ -35,10 +37,11 @@ public:
     virtual cv::Mat GetNextFrameCpu() = 0;
 
     // Zero-copy variant: returns a decoded frame that already lives on the
-    // GPU (typically from nvJPEG). Default impl returns an empty GpuMat so
+    // GPU (typically from nvJPEG). Default impl returns an empty GpuImage so
     // backends that don't support GPU decode fall back transparently to the
     // CPU path. Consumer (captureThread) prefers this when available.
-    virtual cv::cuda::GpuMat GetNextFrameGpu() { return cv::cuda::GpuMat(); }
+    virtual GpuImage GetNextFrameGpu() { return GpuImage(); }
+    virtual int GetSourceFpsEstimate() const { return 0; }
 };
 
 cv::Mat getCurrentDetectionSuppressionMask();

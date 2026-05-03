@@ -7,9 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda_stream_accessor.hpp>
 #include <opencv2/dnn.hpp>
-#include <opencv2/cudaimgproc.hpp>
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -163,6 +161,58 @@ bool engineHasHalfInput(const std::filesystem::path& enginePath)
             return probeEngine->getTensorDataType(name) == nvinfer1::DataType::kHALF;
     }
     return false;
+}
+
+// Engine is "fully fp16" only if every IO tensor (inputs AND outputs) is
+// kHALF. The strict FP16 build pipeline produces engines that satisfy this;
+// pre-existing engines that were cached before the strict FP16 policy will
+// have FP32 outputs and must be rebuilt so the GPU decode kernel doesn't
+// have to run a fp16/fp32 dispatch on each frame and so we don't pay an
+// implicit precision cast at the engine boundary.
+bool engineIsFullyHalf(const std::filesystem::path& enginePath)
+{
+    std::unique_ptr<nvinfer1::IRuntime> probeRuntime(nvinfer1::createInferRuntime(gLogger));
+    if (!probeRuntime)
+        return false;
+
+    std::unique_ptr<nvinfer1::ICudaEngine> probeEngine(
+        loadEngineFromFile(enginePath.u8string(), probeRuntime.get()));
+    if (!probeEngine)
+        return false;
+
+    for (int i = 0; i < probeEngine->getNbIOTensors(); ++i)
+    {
+        const char* name = probeEngine->getIOTensorName(i);
+        if (probeEngine->getTensorDataType(name) != nvinfer1::DataType::kHALF)
+            return false;
+    }
+    return true;
+}
+
+// Same FP16-everywhere check but on an in-memory serialized engine — used
+// for the .oliver encrypted-engine cache where we never write the engine
+// to disk in plaintext.
+bool engineBytesAreFullyHalf(const void* data, size_t size)
+{
+    if (!data || size == 0)
+        return false;
+
+    std::unique_ptr<nvinfer1::IRuntime> probeRuntime(nvinfer1::createInferRuntime(gLogger));
+    if (!probeRuntime)
+        return false;
+
+    std::unique_ptr<nvinfer1::ICudaEngine> probeEngine(
+        probeRuntime->deserializeCudaEngine(data, size));
+    if (!probeEngine)
+        return false;
+
+    for (int i = 0; i < probeEngine->getNbIOTensors(); ++i)
+    {
+        const char* name = probeEngine->getIOTensorName(i);
+        if (probeEngine->getTensorDataType(name) != nvinfer1::DataType::kHALF)
+            return false;
+    }
+    return true;
 }
 
 uint64_t fnv1a64(const std::string& value)
@@ -408,9 +458,9 @@ void TrtDetector::captureCudaGraph()
         const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
         if (needsT)
         {
-            const auto& shape = outputShapes[name];
-            const int C = static_cast<int>(shape[1]);
-            const int N = static_cast<int>(shape[2]);
+            const int C = outputC[name];
+            const int N = outputN[name];
+            const bool cnLayout = outputCnLayout[name];
             const bool isHalf = (outputTypes[name] == nvinfer1::DataType::kHALF);
             unsigned char* devBlock = reinterpret_cast<unsigned char*>(transposedDeviceBuffers[name]);
             int* devCounter = reinterpret_cast<int*>(devBlock);
@@ -419,7 +469,7 @@ void TrtDetector::captureCudaGraph()
             launch_decode_and_filter(
                 outputBindings[name], C, N, numClasses, isHalf,
                 config.confidence_threshold, img_scale,
-                kMaxCandidates, devCounter, devCandidates, stream
+                kMaxCandidates, cnLayout, devCounter, devCandidates, stream
             );
 
             cudaMemcpyAsync(pinnedOutputBuffers[name], devBlock,
@@ -677,10 +727,43 @@ bool TrtDetector::initialize(const std::string& model_path)
 
     if (!outputNames.empty())
     {
+        // Auto-detect YOLO output layout. Ultralytics' default export gives
+        // [1, C, N] (channels-major: shape[1] = 4 + numClasses, shape[2] =
+        // anchor count) but third-party / re-exported ONNXs sometimes ship
+        // the transposed [1, N, C] form. DML's detector already auto-detects
+        // both; mirror that logic here so a model that "works on DML" never
+        // silently returns zero detections on TRT just because of layout.
+        // We pick C as the smaller of the two trailing dims that is also > 4
+        // (i.e. capable of carrying box+class scores).
         const std::string& mainOut = outputNames[0];
         nvinfer1::Dims outDims = context->getTensorShape(mainOut.c_str());
-        const int64_t outChannels = outDims.d[1];
-        const int64_t classes64 = (outChannels > 4) ? (outChannels - 4) : 1;
+        int64_t dim1 = (outDims.nbDims >= 2) ? outDims.d[1] : 0;
+        int64_t dim2 = (outDims.nbDims >= 3) ? outDims.d[2] : 0;
+
+        int64_t channels64 = 0;
+        bool cnLayout = true;
+        if (dim1 > 4 && dim2 > 0 && dim1 <= dim2)
+        {
+            channels64 = dim1;
+            cnLayout = true;
+        }
+        else if (dim2 > 4 && dim1 > 0 && dim2 < dim1)
+        {
+            channels64 = dim2;
+            cnLayout = false;
+        }
+        else if (dim1 > 4)
+        {
+            channels64 = dim1;
+            cnLayout = true;
+        }
+        else if (dim2 > 4)
+        {
+            channels64 = dim2;
+            cnLayout = false;
+        }
+
+        const int64_t classes64 = (channels64 > 4) ? (channels64 - 4) : 1;
         int classes = 0;
         if (!tryGetDimInt(classes64, &classes) || classes <= 0)
         {
@@ -697,6 +780,14 @@ bool TrtDetector::initialize(const std::string& model_path)
             }
         }
         numClasses = classes;
+
+        if (config.verbose)
+        {
+            std::cout << "[Detector] Output '" << mainOut << "' shape=["
+                      << outDims.d[0] << "," << dim1 << "," << dim2 << "]"
+                      << " layout=" << (cnLayout ? "[1,C,N]" : "[1,N,C]")
+                      << " numClasses=" << numClasses << std::endl;
+        }
     }
 
     int c = 0;
@@ -736,28 +827,66 @@ bool TrtDetector::initialize(const std::string& model_path)
         }
     }
 
-    // Pre-compute transpose metadata for YOLOv8-style outputs shaped
-    // [1, C, N]. We run a GPU transpose+cast so the CPU decode loop reads
-    // [N, C] row-major (unit stride) and fp16 is promoted once on the GPU.
+    // Pre-compute decode metadata for YOLOv8/v11-style raw outputs. The
+    // tensor can be either [1, C, N] (channels-major, Ultralytics default)
+    // or [1, N, C] (transposed export). We resolve C/N per-output and stash
+    // the layout flag so the GPU decode kernel reads the correct stride
+    // regardless of export style. EfficientNMS plugin output [1, N, 6] is
+    // detected via cols==6 and skipped.
+    outputCnLayout.clear();
+    outputC.clear();
+    outputN.clear();
     for (const auto& outName : outputNames)
     {
         const auto& shape = outputShapes[outName];
         bool needs = false;
         size_t bytes = 0;
+        bool cnLayout = true;
+        int resolvedC = 0;
+        int resolvedN = 0;
         if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0 && shape[2] > 0)
         {
-            const int64_t c_dim = shape[1];
-            const int64_t n_dim = shape[2];
+            const int64_t dim1 = shape[1];
+            const int64_t dim2 = shape[2];
             // EfficientNMS plugin output is [1, N, 6]; do not transpose it.
-            if (n_dim != 6 && c_dim >= 5)
+            const bool isEfficientNms = (dim2 == 6);
+            if (!isEfficientNms)
             {
-                needs = true;
-                // Device buffer layout: [int counter (16B aligned) |
-                // float candidates[kMaxCandidates * 6]]. D2H is one op.
-                bytes = kDecodeBlockBytes;
+                // Pick the smaller-valid dim (>4) as C. For standard YOLO
+                // exports C is far smaller than N (e.g. 84 vs 8400).
+                if (dim1 > 4 && dim1 <= dim2)
+                {
+                    resolvedC = static_cast<int>(dim1);
+                    resolvedN = static_cast<int>(dim2);
+                    cnLayout = true;
+                    needs = true;
+                }
+                else if (dim2 > 4 && dim2 < dim1)
+                {
+                    resolvedC = static_cast<int>(dim2);
+                    resolvedN = static_cast<int>(dim1);
+                    cnLayout = false;
+                    needs = true;
+                }
+                else if (dim1 >= 5)
+                {
+                    resolvedC = static_cast<int>(dim1);
+                    resolvedN = static_cast<int>(dim2);
+                    cnLayout = true;
+                    needs = true;
+                }
+                if (needs)
+                {
+                    // Device buffer layout: [int counter (16B aligned) |
+                    // float candidates[kMaxCandidates * 6]]. D2H is one op.
+                    bytes = kDecodeBlockBytes;
+                }
             }
         }
         outputNeedsTranspose[outName] = needs;
+        outputCnLayout[outName] = cnLayout;
+        outputC[outName] = resolvedC;
+        outputN[outName] = resolvedN;
         if (needs)
         {
             transposedSizes[outName] = bytes;
@@ -798,23 +927,7 @@ bool TrtDetector::initialize(const std::string& model_path)
 
     allocatePinnedOutputs();
 
-    // Pre-allocate GPU buffers
-    gpuResizedBuffer.create(h, w, CV_8UC3);
-    gpuFloatBuffer.create(h, w, CV_32FC3);
-    gpuChannelBuffers.resize(c);
-    for (int i = 0; i < c; ++i)
-        gpuChannelBuffers[i].create(h, w, CV_32F);
-
-    cvStream = cv::cuda::StreamAccessor::wrapStream(stream);
-
     img_scale = static_cast<float>(config.detection_resolution) / w;
-
-    resizedBuffer.create(h, w, CV_8UC3);
-    floatBuffer.create(h, w, CV_32FC3);
-    channelBuffers.clear();
-    channelBuffers.resize(c);
-    for (int i = 0; i < c; ++i)
-        channelBuffers[i].create(h, w, CV_32F);
 
     for (const auto& n : inputNames)
         context->setTensorAddress(n.c_str(), inputBindings[n]);
@@ -929,18 +1042,36 @@ void TrtDetector::loadEngine(const std::string& modelFile)
 
             oliver::Payload cachePayload;
             std::string error;
-            if (oliver::decrypt_file(encryptedEngineCache.u8string(), cachePayload, error) &&
-                cachePayload.type == oliver::PayloadType::TensorRtEngine)
+            bool decrypted = oliver::decrypt_file(encryptedEngineCache.u8string(), cachePayload, error)
+                && cachePayload.type == oliver::PayloadType::TensorRtEngine;
+            bool acceptCache = false;
+            if (decrypted)
             {
-                engine.reset(loadEngineFromMemory(cachePayload.bytes.data(), cachePayload.bytes.size(), runtime.get()));
-                if (engine)
-                    return;
+                // Strict FP16 policy: only accept the cache if BOTH input and
+                // every output is kHALF. An older cache built before this
+                // policy may decrypt fine but ship FP32 outputs — that fails
+                // our kernel's __half assumption silently (the user just
+                // sees zero detections). Detect, drop, and rebuild.
+                if (engineBytesAreFullyHalf(cachePayload.bytes.data(), cachePayload.bytes.size()))
+                {
+                    engine.reset(loadEngineFromMemory(cachePayload.bytes.data(), cachePayload.bytes.size(), runtime.get()));
+                    if (engine)
+                    {
+                        acceptCache = true;
+                        return;
+                    }
+                }
+                else
+                {
+                    std::cerr << "[Detector] Encrypted engine cache is not fully FP16; rebuilding from oliver." << std::endl;
+                }
             }
             else
             {
                 std::cerr << "[Detector] Encrypted engine cache decrypt failed: " << error << std::endl;
             }
 
+            (void)acceptCache;
             fs::remove(encryptedEngineCache, ec);
             if (ec)
             {
@@ -1010,9 +1141,9 @@ void TrtDetector::loadEngine(const std::string& modelFile)
             engineFilePath = legacyEnginePath;
         }
 
-        if (fileExists(engineFilePath.u8string()) && !engineHasHalfInput(engineFilePath))
+        if (fileExists(engineFilePath.u8string()) && !engineIsFullyHalf(engineFilePath))
         {
-            std::cerr << "[Detector] Cached engine input dtype is not FP16; deleting and rebuilding: "
+            std::cerr << "[Detector] Cached engine has non-FP16 IO tensor(s); deleting and rebuilding: "
                       << engineFilePath.u8string() << std::endl;
             fs::remove(engineFilePath, ec);
             if (ec)
@@ -1084,13 +1215,13 @@ void TrtDetector::processFrame(const cv::Mat& frame)
     inferenceCV.notify_one();
 }
 
-void TrtDetector::processFrameGpu(const cv::cuda::GpuMat& frame)
+void TrtDetector::processFrameGpu(GpuImage frame)
 {
     if (config.backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
     currentFrame.release();
-    currentFrameGpu = frame;
+    currentFrameGpu = std::move(frame);
     pendingFrameType = PendingFrameType::Gpu;
     frameReady = true;
     inferenceCV.notify_one();
@@ -1150,7 +1281,7 @@ void TrtDetector::inferenceThread()
         }
 
         cv::Mat frame;
-        cv::cuda::GpuMat frameGpu;
+        GpuImage frameGpu;
         PendingFrameType frameType = PendingFrameType::None;
         bool hasNewFrame = false;
 
@@ -1166,7 +1297,7 @@ void TrtDetector::inferenceThread()
                 frameType = pendingFrameType;
                 if (frameType == PendingFrameType::Gpu)
                 {
-                    frameGpu = currentFrameGpu;
+                    frameGpu = std::move(currentFrameGpu);
                     currentFrameGpu.release();
                     currentFrame.release();
                 }
@@ -1233,9 +1364,9 @@ void TrtDetector::inferenceThread()
                         const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
                         if (needsT)
                         {
-                            const auto& shape = outputShapes[name];
-                            const int C = static_cast<int>(shape[1]);
-                            const int N = static_cast<int>(shape[2]);
+                            const int C = outputC[name];
+                            const int N = outputN[name];
+                            const bool cnLayout = outputCnLayout[name];
                             const bool isHalf = (outputTypes[name] == nvinfer1::DataType::kHALF);
                             unsigned char* devBlock = reinterpret_cast<unsigned char*>(transposedDeviceBuffers[name]);
                             int* devCounter = reinterpret_cast<int*>(devBlock);
@@ -1244,7 +1375,7 @@ void TrtDetector::inferenceThread()
                             launch_decode_and_filter(
                                 outputBindings[name], C, N, numClasses, isHalf,
                                 config.confidence_threshold, img_scale,
-                                kMaxCandidates, devCounter, devCandidates, stream
+                                kMaxCandidates, cnLayout, devCounter, devCandidates, stream
                             );
 
                             cudaMemcpyAsync(
@@ -1315,6 +1446,7 @@ void TrtDetector::inferenceThread()
                                 config.nms_threshold,
                                 &lastNmsTimeValue
                             );
+                            filterDetectionsByDepthMask(detections);
 
                             {
                                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
@@ -1388,11 +1520,13 @@ void TrtDetector::preProcess(const cv::Mat& frame)
     if (frame.empty())
         return;
 
-    gpuFrameBuffer.upload(frame, cvStream);
+    if (!gpuFrameBuffer.upload(frame.data, frame.rows, frame.cols, frame.channels(),
+                               frame.step, stream))
+        return;
     preProcess(gpuFrameBuffer);
 }
 
-void TrtDetector::preProcess(const cv::cuda::GpuMat& frame)
+void TrtDetector::preProcess(const GpuImage& frame)
 {
     if (frame.empty())
         return;
@@ -1415,35 +1549,16 @@ void TrtDetector::preProcess(const cv::cuda::GpuMat& frame)
     if (c != 3)
         return;
 
-    cv::cuda::GpuMat bgrFrame;
-    if (frame.channels() == 4)
-    {
-        cv::cuda::cvtColor(frame, gpuFrameBuffer, cv::COLOR_BGRA2BGR, 0, cvStream);
-        bgrFrame = gpuFrameBuffer;
-    }
-    else if (frame.channels() == 1)
-    {
-        cv::cuda::cvtColor(frame, gpuFrameBuffer, cv::COLOR_GRAY2BGR, 0, cvStream);
-        bgrFrame = gpuFrameBuffer;
-    }
-    else if (frame.channels() == 3)
-    {
-        bgrFrame = frame;
-    }
-    else
-    {
+    const int srcChannels = frame.channels();
+    if (srcChannels != 1 && srcChannels != 3 && srcChannels != 4)
         return;
-    }
 
     // Square input invariant is enforced in initialize(); w == h here.
-    cv::cuda::resize(bgrFrame, gpuResizedBuffer, cv::Size(w, h), 0, 0, cv::INTER_LINEAR, cvStream);
-
-    // Fused FP16: uint8 BGR HWC -> half CHW RGB / 255, written directly into
-    // the engine's __half input binding. Eliminates the intermediate float
-    // HWC buffer, the separate convertTo pass, and the implicit fp32->fp16
-    // cast TensorRT would otherwise insert.
-    launch_fused_bgr_u8_to_chw_rgb_f16(
-        gpuResizedBuffer, reinterpret_cast<__half*>(inputBuffer), w, stream
+    // One-shot fused kernel: bilinear resize -> BGR(A)->RGB (or GRAY broadcast)
+    // -> /255 -> half CHW directly into the engine input binding. No OpenCV
+    // CUDA module needed — all work runs on hand-written kernels.
+    launch_resize_bgr_u8_to_chw_rgb_f16(
+        frame.view(), reinterpret_cast<__half*>(inputBuffer), w, stream
     );
 
     if (config.verbose)

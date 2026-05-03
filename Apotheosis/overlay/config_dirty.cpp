@@ -30,6 +30,8 @@ void OverlayConfig_TrySave(const char* filename)
     if (ImGui::IsAnyItemActive())
         return;
 
-    config.saveConfig(filename ? filename : "config.ini");
-    cfgDirty = false;
+    if (config.saveConfig(filename ? filename : "config.ini"))
+        cfgDirty = false;
+    else
+        cfgDirtyAt = now;
 }

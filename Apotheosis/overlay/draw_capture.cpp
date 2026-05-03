@@ -14,7 +14,7 @@
 #include "config.h"
 #include "Apotheosis.h"
 #include "capture.h"
-#include "opencv_capture.h"
+#include "capture_card.h"
 #include "other_tools.h"
 #include "draw_settings.h"
 #include "overlay.h"
@@ -29,38 +29,36 @@ static char tcp_ip_buf[64] = "";
 static int tcp_port_buf = 1235;
 static bool tcp_settings_init = false;
 
-static int opencv_index_buf = 0;
-static int opencv_api_idx = 0;
-static int opencv_format_idx = 0;
-static char opencv_url_buf[256] = "";
-static int opencv_w_buf = 0;
-static int opencv_h_buf = 0;
-static int opencv_fps_buf = 0;
-static int opencv_crop_w_buf = 0;
-static int opencv_crop_h_buf = 0;
-static bool opencv_settings_init = false;
-static std::vector<OpenCVCaptureDeviceInfo> opencv_devices;
-static std::vector<std::string> opencv_device_labels;
-static std::vector<const char*> opencv_device_items;
+static int card_index_buf = 0;
+static int card_format_idx = 0;
+static int card_w_buf = 0;
+static int card_h_buf = 0;
+static int card_fps_buf = 0;
+static int card_crop_w_buf = 0;
+static int card_crop_h_buf = 0;
+static bool card_settings_init = false;
+static std::vector<CaptureCardDeviceInfo> card_devices;
+static std::vector<std::string> card_device_labels;
+static std::vector<const char*> card_device_items;
 
-static void RefreshOpenCVDeviceList(const std::string& api_name)
+static void RefreshCaptureCardDeviceList()
 {
-    opencv_devices = OpenCVCapture::EnumerateDevices(api_name, 16);
-    opencv_device_labels.clear();
-    opencv_device_items.clear();
+    card_devices = CaptureCard::EnumerateDevices();
+    card_device_labels.clear();
+    card_device_items.clear();
 
-    if (opencv_devices.empty())
+    if (card_devices.empty())
     {
-        opencv_device_labels.push_back(u8"未检测到可用设备");
+        card_device_labels.push_back(u8"未检测到可用设备");
     }
     else
     {
-        for (const auto& device : opencv_devices)
-            opencv_device_labels.push_back(device.name);
+        for (const auto& device : card_devices)
+            card_device_labels.push_back(device.name);
     }
 
-    for (const auto& label : opencv_device_labels)
-        opencv_device_items.push_back(label.c_str());
+    for (const auto& label : card_device_labels)
+        card_device_items.push_back(label.c_str());
 }
 
 static float CaptureCompactComboWidth()
@@ -116,10 +114,19 @@ void draw_capture_settings()
             OverlayConfig_MarkDirty();
         }
 
-        std::vector<std::string> captureMethodOptions = { "udp_capture", "tcp_capture", "opencv_capture" };
+        std::vector<std::string> captureMethodOptions = {
+            "udp_capture",
+            "tcp_capture",
+            "capture_card"
+        };
+        std::vector<std::string> captureMethodLabels = {
+            u8"UDP",
+            u8"TCP",
+            u8"采集卡（直采）"
+        };
         std::vector<const char*> captureMethodItems;
-        for (const auto& option : captureMethodOptions)
-            captureMethodItems.push_back(option.c_str());
+        for (const auto& label : captureMethodLabels)
+            captureMethodItems.push_back(label.c_str());
 
         int currentcaptureMethodIndex = 0;
         for (size_t i = 0; i < captureMethodOptions.size(); ++i)
@@ -144,8 +151,6 @@ void draw_capture_settings()
 
         OverlayUI::EndSection();
     }
-
-    draw_capture_preview();
 
     if (config.capture_method == "udp_capture")
     {
@@ -207,98 +212,85 @@ void draw_capture_settings()
         }
     }
 
-    if (config.capture_method == "opencv_capture")
+    if (config.capture_method == "capture_card")
     {
-        if (OverlayUI::BeginSection(u8"OpenCV 采集卡", "capture_section_opencv"))
+        if (OverlayUI::BeginSection(u8"采集卡（直采）", "capture_section_card"))
         {
-            static const char* kApiItems[] = { "DSHOW", "MSMF", "FFMPEG", "ANY" };
-            static const std::string kApiNames[] = { "DSHOW", "MSMF", "FFMPEG", "ANY" };
-            static const char* kFormatItems[] = { "AUTO", "NV12", "MJPG", "YUY2", "YUYV", "RGB3", "BGR3" };
-            static const std::string kFormatNames[] = { "AUTO", "NV12", "MJPG", "YUY2", "YUYV", "RGB3", "BGR3" };
+            static const char* kFormatItems[] = { "AUTO", "NV12", "MJPG", "YUY2", "RGB32" };
+            static const std::string kFormatNames[] = { "AUTO", "NV12", "MJPG", "YUY2", "RGB32" };
 
-            if (!opencv_settings_init)
+            if (!card_settings_init)
             {
-                opencv_index_buf = config.opencv_capture_index;
-                opencv_api_idx = 0;
-                for (int i = 0; i < 4; ++i)
-                    if (kApiNames[i] == config.opencv_capture_api) { opencv_api_idx = i; break; }
-                opencv_format_idx = 0;
-                for (int i = 0; i < 7; ++i)
-                    if (kFormatNames[i] == config.opencv_capture_format) { opencv_format_idx = i; break; }
-                memset(opencv_url_buf, 0, sizeof(opencv_url_buf));
-                std::string u = config.opencv_capture_url;
-                if (u.size() >= sizeof(opencv_url_buf))
-                    u = u.substr(0, sizeof(opencv_url_buf) - 1);
-                memcpy(opencv_url_buf, u.c_str(), u.size());
-                opencv_w_buf = config.opencv_capture_width;
-                opencv_h_buf = config.opencv_capture_height;
-                opencv_fps_buf = config.opencv_capture_fps;
-                opencv_crop_w_buf = config.opencv_capture_crop_width;
-                opencv_crop_h_buf = config.opencv_capture_crop_height;
-                RefreshOpenCVDeviceList(kApiNames[opencv_api_idx]);
-                opencv_settings_init = true;
+                card_index_buf = config.capture_card_index;
+                card_format_idx = 0;
+                for (int i = 0; i < 5; ++i)
+                    if (kFormatNames[i] == config.capture_card_format) { card_format_idx = i; break; }
+                card_w_buf = config.capture_card_width;
+                card_h_buf = config.capture_card_height;
+                card_fps_buf = config.capture_card_fps;
+                card_crop_w_buf = config.capture_card_crop_width;
+                card_crop_h_buf = config.capture_card_crop_height;
+                RefreshCaptureCardDeviceList();
+                card_settings_init = true;
             }
 
+            if (card_device_items.empty())
+                RefreshCaptureCardDeviceList();
+
             int selected_device = 0;
-            for (size_t i = 0; i < opencv_devices.size(); ++i)
+            for (size_t i = 0; i < card_devices.size(); ++i)
             {
-                if (opencv_devices[i].index == opencv_index_buf)
+                if (card_devices[i].index == card_index_buf)
                 {
                     selected_device = static_cast<int>(i);
                     break;
                 }
             }
 
-            if (ImGui::Combo(u8"设备", &selected_device, opencv_device_items.data(), static_cast<int>(opencv_device_items.size())))
+            if (ImGui::Combo(u8"设备", &selected_device, card_device_items.data(),
+                             static_cast<int>(card_device_items.size())))
             {
-                if (!opencv_devices.empty())
-                    opencv_index_buf = opencv_devices[selected_device].index;
+                if (!card_devices.empty())
+                    card_index_buf = card_devices[selected_device].index;
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(u8"自动检测当前可打开的视频输入设备。URL 非空时忽略设备选择。");
+                ImGui::SetTooltip(u8"直采路径使用 Media Foundation 直接对接采集卡驱动，不经过 OpenCV。");
 
             if (ImGui::Button(u8"刷新设备列表"))
-                RefreshOpenCVDeviceList(kApiNames[opencv_api_idx]);
+                RefreshCaptureCardDeviceList();
 
-            if (ImGui::Combo(u8"驱动接口", &opencv_api_idx, kApiItems, IM_ARRAYSIZE(kApiItems)))
-                RefreshOpenCVDeviceList(kApiNames[opencv_api_idx]);
+            ImGui::Combo(u8"采集格式", &card_format_idx, kFormatItems, IM_ARRAYSIZE(kFormatItems));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(u8"USB 采集卡通常选 DSHOW；UVC 4K / HDMI 采集卡可试 MSMF。");
+                ImGui::SetTooltip(
+                    u8"AUTO：按 NV12 → MJPG → YUY2 → RGB32 顺序自动选择设备支持的最快格式。\n"
+                    u8"NV12：直采原始 NV12，CPU 转 BGR。\n"
+                    u8"MJPG：直采 JPEG，nvJPEG GPU 解码，零拷贝送给 detector。\n"
+                    u8"YUY2 / RGB32：兼容老设备的回退路径。");
 
-            ImGui::Combo(u8"采集格式", &opencv_format_idx, kFormatItems, IM_ARRAYSIZE(kFormatItems));
+            ImGui::InputInt(u8"原始宽度 (0=自动)", &card_w_buf);
+            ImGui::InputInt(u8"原始高度 (0=自动)", &card_h_buf);
+            ImGui::InputInt(u8"裁剪宽度 (0=原始宽)", &card_crop_w_buf);
+            ImGui::InputInt(u8"裁剪高度 (0=原始高)", &card_crop_h_buf);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(u8"请求设备输出格式；新增 NV12。AUTO 表示不主动设置 FourCC。");
+                ImGui::SetTooltip(u8"从原始画面中心裁剪指定区域；采集层不缩放。例如 1920x1080 裁 640x640 输出中间 640x640。");
+            ImGui::InputInt(u8"采集 FPS (0=自动)", &card_fps_buf);
 
-            ImGui::InputText(u8"URL（可选）", opencv_url_buf, IM_ARRAYSIZE(opencv_url_buf));
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(u8"留空 = 按索引打开本地采集卡；填 RTSP/文件路径可用网络/文件源。");
-
-            ImGui::InputInt(u8"原始宽度 (0=自动)", &opencv_w_buf);
-            ImGui::InputInt(u8"原始高度 (0=自动)", &opencv_h_buf);
-            ImGui::InputInt(u8"裁剪宽度 (0=原始宽)", &opencv_crop_w_buf);
-            ImGui::InputInt(u8"裁剪高度 (0=原始高)", &opencv_crop_h_buf);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(u8"直接从原始画面中心裁剪指定区域；采集层不缩放。例如 1920x1080 裁 640x640 会输出中间 640x640。");
-            ImGui::InputInt(u8"采集 FPS (0=自动)", &opencv_fps_buf);
-
-            if (ImGui::Button(u8"应用 OpenCV 设置"))
+            if (ImGui::Button(u8"应用采集卡设置"))
             {
-                if (opencv_index_buf < 0) opencv_index_buf = 0;
-                if (opencv_w_buf < 0) opencv_w_buf = 0;
-                if (opencv_h_buf < 0) opencv_h_buf = 0;
-                if (opencv_fps_buf < 0) opencv_fps_buf = 0;
-                if (opencv_crop_w_buf < 0) opencv_crop_w_buf = 0;
-                if (opencv_crop_h_buf < 0) opencv_crop_h_buf = 0;
+                if (card_index_buf < 0) card_index_buf = 0;
+                if (card_w_buf < 0) card_w_buf = 0;
+                if (card_h_buf < 0) card_h_buf = 0;
+                if (card_fps_buf < 0) card_fps_buf = 0;
+                if (card_crop_w_buf < 0) card_crop_w_buf = 0;
+                if (card_crop_h_buf < 0) card_crop_h_buf = 0;
 
-                config.opencv_capture_index = opencv_index_buf;
-                config.opencv_capture_api = kApiNames[opencv_api_idx];
-                config.opencv_capture_url = opencv_url_buf;
-                config.opencv_capture_width = opencv_w_buf;
-                config.opencv_capture_height = opencv_h_buf;
-                config.opencv_capture_fps = opencv_fps_buf;
-                config.opencv_capture_format = kFormatNames[opencv_format_idx];
-                config.opencv_capture_crop_width = opencv_crop_w_buf;
-                config.opencv_capture_crop_height = opencv_crop_h_buf;
+                config.capture_card_index = card_index_buf;
+                config.capture_card_width = card_w_buf;
+                config.capture_card_height = card_h_buf;
+                config.capture_card_fps = card_fps_buf;
+                config.capture_card_format = kFormatNames[card_format_idx];
+                config.capture_card_crop_width = card_crop_w_buf;
+                config.capture_card_crop_height = card_crop_h_buf;
 
                 OverlayConfig_MarkDirty();
                 capture_method_changed.store(true);

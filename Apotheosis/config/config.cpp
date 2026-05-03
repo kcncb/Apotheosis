@@ -224,7 +224,7 @@ bool Config::loadConfig(const std::string& filename)
     // ---------- Capture ----------
     capture_method = get_string("", "capture_method", "udp_capture");
     if (capture_method != "udp_capture" && capture_method != "tcp_capture"
-        && capture_method != "opencv_capture")
+        && capture_method != "capture_card")
         capture_method = "udp_capture";
     udp_ip = get_string("", "udp_ip", "0.0.0.0");
     udp_port = get_long("", "udp_port", 1234);
@@ -232,29 +232,23 @@ bool Config::loadConfig(const std::string& filename)
     tcp_ip = get_string("", "tcp_ip", "0.0.0.0");
     tcp_port = get_long("", "tcp_port", 1235);
     if (tcp_port < 1 || tcp_port > 65535) tcp_port = 1235;
-    opencv_capture_index = get_long("", "opencv_capture_index", 0);
-    if (opencv_capture_index < 0) opencv_capture_index = 0;
-    opencv_capture_api = get_string("", "opencv_capture_api", "DSHOW");
-    if (opencv_capture_api != "DSHOW" && opencv_capture_api != "MSMF"
-        && opencv_capture_api != "FFMPEG" && opencv_capture_api != "ANY")
-        opencv_capture_api = "DSHOW";
-    opencv_capture_url = get_string("", "opencv_capture_url", "");
-    opencv_capture_width = get_long("", "opencv_capture_width", 0);
-    opencv_capture_height = get_long("", "opencv_capture_height", 0);
-    opencv_capture_fps = get_long("", "opencv_capture_fps", 0);
-    opencv_capture_format = get_string("", "opencv_capture_format", "AUTO");
-    if (opencv_capture_format != "AUTO" && opencv_capture_format != "NV12"
-        && opencv_capture_format != "MJPG" && opencv_capture_format != "YUY2"
-        && opencv_capture_format != "YUYV" && opencv_capture_format != "RGB3"
-        && opencv_capture_format != "BGR3")
-        opencv_capture_format = "AUTO";
-    opencv_capture_crop_width = get_long("", "opencv_capture_crop_width", 0);
-    opencv_capture_crop_height = get_long("", "opencv_capture_crop_height", 0);
-    if (opencv_capture_width < 0) opencv_capture_width = 0;
-    if (opencv_capture_height < 0) opencv_capture_height = 0;
-    if (opencv_capture_fps < 0) opencv_capture_fps = 0;
-    if (opencv_capture_crop_width < 0) opencv_capture_crop_width = 0;
-    if (opencv_capture_crop_height < 0) opencv_capture_crop_height = 0;
+    capture_card_index = get_long("", "capture_card_index", 0);
+    if (capture_card_index < 0) capture_card_index = 0;
+    capture_card_width = get_long("", "capture_card_width", 0);
+    capture_card_height = get_long("", "capture_card_height", 0);
+    capture_card_fps = get_long("", "capture_card_fps", 0);
+    capture_card_format = get_string("", "capture_card_format", "AUTO");
+    if (capture_card_format != "AUTO" && capture_card_format != "NV12"
+        && capture_card_format != "MJPG" && capture_card_format != "YUY2"
+        && capture_card_format != "RGB32")
+        capture_card_format = "AUTO";
+    capture_card_crop_width = get_long("", "capture_card_crop_width", 0);
+    capture_card_crop_height = get_long("", "capture_card_crop_height", 0);
+    if (capture_card_width < 0) capture_card_width = 0;
+    if (capture_card_height < 0) capture_card_height = 0;
+    if (capture_card_fps < 0) capture_card_fps = 0;
+    if (capture_card_crop_width < 0) capture_card_crop_width = 0;
+    if (capture_card_crop_height < 0) capture_card_crop_height = 0;
     detection_resolution = std::clamp(get_long("", "detection_resolution", 320), 32, 2048);
     capture_fps = get_long("", "capture_fps", 60);
     circle_mask = get_bool("", "circle_mask", true);
@@ -333,11 +327,10 @@ bool Config::loadConfig(const std::string& filename)
         0.05f, 2.0f);
 
     // ---------- Crosshair color detector (palette + rect + area) ----------
-    crosshair_rect_w   = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
-    crosshair_rect_h   = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
-    crosshair_min_area = std::max(1, get_long("", "crosshair_min_area", 2));
-    crosshair_max_area = std::max(crosshair_min_area,
-                                  get_long("", "crosshair_max_area", 200));
+    crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
+    crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
+    crosshair_min_pixel_count  = std::clamp(get_long("", "crosshair_min_pixel_count", 4), 1, 10000);
+    crosshair_close_radius     = std::clamp(get_long("", "crosshair_close_radius",    1), 0, 7);
     crosshair_colors.clear();
     {
         // Each [crosshair_color.N] section = one HSV band in the palette.
@@ -440,11 +433,26 @@ bool Config::loadConfig(const std::string& filename)
 
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
-            hk.pid_p = static_cast<float>(get_double(sec, "pid_p", hk.pid_p));
-            hk.pid_p_x = static_cast<float>(get_double(sec, "pid_p_x", hk.pid_p));
-            hk.pid_p_y = static_cast<float>(get_double(sec, "pid_p_y", hk.pid_p));
-            hk.pid_i = static_cast<float>(get_double(sec, "pid_i", hk.pid_i));
-            hk.pid_d = static_cast<float>(get_double(sec, "pid_d", hk.pid_d));
+            hk.speed_x       = static_cast<float>(get_double(sec, "speed_x",       hk.speed_x));
+            hk.speed_y       = static_cast<float>(get_double(sec, "speed_y",       hk.speed_y));
+            hk.lock_strength = static_cast<float>(get_double(sec, "lock_strength", hk.lock_strength));
+            hk.lock_radius_px = static_cast<float>(get_double(sec, "lock_radius_px", hk.lock_radius_px));
+
+            {
+                const long mode_raw = get_long(sec, "aim_trajectory_mode",
+                    static_cast<long>(hk.aim_trajectory_mode));
+                hk.aim_trajectory_mode = (mode_raw == 1)
+                    ? AimTrajectoryMode::Bezier
+                    : AimTrajectoryMode::Direct;
+            }
+            hk.bezier_cx1 = static_cast<float>(get_double(sec, "bezier_cx1", hk.bezier_cx1));
+            hk.bezier_cy1 = static_cast<float>(get_double(sec, "bezier_cy1", hk.bezier_cy1));
+            hk.bezier_cx2 = static_cast<float>(get_double(sec, "bezier_cx2", hk.bezier_cx2));
+            hk.bezier_cy2 = static_cast<float>(get_double(sec, "bezier_cy2", hk.bezier_cy2));
+            hk.bezier_follow_alpha = static_cast<float>(
+                get_double(sec, "bezier_follow_alpha", hk.bezier_follow_alpha));
+            hk.bezier_reanchor_threshold_px = static_cast<float>(
+                get_double(sec, "bezier_reanchor_threshold_px", hk.bezier_reanchor_threshold_px));
 
             hk.predictionInterval = static_cast<float>(get_double(sec, "predictionInterval", hk.predictionInterval));
             hk.prediction_futurePositions = get_long(sec, "prediction_futurePositions", hk.prediction_futurePositions);
@@ -461,29 +469,18 @@ bool Config::loadConfig(const std::string& filename)
             hk.kalman_additional_prediction_ms = static_cast<float>(get_double(sec, "kalman_additional_prediction_ms", hk.kalman_additional_prediction_ms));
             hk.kalman_reset_timeout_sec = static_cast<float>(get_double(sec, "kalman_reset_timeout_sec", hk.kalman_reset_timeout_sec));
 
-            hk.aim_lock_strength = static_cast<float>(get_double(sec, "aim_lock_strength", hk.aim_lock_strength));
-
             hk.crosshair_detect_enabled = get_bool(sec, "crosshair_detect_enabled", false);
 
             hk.lock_switch_score_margin = static_cast<float>(
                 get_double(sec, "lock_switch_score_margin", hk.lock_switch_score_margin));
             hk.lock_switch_min_frames = get_long(sec, "lock_switch_min_frames", hk.lock_switch_min_frames);
+            hk.lock_hold_min_frames   = get_long(sec, "lock_hold_min_frames",   hk.lock_hold_min_frames);
             hk.y_offset_size_decay_enabled = get_bool(sec, "y_offset_size_decay_enabled",
                                                        hk.y_offset_size_decay_enabled);
             hk.y_offset_size_decay_low_frac = static_cast<float>(
                 get_double(sec, "y_offset_size_decay_low_frac", hk.y_offset_size_decay_low_frac));
             hk.y_offset_size_decay_high_frac = static_cast<float>(
                 get_double(sec, "y_offset_size_decay_high_frac", hk.y_offset_size_decay_high_frac));
-
-            // Flick / Track + smart trigger + threat
-            hk.flick_track_enabled       = get_bool(sec, "flick_track_enabled", hk.flick_track_enabled);
-            hk.pid_track_p               = static_cast<float>(get_double(sec, "pid_track_p", hk.pid_track_p));
-            hk.pid_track_p_x             = static_cast<float>(get_double(sec, "pid_track_p_x", hk.pid_track_p));
-            hk.pid_track_p_y             = static_cast<float>(get_double(sec, "pid_track_p_y", hk.pid_track_p));
-            hk.pid_track_i               = static_cast<float>(get_double(sec, "pid_track_i", hk.pid_track_i));
-            hk.pid_track_d               = static_cast<float>(get_double(sec, "pid_track_d", hk.pid_track_d));
-            hk.flick_track_threshold_px  = static_cast<float>(get_double(sec, "flick_track_threshold_px", hk.flick_track_threshold_px));
-            hk.flick_track_hysteresis_px = static_cast<float>(get_double(sec, "flick_track_hysteresis_px", hk.flick_track_hysteresis_px));
 
             hk.smart_trigger_enabled         = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
             hk.smart_trigger_hit_radius_frac = static_cast<float>(get_double(sec, "smart_trigger_hit_radius_frac", hk.smart_trigger_hit_radius_frac));
@@ -550,27 +547,24 @@ bool Config::loadConfig(const std::string& filename)
         hk.kalman_warmup_frames = std::clamp(hk.kalman_warmup_frames, 0, 20);
         hk.kalman_additional_prediction_ms = std::clamp(hk.kalman_additional_prediction_ms, -80.0f, 120.0f);
         hk.kalman_reset_timeout_sec = std::clamp(hk.kalman_reset_timeout_sec, 0.05f, 3.0f);
-        hk.aim_lock_strength = std::clamp(hk.aim_lock_strength, 0.0f, 1.0f);
+        hk.speed_x       = std::clamp(hk.speed_x, 0.0f, 1.0f);
+        hk.speed_y       = std::clamp(hk.speed_y, 0.0f, 1.0f);
+        hk.lock_strength = std::clamp(hk.lock_strength, 0.0f, 1.0f);
+        hk.lock_radius_px = std::clamp(hk.lock_radius_px, 0.0f, 200.0f);
+        hk.bezier_cx1 = std::clamp(hk.bezier_cx1, 0.0f, 1.0f);
+        hk.bezier_cx2 = std::clamp(hk.bezier_cx2, 0.0f, 1.0f);
+        hk.bezier_cy1 = std::clamp(hk.bezier_cy1, -1.0f, 1.0f);
+        hk.bezier_cy2 = std::clamp(hk.bezier_cy2, -1.0f, 1.0f);
+        hk.bezier_follow_alpha = std::clamp(hk.bezier_follow_alpha, 0.0f, 1.0f);
+        hk.bezier_reanchor_threshold_px = std::clamp(hk.bezier_reanchor_threshold_px, 1.0f, 4096.0f);
 
-        hk.lock_switch_score_margin = std::clamp(hk.lock_switch_score_margin, 0.0f, 1.0f);
-        hk.lock_switch_min_frames   = std::clamp(hk.lock_switch_min_frames, 1, 30);
+        hk.lock_switch_score_margin = std::clamp(hk.lock_switch_score_margin, 0.0f, 200.0f);
+        hk.lock_switch_min_frames   = std::clamp(hk.lock_switch_min_frames, 1, 6000);
+        hk.lock_hold_min_frames     = std::clamp(hk.lock_hold_min_frames, 0, 2400);
         hk.y_offset_size_decay_low_frac  = std::clamp(hk.y_offset_size_decay_low_frac,  0.0f, 1.0f);
         hk.y_offset_size_decay_high_frac = std::clamp(hk.y_offset_size_decay_high_frac, 0.0f, 1.0f);
         if (hk.y_offset_size_decay_high_frac <= hk.y_offset_size_decay_low_frac)
             hk.y_offset_size_decay_high_frac = std::min(1.0f, hk.y_offset_size_decay_low_frac + 0.01f);
-
-        hk.pid_p = std::clamp(hk.pid_p, 0.0f, 5.0f);
-        hk.pid_p_x = std::clamp(hk.pid_p_x, 0.0f, 5.0f);
-        hk.pid_p_y = std::clamp(hk.pid_p_y, 0.0f, 5.0f);
-        hk.pid_i = std::clamp(hk.pid_i, 0.0f, 2.0f);
-        hk.pid_d = std::clamp(hk.pid_d, 0.0f, 2.0f);
-        hk.pid_track_p = std::clamp(hk.pid_track_p, 0.0f, 5.0f);
-        hk.pid_track_p_x = std::clamp(hk.pid_track_p_x, 0.0f, 5.0f);
-        hk.pid_track_p_y = std::clamp(hk.pid_track_p_y, 0.0f, 5.0f);
-        hk.pid_track_i = std::clamp(hk.pid_track_i, 0.0f, 2.0f);
-        hk.pid_track_d = std::clamp(hk.pid_track_d, 0.0f, 2.0f);
-        hk.flick_track_threshold_px  = std::clamp(hk.flick_track_threshold_px,  0.0f, 1024.0f);
-        hk.flick_track_hysteresis_px = std::clamp(hk.flick_track_hysteresis_px, 0.0f, 256.0f);
 
         hk.smart_trigger_hit_radius_frac = std::clamp(hk.smart_trigger_hit_radius_frac, 0.05f, 1.0f);
         hk.smart_trigger_variance_max_px = std::clamp(hk.smart_trigger_variance_max_px, 0.0f, 100.0f);
@@ -626,10 +620,21 @@ bool Config::saveConfig(const std::string& filename)
     if (target == "config.ini" && !config_path.empty())
         target = config_path;
 
-    std::ofstream file(target);
+    // Use the wide-char path so non-ASCII directories (e.g. Chinese
+    // user folders) open correctly. The narrow ofstream ctor on MSVC
+    // interprets the string as the system ANSI codepage and fails when
+    // the UTF-8 path contains characters outside it.
+    std::filesystem::path targetPath = std::filesystem::u8path(target);
+    std::error_code mkEc;
+    if (targetPath.has_parent_path())
+        std::filesystem::create_directories(targetPath.parent_path(), mkEc);
+
+    std::ofstream file(targetPath.wstring().c_str(), std::ios::out | std::ios::trunc);
     if (!file.is_open())
     {
-        std::cerr << "[Config] Error opening config for writing: " << target << std::endl;
+        DWORD winErr = ::GetLastError();
+        std::cerr << "[Config] Error opening config for writing: " << target
+                  << " (errno=" << errno << ", GetLastError=" << winErr << ")" << std::endl;
         return false;
     }
 
@@ -642,15 +647,13 @@ bool Config::saveConfig(const std::string& filename)
         << "udp_port = " << udp_port << "\n"
         << "tcp_ip = " << tcp_ip << "\n"
         << "tcp_port = " << tcp_port << "\n"
-        << "opencv_capture_index = " << opencv_capture_index << "\n"
-        << "opencv_capture_api = " << opencv_capture_api << "\n"
-        << "opencv_capture_url = " << opencv_capture_url << "\n"
-        << "opencv_capture_width = " << opencv_capture_width << "\n"
-        << "opencv_capture_height = " << opencv_capture_height << "\n"
-        << "opencv_capture_fps = " << opencv_capture_fps << "\n"
-        << "opencv_capture_format = " << opencv_capture_format << "\n"
-        << "opencv_capture_crop_width = " << opencv_capture_crop_width << "\n"
-        << "opencv_capture_crop_height = " << opencv_capture_crop_height << "\n"
+        << "capture_card_index = " << capture_card_index << "\n"
+        << "capture_card_width = " << capture_card_width << "\n"
+        << "capture_card_height = " << capture_card_height << "\n"
+        << "capture_card_fps = " << capture_card_fps << "\n"
+        << "capture_card_format = " << capture_card_format << "\n"
+        << "capture_card_crop_width = " << capture_card_crop_width << "\n"
+        << "capture_card_crop_height = " << capture_card_crop_height << "\n"
         << "detection_resolution = " << detection_resolution << "\n"
         << "capture_fps = " << capture_fps << "\n"
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
@@ -719,10 +722,10 @@ bool Config::saveConfig(const std::string& filename)
         << "replay_playback_speed = " << replay_playback_speed << "\n\n";
 
     file << "# Crosshair color detector (palette + ROI; per-hotkey toggle lives on each [hotkey.N])\n"
-        << "crosshair_rect_w = "   << crosshair_rect_w   << "\n"
-        << "crosshair_rect_h = "   << crosshair_rect_h   << "\n"
-        << "crosshair_min_area = " << crosshair_min_area << "\n"
-        << "crosshair_max_area = " << crosshair_max_area << "\n\n";
+        << "crosshair_rect_w = "          << crosshair_rect_w          << "\n"
+        << "crosshair_rect_h = "          << crosshair_rect_h          << "\n"
+        << "crosshair_min_pixel_count = " << crosshair_min_pixel_count << "\n"
+        << "crosshair_close_radius = "    << crosshair_close_radius    << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -755,11 +758,20 @@ bool Config::saveConfig(const std::string& filename)
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
         file << std::fixed << std::setprecision(4)
-             << "pid_p = " << hk.pid_p << "\n"
-             << "pid_p_x = " << hk.pid_p_x << "\n"
-             << "pid_p_y = " << hk.pid_p_y << "\n"
-             << "pid_i = " << hk.pid_i << "\n"
-             << "pid_d = " << hk.pid_d << "\n";
+             << "speed_x = "       << hk.speed_x       << "\n"
+             << "speed_y = "       << hk.speed_y       << "\n"
+             << "lock_strength = " << hk.lock_strength << "\n"
+             << "lock_radius_px = " << hk.lock_radius_px << "\n"
+             << std::setprecision(0)
+             << "aim_trajectory_mode = " << static_cast<int>(hk.aim_trajectory_mode) << "\n"
+             << std::fixed << std::setprecision(4)
+             << "bezier_cx1 = " << hk.bezier_cx1 << "\n"
+             << "bezier_cy1 = " << hk.bezier_cy1 << "\n"
+             << "bezier_cx2 = " << hk.bezier_cx2 << "\n"
+             << "bezier_cy2 = " << hk.bezier_cy2 << "\n"
+             << "bezier_follow_alpha = " << hk.bezier_follow_alpha << "\n"
+             << std::setprecision(2)
+             << "bezier_reanchor_threshold_px = " << hk.bezier_reanchor_threshold_px << "\n";
         file << std::fixed << std::setprecision(2)
              << "predictionInterval = " << hk.predictionInterval << "\n"
              << std::setprecision(0)
@@ -778,27 +790,16 @@ bool Config::saveConfig(const std::string& filename)
              << std::fixed << std::setprecision(2)
              << "kalman_additional_prediction_ms = " << hk.kalman_additional_prediction_ms << "\n"
              << "kalman_reset_timeout_sec = " << hk.kalman_reset_timeout_sec << "\n"
-             << std::fixed << std::setprecision(3)
-             << "aim_lock_strength = " << hk.aim_lock_strength << "\n"
              << "crosshair_detect_enabled = " << to_bool_str(hk.crosshair_detect_enabled) << "\n"
              << std::fixed << std::setprecision(4)
              << "lock_switch_score_margin = " << hk.lock_switch_score_margin << "\n"
              << std::setprecision(0)
              << "lock_switch_min_frames = "   << hk.lock_switch_min_frames << "\n"
+             << "lock_hold_min_frames = "     << hk.lock_hold_min_frames << "\n"
              << "y_offset_size_decay_enabled = " << to_bool_str(hk.y_offset_size_decay_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "y_offset_size_decay_low_frac = "  << hk.y_offset_size_decay_low_frac  << "\n"
              << "y_offset_size_decay_high_frac = " << hk.y_offset_size_decay_high_frac << "\n"
-             << "flick_track_enabled = " << to_bool_str(hk.flick_track_enabled) << "\n"
-             << std::fixed << std::setprecision(4)
-             << "pid_track_p = " << hk.pid_track_p << "\n"
-             << "pid_track_p_x = " << hk.pid_track_p_x << "\n"
-             << "pid_track_p_y = " << hk.pid_track_p_y << "\n"
-             << "pid_track_i = " << hk.pid_track_i << "\n"
-             << "pid_track_d = " << hk.pid_track_d << "\n"
-             << std::fixed << std::setprecision(2)
-             << "flick_track_threshold_px = " << hk.flick_track_threshold_px << "\n"
-             << "flick_track_hysteresis_px = " << hk.flick_track_hysteresis_px << "\n"
              << "smart_trigger_enabled = " << to_bool_str(hk.smart_trigger_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "smart_trigger_hit_radius_frac = " << hk.smart_trigger_hit_radius_frac << "\n"

@@ -38,9 +38,17 @@ struct CrosshairDetectorSettings
     // Active color bands: a hit in ANY enabled band counts as a candidate.
     std::vector<CrosshairColorBand> colors;
 
-    // Reject contours outside this pixel-area range.
-    int min_area = 2;
-    int max_area = 200;
+    // Minimum count of red-mask pixels in the ROI required to call it a
+    // detection. Below this we treat the frame as "no crosshair seen" —
+    // prevents random single-pixel noise from defining a pivot.
+    int min_pixel_count = 4;
+
+    // Optional MORPH_CLOSE radius (px). 0 disables. Useful for crosshair
+    // styles where the white-to-red gradient leaves the red mask with
+    // small gaps; closing fills them so the density centroid is stable.
+    // Bigger radius bridges further but risks merging nearby red noise
+    // (blood, hit markers) into the crosshair blob — keep small.
+    int close_radius = 1;
 };
 
 // Default color list applied when none is configured: the two bands that

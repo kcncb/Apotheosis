@@ -5,7 +5,6 @@
 #include "gpu_jpeg_decoder.h"
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <cuda_runtime.h>
@@ -27,7 +26,7 @@ public:
     ~UDPCapture();
 
     cv::Mat GetNextFrameCpu() override;
-    cv::cuda::GpuMat GetNextFrameGpu() override;
+    GpuImage GetNextFrameGpu() override;
 
     bool Initialize();
     void Cleanup();
@@ -60,10 +59,10 @@ private:
     std::mutex frame_mutex_;
 
     // Legacy CPU queue (used when nvJPEG init failed and we fall back to
-    // cv::imdecode), plus the preferred GpuMat queue populated by the nvJPEG
+    // cv::imdecode), plus the preferred GPU queue populated by the nvJPEG
     // path. captureThread drains the GPU queue first; CPU queue is a fallback.
     std::queue<cv::Mat> frame_queue_;
-    std::queue<cv::cuda::GpuMat> gpu_frame_queue_;
+    std::queue<GpuImage> gpu_frame_queue_;
 
     // Pinned staging buffer for the pending JPEG bytes. Using pinned memory
     // avoids a page-fault/copy inside nvjpegDecode's internal host->device

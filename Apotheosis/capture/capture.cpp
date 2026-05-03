@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "capture.h"
+#include "crosshair/crosshair_runtime.h"
 #include "depth/depth_anything_trt.h"
 #include "depth/depth_mask.h"
 #include "tensorrt/nvinf.h"
@@ -27,7 +28,7 @@
 #include "other_tools.h"
 #include "udp_capture.h"
 #include "tcp_capture.h"
-#include "opencv_capture.h"
+#include "capture_card.h"
 #include "capture_utils.h"
 
 cv::Mat latestFrame;
@@ -39,6 +40,16 @@ int screenHeight = 0;
 std::atomic<int> captureFrameCount(0);
 std::atomic<int> captureFps(0);
 std::chrono::time_point<std::chrono::high_resolution_clock> captureFpsStartTime;
+
+// Source FPS: counts every frame the capture loop SUCCEEDS at acquiring,
+// before any frame-limiter sleep. captureFps measures effective processing
+// rate (post-limiter, post-detector). When the source delivers e.g. 120 fps
+// and we throttle to 60, captureSourceFps stays ~120 while captureFps shows
+// ~60 — the stats panel uses the source value when non-zero so the user can
+// tell "true input rate" from "internal processing rate".
+std::atomic<int> captureSourceFps(0);
+std::atomic<int> captureSourceFrameCount(0);
+std::chrono::time_point<std::chrono::high_resolution_clock> captureSourceFpsStartTime;
 
 std::deque<cv::Mat> frameQueue;
 
@@ -75,15 +86,13 @@ struct CaptureThreadConfig
     int udp_port = 0;
     std::string tcp_ip;
     int tcp_port = 0;
-    int opencv_capture_index = 0;
-    std::string opencv_capture_api;
-    std::string opencv_capture_url;
-    int opencv_capture_width = 0;
-    int opencv_capture_height = 0;
-    int opencv_capture_fps = 0;
-    std::string opencv_capture_format;
-    int opencv_capture_crop_width = 0;
-    int opencv_capture_crop_height = 0;
+    int capture_card_index = 0;
+    int capture_card_width = 0;
+    int capture_card_height = 0;
+    int capture_card_fps = 0;
+    std::string capture_card_format;
+    int capture_card_crop_width = 0;
+    int capture_card_crop_height = 0;
     std::string backend;
     std::vector<std::string> screenshot_button;
     int screenshot_delay = 0;
@@ -110,15 +119,13 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.udp_port = config.udp_port;
     snapshot.tcp_ip = config.tcp_ip;
     snapshot.tcp_port = config.tcp_port;
-    snapshot.opencv_capture_index = config.opencv_capture_index;
-    snapshot.opencv_capture_api = config.opencv_capture_api;
-    snapshot.opencv_capture_url = config.opencv_capture_url;
-    snapshot.opencv_capture_width = config.opencv_capture_width;
-    snapshot.opencv_capture_height = config.opencv_capture_height;
-    snapshot.opencv_capture_fps = config.opencv_capture_fps;
-    snapshot.opencv_capture_format = config.opencv_capture_format;
-    snapshot.opencv_capture_crop_width = config.opencv_capture_crop_width;
-    snapshot.opencv_capture_crop_height = config.opencv_capture_crop_height;
+    snapshot.capture_card_index = config.capture_card_index;
+    snapshot.capture_card_width = config.capture_card_width;
+    snapshot.capture_card_height = config.capture_card_height;
+    snapshot.capture_card_fps = config.capture_card_fps;
+    snapshot.capture_card_format = config.capture_card_format;
+    snapshot.capture_card_crop_width = config.capture_card_crop_width;
+    snapshot.capture_card_crop_height = config.capture_card_crop_height;
     snapshot.backend = config.backend;
     snapshot.screenshot_button = config.screenshot_button;
     snapshot.screenshot_delay = config.screenshot_delay;
@@ -136,7 +143,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
 
 std::string NormalizeCaptureMethod(const std::string& method)
 {
-    if (method == "udp_capture" || method == "tcp_capture" || method == "opencv_capture")
+    if (method == "udp_capture" || method == "tcp_capture" || method == "capture_card")
         return method;
     return "udp_capture";
 }
@@ -301,21 +308,20 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     return std::make_unique<TCPCapture>(width, height, cfg.tcp_ip, cfg.tcp_port);
                 }
 
-                if (method == "opencv_capture")
+                if (method == "capture_card")
                 {
                     if (cfg.verbose)
-                        std::cout << "[Capture] Using OpenCV capture card" << std::endl;
-                    return std::make_unique<OpenCVCapture>(
+                        std::cout << "[Capture] Using direct capture card (format="
+                                  << cfg.capture_card_format << ")" << std::endl;
+                    return std::make_unique<CaptureCard>(
                         width, height,
-                        cfg.opencv_capture_index,
-                        cfg.opencv_capture_api,
-                        cfg.opencv_capture_width,
-                        cfg.opencv_capture_height,
-                        cfg.opencv_capture_fps,
-                        cfg.opencv_capture_format,
-                        cfg.opencv_capture_crop_width,
-                        cfg.opencv_capture_crop_height,
-                        cfg.opencv_capture_url);
+                        cfg.capture_card_index,
+                        cfg.capture_card_width,
+                        cfg.capture_card_height,
+                        cfg.capture_card_fps,
+                        cfg.capture_card_crop_width,
+                        cfg.capture_card_crop_height,
+                        CaptureCard::ParseFormat(cfg.capture_card_format));
                 }
 
                 if (cfg.verbose)
@@ -390,20 +396,37 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         updateFrameDuration(currentCfg.capture_fps);
 
         captureFpsStartTime = std::chrono::high_resolution_clock::now();
+        captureSourceFpsStartTime = captureFpsStartTime;
 
         auto frameStartTime = std::chrono::steady_clock::now();
         auto applyFrameLimiter = [&]()
         {
             if (frameDuration.has_value())
             {
+                // Anchor the next-frame target to the *previous* target plus
+                // one frameDuration, NOT to "now after sleep". sleep_until on
+                // Windows still oversleeps by ~1ms even with the 1ms timer
+                // resolution guard active, and `sleep_for` based on `now()`
+                // accumulates that oversleep into the period — at 120 fps the
+                // 8.33ms interval becomes ~9-10ms, capping the loop at the
+                // ~100-110fps the user reported. Anchoring to the target
+                // means oversleep on frame N doesn't push frame N+1 late.
+                const auto target = frameStartTime + frameDuration.value();
                 const auto now = std::chrono::steady_clock::now();
-                const auto elapsed = now - frameStartTime;
-                if (elapsed < frameDuration.value())
-                {
-                    std::this_thread::sleep_for(frameDuration.value() - elapsed);
-                }
+                if (now < target)
+                    std::this_thread::sleep_until(target);
+                frameStartTime = target;
+                // If the loop fell way behind (e.g. a long capture stall or
+                // detector blocked the thread), snap the anchor forward so we
+                // don't burst-catchup with a flood of back-to-back frames.
+                const auto post = std::chrono::steady_clock::now();
+                if (post - frameStartTime > frameDuration.value() * 4)
+                    frameStartTime = post;
             }
-            frameStartTime = std::chrono::steady_clock::now();
+            else
+            {
+                frameStartTime = std::chrono::steady_clock::now();
+            }
         };
 
         ScreenshotWriter screenshotWriter;
@@ -499,19 +522,25 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             }
 
             // Prefer the zero-copy GPU path (nvJPEG output). If the backend
-            // doesn't produce GpuMats or the per-iteration GPU queue is
+            // doesn't produce GPU frames or the per-iteration GPU queue is
             // empty, fall through to the legacy CPU queue.
-            cv::cuda::GpuMat screenshotGpu = capturer->GetNextFrameGpu();
+            GpuImage screenshotGpu = capturer->GetNextFrameGpu();
             if (!screenshotGpu.empty())
             {
                 // Only download to CPU when a downstream consumer actually
                 // needs host pixels (depth mask, screenshot save). The
-                // detector itself takes the GpuMat directly below.
+                // detector itself takes the GpuImage directly below.
+                const bool detectorNeedsCpu = !g_detector
+                    || g_detector->backend() != DetectorBackend::TensorRT;
                 const bool needCpu = currentCfg.depth_inference_enabled
                     || screenshotRequested
-                    || currentCfg.show_window;
+                    || currentCfg.show_window
+                    || detectorNeedsCpu;
                 if (needCpu)
+                {
                     screenshotGpu.download(screenshotCpu);
+                    cudaDeviceSynchronize();
+                }
             }
             else
             {
@@ -651,10 +680,22 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 const bool usedCpuDetectionOverride =
                     currentCfg.depth_inference_enabled && currentCfg.depth_mask_enabled
                     && !detectionFrame.empty();
-                if (!screenshotGpu.empty() && !usedCpuDetectionOverride)
-                    g_detector->processFrameGpu(screenshotGpu);
-                else if (!detectionFrame.empty())
-                    g_detector->processFrame(detectionFrame);
+                const bool detectorAcceptsGpu =
+                    g_detector->backend() == DetectorBackend::TensorRT;
+                if (!screenshotGpu.empty() && !usedCpuDetectionOverride && detectorAcceptsGpu)
+                {
+                    g_detector->processFrameGpu(std::move(screenshotGpu));
+                }
+                else
+                {
+                    if (detectionFrame.empty() && !screenshotGpu.empty())
+                    {
+                        screenshotGpu.download(detectionFrame);
+                        cudaDeviceSynchronize();
+                    }
+                    if (!detectionFrame.empty())
+                        g_detector->processFrame(detectionFrame);
+                }
             }
 
             lastSuccessfulFrameTime = std::chrono::steady_clock::now();
@@ -668,6 +709,11 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 frameQueue.push_back(latestFrame);
             }
             frameCV.notify_one();
+
+            // Crosshair-color hit publish: cheap when no hotkey opted in
+            // (early-exit inside). Runs on the BGR detection-resolution
+            // frame, same coordinate space the mouse loop uses for pivots.
+            crosshair_runtime::process_frame(screenshotCpu);
 
             if (screenshotRequested)
             {
@@ -684,6 +730,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             }
 
             captureFrameCount++;
+            captureSourceFrameCount++;
             auto currentTime = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> elapsedTime = currentTime - captureFpsStartTime;
             if (elapsedTime.count() >= 1.0)
@@ -691,6 +738,23 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 captureFps = static_cast<int>(captureFrameCount / elapsedTime.count());
                 captureFrameCount = 0;
                 captureFpsStartTime = currentTime;
+            }
+
+            // Source FPS uses an independent 1-second window so a long
+            // detector-stall doesn't poison both counters at once. Prefer the
+            // backend's own producer-side estimate when it has one — the
+            // consumer-side frame count only reflects what *we* dequeued and
+            // hides upstream frames the producer dropped to keep its queue
+            // bounded (true for the direct CaptureCard backend).
+            std::chrono::duration<double> sourceElapsed = currentTime - captureSourceFpsStartTime;
+            if (sourceElapsed.count() >= 1.0)
+            {
+                const int producerFps = capturer ? capturer->GetSourceFpsEstimate() : 0;
+                captureSourceFps = producerFps > 0
+                    ? producerFps
+                    : static_cast<int>(captureSourceFrameCount / sourceElapsed.count());
+                captureSourceFrameCount = 0;
+                captureSourceFpsStartTime = currentTime;
             }
 
                 applyFrameLimiter();

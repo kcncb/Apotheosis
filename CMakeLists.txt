@@ -24,7 +24,7 @@ enable_language(CUDA)
 
 set(SRC_DIR "${CMAKE_SOURCE_DIR}/Apotheosis")
 set(PACKAGES_DIR "${CMAKE_SOURCE_DIR}/packages")
-set(OPENCV_ROOT "${SRC_DIR}/modules/opencv/build/install")
+set(OPENCV_ROOT "${SRC_DIR}/modules/opencv/prebuilt/opencv/build")
 set(TENSORRT_ROOT "${SRC_DIR}/modules/TensorRT-10.15.1.29" CACHE PATH "TensorRT 10.15 root")
 set(CUDNN_ROOT "$ENV{ProgramW6432}/NVIDIA/CUDNN/v9.17" CACHE PATH "cuDNN 9 root")
 set(MSVC_REDIST_DIR "$ENV{ProgramW6432}/Microsoft Visual Studio/18/Community/VC/Redist/MSVC/14.50.35710/x64/Microsoft.VC145.CRT" CACHE PATH "MSVC x64 runtime redist")
@@ -92,12 +92,14 @@ set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
     "${SRC_DIR}/capture/capture.cpp"
     "${SRC_DIR}/capture/capture_utils.cpp"
+    "${SRC_DIR}/capture/gpu_color_ops.cu"
     "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
-    "${SRC_DIR}/capture/opencv_capture.cpp"
+    "${SRC_DIR}/capture/capture_card.cpp"
     "${SRC_DIR}/capture/tcp_capture.cpp"
     "${SRC_DIR}/capture/udp_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/crosshair/crosshair_detector.cpp"
+    "${SRC_DIR}/crosshair/crosshair_runtime.cpp"
     "${SRC_DIR}/depth/depth_anything_trt.cpp"
     "${SRC_DIR}/depth/depth_mask.cpp"
     "${SRC_DIR}/depth/depth_utils.cpp"
@@ -116,6 +118,7 @@ set(APP_SOURCES
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
+    "${SRC_DIR}/mem/gpu_image.cpp"
     "${SRC_DIR}/mem/gpu_resource_manager.cpp"
     "${SRC_DIR}/model_crypto/model_crypto.cpp"
     "${SRC_DIR}/auth/auth_client.cpp"
@@ -123,6 +126,7 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
+    "${SRC_DIR}/mouse/bezier_aim_controller.cpp"
     "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
@@ -149,7 +153,9 @@ set(APP_SOURCES
     "${SRC_DIR}/overlay/draw_session.cpp"
     "${SRC_DIR}/overlay/draw_stats.cpp"
     "${SRC_DIR}/overlay/draw_target.cpp"
+    "${SRC_DIR}/overlay/preview_window.cpp"
     "${SRC_DIR}/overlay/overlay.cpp"
+    "${SRC_DIR}/overlay/overlay_image.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
@@ -169,7 +175,27 @@ target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/inc
 target_link_libraries(serial_embedded PUBLIC setupapi)
 
 add_executable(ai WIN32 ${APP_SOURCES})
-set_target_properties(ai PROPERTIES OUTPUT_NAME "ai" CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+
+# Pin CUDA architectures to REAL SMs (no trailing "-virtual" or PTX-only).
+# Without this, CMake default emits PTX targeting compute_<future-arch> and
+# relies on the NVIDIA driver to JIT it to SASS at load time. With CUDA 12.9
+# the PTX version is 8.5+, which older drivers (e.g. R535) reject with
+# "the provided PTX was compiled with an unsupported toolchain" — every
+# kernel launch then fails silently and our preprocess kernel never writes
+# anything to the engine input binding.
+#
+# Listing concrete SM real-arch numbers makes nvcc embed prebuilt SASS for
+# each GPU we care about; no driver JIT required:
+#   75  = Turing    (RTX 20 / GTX 16)
+#   80  = Ampere    (A100)
+#   86  = Ampere    (RTX 30)
+#   89  = Ada       (RTX 40)
+#   120 = Blackwell (RTX 50)
+set_target_properties(ai PROPERTIES
+    OUTPUT_NAME "Apotheosis"
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "75-real;80-real;86-real;89-real;120-real")
 
 foreach(target serial_embedded ai)
     if(MSVC)
@@ -230,6 +256,9 @@ target_link_libraries(ai PRIVATE
     CUDA::cuda_driver
     CUDA::cudart
     CUDA::nvjpeg
+    CUDA::nppc
+    CUDA::nppicc
+    CUDA::nppidei
     nvinfer_10
     nvonnxparser_10
     bcrypt
@@ -240,9 +269,15 @@ target_link_libraries(ai PRIVATE
     d2d1
     setupapi
     strmiids
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
     ole32
     oleaut32
     WindowsApp)
+
+copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")
 
 copy_runtime(ai "${OPENCV_DLL}")
 copy_runtime(ai "${GHUB_MOUSE_DLL}")

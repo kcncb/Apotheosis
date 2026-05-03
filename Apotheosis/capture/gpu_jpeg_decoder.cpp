@@ -55,7 +55,7 @@ bool GpuJpegDecoder::init()
 bool GpuJpegDecoder::decode(
     const uint8_t* data,
     size_t size,
-    cv::cuda::GpuMat& dst,
+    GpuImage& dst,
     cudaStream_t stream)
 {
     if (!initialized_ || !data || size == 0) return false;
@@ -75,17 +75,15 @@ bool GpuJpegDecoder::decode(
     if (W <= 0 || H <= 0) return false;
 
     // NVJPEG_OUTPUT_BGRI -> interleaved BGR, channel[0] holds the whole image
-    // with pitch = 3*W (or the allocated GpuMat step, whichever is larger).
-    // Reuse dst if its layout already matches to avoid reallocations on the
-    // UDP hot path.
-    if (dst.empty() || dst.rows != H || dst.cols != W || dst.type() != CV_8UC3)
-    {
-        dst.create(H, W, CV_8UC3);
-    }
+    // with pitch = step. GpuImage::create reuses the existing buffer when the
+    // shape already matches, so the UDP hot path doesn't pay cudaMalloc per
+    // frame.
+    if (!dst.create(H, W, 3))
+        return false;
 
     nvjpegImage_t out{};
-    out.channel[0] = dst.data;
-    out.pitch[0] = static_cast<unsigned int>(dst.step);
+    out.channel[0] = dst.data();
+    out.pitch[0] = static_cast<unsigned int>(dst.step());
 
     st = nvjpegDecode(
         handle_, state_, data, size,

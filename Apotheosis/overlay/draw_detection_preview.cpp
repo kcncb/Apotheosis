@@ -17,11 +17,13 @@
 #include "imgui/imgui.h"
 
 #include "capture.h"
+#include "config/config.h"
 #include "crosshair/crosshair_detector.h"
 #include "detection_buffer.h"
 #include "draw_settings.h"
 #include "i_detector.h"
 #include "overlay.h"
+#include "runtime/active_hotkey.h"
 #include "runtime/inference_session.h"
 #include "Apotheosis.h"
 
@@ -108,10 +110,10 @@ crosshair::CrosshairDetectorSettings snapshot_crosshair_settings(bool& has_enabl
     settings.enabled = true;
 
     std::lock_guard<std::recursive_mutex> cfg(configMutex);
-    settings.rect_w = config.crosshair_rect_w;
-    settings.rect_h = config.crosshair_rect_h;
-    settings.min_area = config.crosshair_min_area;
-    settings.max_area = config.crosshair_max_area;
+    settings.rect_w          = config.crosshair_rect_w;
+    settings.rect_h          = config.crosshair_rect_h;
+    settings.min_pixel_count = config.crosshair_min_pixel_count;
+    settings.close_radius    = config.crosshair_close_radius;
     settings.colors.reserve(config.crosshair_colors.size());
 
     has_enabled_color = false;
@@ -272,6 +274,59 @@ void draw_detection_preview()
         drawList->AddText(ImVec2(labelTl.x + 3.0f, labelTl.y + 1.0f), textColor, label);
     }
 
+    // Live FOV indicator. The base ellipse comes from the currently-active
+    // hotkey profile (or hotkey #0 when none is held), shown in detection-
+    // pixel space. When dynamic FOV is engaged, also draw the actual gate
+    // the tracker is using so the user can see it shrink/grow.
+    int   fov_base_x = 0;
+    int   fov_base_y = 0;
+    bool  dyn_enabled = false;
+    bool  hotkey_active = false;
+    {
+        std::lock_guard<std::recursive_mutex> cfg(configMutex);
+        const int idx_active = runtime::g_active_hotkey_index.load();
+        const int idx = (idx_active >= 0 && idx_active < static_cast<int>(config.hotkeys.size()))
+            ? idx_active
+            : (config.hotkeys.empty() ? -1 : 0);
+        hotkey_active = (idx_active >= 0);
+        if (idx >= 0)
+        {
+            const auto& hk = config.hotkeys[idx];
+            fov_base_x = hk.fovX;
+            fov_base_y = hk.fovY;
+            dyn_enabled = hk.dynamic_fov_enabled;
+        }
+    }
+
+    if (fov_base_x > 0 && fov_base_y > 0)
+    {
+        const ImVec2 fovCenter(
+            originScreen.x + (frame.cols * 0.5f) * scale,
+            originScreen.y + (frame.rows * 0.5f) * scale);
+
+        const float baseRx = fov_base_x * 0.5f * scale;
+        const float baseRy = fov_base_y * 0.5f * scale;
+
+        const float dynRxPx = g_dynamic_fov_radius_x_px.load();
+        const float dynRyPx = g_dynamic_fov_radius_y_px.load();
+        const bool  dynActive = dyn_enabled && dynRxPx > 0.0f && dynRyPx > 0.0f;
+
+        const ImU32 baseCol = dynActive
+            ? IM_COL32(255, 200, 60, 160)
+            : IM_COL32(255, 200, 60, 230);
+        drawList->AddEllipse(fovCenter, ImVec2(baseRx, baseRy), baseCol, 0.0f, 64, 1.6f);
+
+        if (dynActive)
+        {
+            const float dynRx = dynRxPx * scale;
+            const float dynRy = dynRyPx * scale;
+            const ImU32 dynCol = hotkey_active
+                ? IM_COL32(80, 220, 255, 240)
+                : IM_COL32(80, 220, 255, 180);
+            drawList->AddEllipse(fovCenter, ImVec2(dynRx, dynRy), dynCol, 0.0f, 64, 2.0f);
+        }
+    }
+
     bool has_enabled_color = false;
     const auto crosshair_settings = snapshot_crosshair_settings(has_enabled_color);
     const cv::Rect roi = center_roi(frame.size(), crosshair_settings.rect_w, crosshair_settings.rect_h);
@@ -304,10 +359,10 @@ void draw_detection_preview()
         ImGui::SameLine();
         ImGui::TextDisabled(u8"| 推理 %.1f ms", session->detector()->lastInferenceTime().count());
     }
-    ImGui::TextDisabled(u8"准星找色: %s | 范围 %dx%d | 面积 %d-%d",
+    ImGui::TextDisabled(u8"准星找色: %s | 范围 %dx%d | 阈值 %d px | 闭合 %d",
         crosshair_hit ? u8"已命中" : (has_enabled_color ? u8"未命中" : u8"无启用颜色"),
         crosshair_settings.rect_w,
         crosshair_settings.rect_h,
-        crosshair_settings.min_area,
-        crosshair_settings.max_area);
+        crosshair_settings.min_pixel_count,
+        crosshair_settings.close_radius);
 }

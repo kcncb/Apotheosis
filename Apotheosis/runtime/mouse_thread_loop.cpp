@@ -13,7 +13,7 @@
 #include "AimbotTarget.h"
 #include "active_hotkey.h"
 #include "capture.h"
-#include "crosshair/crosshair_detector.h"
+#include "crosshair/crosshair_runtime.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
@@ -36,7 +36,7 @@ namespace
 // HotkeyAimClass has `kalman_override_enabled = true`, the five overridden
 // Kalman noise/damping/velocity fields replace the hotkey-level values. All
 // other Kalman knobs (enabled flag, warmup, delay compensation, reset
-// timeout) stay at the hotkey level â€?they are orthogonal to per-class
+// timeout) stay at the hotkey level ï¿½?they are orthogonal to per-class
 // motion characteristics.
 MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
 {
@@ -51,23 +51,21 @@ MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
 
     p.fovX = hk.fovX;
     p.fovY = hk.fovY;
-    p.pid.p = static_cast<double>(hk.pid_p);
-    p.pid.p_x = static_cast<double>(hk.pid_p_x);
-    p.pid.p_y = static_cast<double>(hk.pid_p_y);
-    p.pid.i = static_cast<double>(hk.pid_i);
-    p.pid.d = static_cast<double>(hk.pid_d);
+    p.aim.speed_x       = static_cast<double>(hk.speed_x);
+    p.aim.speed_y       = static_cast<double>(hk.speed_y);
+    p.aim.lock_strength = static_cast<double>(hk.lock_strength);
+    p.aim.lock_radius_px = static_cast<double>(hk.lock_radius_px);
+    p.aim.lock_attenuation = 1.0;
+
+    p.bezier_enabled = (hk.aim_trajectory_mode == AimTrajectoryMode::Bezier);
+    p.bezier.curve.cx1 = static_cast<double>(hk.bezier_cx1);
+    p.bezier.curve.cy1 = static_cast<double>(hk.bezier_cy1);
+    p.bezier.curve.cx2 = static_cast<double>(hk.bezier_cx2);
+    p.bezier.curve.cy2 = static_cast<double>(hk.bezier_cy2);
+    p.bezier.follow_alpha = static_cast<double>(hk.bezier_follow_alpha);
+    p.bezier.reanchor_threshold_px = static_cast<double>(hk.bezier_reanchor_threshold_px);
 
     p.predictionInterval = hk.predictionInterval;
-
-    // Flick / Track dual-mode wiring.
-    p.flick_track_enabled       = hk.flick_track_enabled;
-    p.pid_track.p               = static_cast<double>(hk.pid_track_p);
-    p.pid_track.p_x             = static_cast<double>(hk.pid_track_p_x);
-    p.pid_track.p_y             = static_cast<double>(hk.pid_track_p_y);
-    p.pid_track.i               = static_cast<double>(hk.pid_track_i);
-    p.pid_track.d               = static_cast<double>(hk.pid_track_d);
-    p.flick_track_threshold_px  = hk.flick_track_threshold_px;
-    p.flick_track_hysteresis_px = hk.flick_track_hysteresis_px;
 
     // Smart trigger wiring.
     p.smart_trigger_enabled          = hk.smart_trigger_enabled;
@@ -103,9 +101,45 @@ MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
         }
     }
 
-    p.aim_lock_strength = hk.aim_lock_strength;
-
     return p;
+}
+
+// Resolve the crosshair pivot for THIS tick. If the active hotkey opted into
+// crosshair-color and the capture-thread snapshot is fresh AND a hit was
+// found, use the detected reticle position. Otherwise fall back to the
+// detection-image centre.
+struct PivotResolved
+{
+    double x = 0.0;
+    double y = 0.0;
+    bool   from_color = false;
+    std::chrono::steady_clock::time_point snap_ts{};   // only set when from_color = true
+};
+
+PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
+                                      int detection_resolution)
+{
+    const double centre = detection_resolution * 0.5;
+    PivotResolved out;
+    out.x = centre;
+    out.y = centre;
+    if (!profile || !profile->crosshair_detect_enabled)
+        return out;
+
+    const auto snap = crosshair_runtime::read();
+    if (!snap.valid)
+        return out;
+
+    const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - snap.ts).count();
+    if (age > crosshair_runtime::kFreshnessMs)
+        return out;
+
+    out.x = snap.x;
+    out.y = snap.y;
+    out.from_color = true;
+    out.snap_ts    = snap.ts;
+    return out;
 }
 
 struct AimSelection
@@ -145,6 +179,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
     int last_resolution_seen = -1;
     int last_kalman_class_id = -1;   // track class id of last Kalman push so
                                      // we only re-apply on class change
+
+    // Track the last crosshair snapshot we acted on. When a new snapshot
+    // arrives between detection events (recoil moved the visible reticle)
+    // we re-push using the stale target â€” this is what doubles effective
+    // control rate over a 120 Hz capture-card setup.
+    auto last_consumed_pivot_ts = std::chrono::steady_clock::time_point::min();
 
     while (!shouldExit && !session_stop_requested.load())
     {
@@ -196,7 +236,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         if (hotkey_changed || resolution_changed || detection_resolution_changed.load())
         {
             // On hotkey/resolution changes, reset Kalman baseline without a
-            // class-specific override â€?the loop below will re-push per-class
+            // class-specific override ï¿½?the loop below will re-push per-class
             // params as soon as a locked target's class is known.
             MouseRuntimeParams params = build_params(profile_ptr, -1);
             mouseThread.updateParams(params);
@@ -289,6 +329,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             {
                 in.lock_switch_score_margin       = profile_ptr->lock_switch_score_margin;
                 in.lock_switch_min_frames         = profile_ptr->lock_switch_min_frames;
+                in.lock_hold_min_frames           = profile_ptr->lock_hold_min_frames;
                 in.y_offset_size_decay_enabled    = profile_ptr->y_offset_size_decay_enabled;
                 in.y_offset_size_decay_low_frac   = profile_ptr->y_offset_size_decay_low_frac;
                 in.y_offset_size_decay_high_frac  = profile_ptr->y_offset_size_decay_high_frac;
@@ -314,7 +355,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 // Re-push mouse params when the locked target's class changes
                 // so the per-class Kalman override (e.g. head vs body) takes
                 // effect. updateParams already resets the Kalman state when
-                // the noise params shift, which is desired here â€?we don't
+                // the noise params shift, which is desired here ï¿½?we don't
                 // want motion learned on one class's dynamics leaking into
                 // another.
                 const int locked_class = lockInfo.target.classId;
@@ -358,7 +399,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // Aim-trajectory replay: push a single snapshot per detection
             // frame. Cheap when the buffer is disabled (early-out inside
             // push). The snapshot's hotkey_active reflects the live aiming
-            // flag â€?what the user actually had pressed when this detection
+            // flag ï¿½?what the user actually had pressed when this detection
             // landed. Mouse dx/dy fields are 0 here; the per-step PID moves
             // are too high-frequency to mirror in this buffer cleanly. The
             // replay overlay relies on the pivot trail instead.
@@ -423,73 +464,42 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
         }
 
-        // Crosshair color detector: snapshot the latest BGR frame and look
-        // for a red reticle in the center ROI. Feed the hit (if any) as the
-        // dynamic aim center so PID corrects toward the player's real
-        // crosshair rather than the static image midpoint.
-        {
-            static crosshair::CrosshairDetector crosshairDetector;
-            crosshair::CrosshairDetectorSettings ch_settings;
-            // Toggle lives on the active hotkey; palette + rect + area come
-            // from global config and are shared across hotkeys.
-            const bool per_hotkey_enabled = profile_ptr && profile_ptr->crosshair_detect_enabled;
-            {
-                std::lock_guard<std::recursive_mutex> cfg(configMutex);
-                ch_settings.enabled  = per_hotkey_enabled;
-                ch_settings.rect_w   = config.crosshair_rect_w;
-                ch_settings.rect_h   = config.crosshair_rect_h;
-                ch_settings.min_area = config.crosshair_min_area;
-                ch_settings.max_area = config.crosshair_max_area;
-                ch_settings.colors.reserve(config.crosshair_colors.size());
-                for (const auto& c : config.crosshair_colors)
-                {
-                    crosshair::CrosshairColorBand b;
-                    b.name    = c.name;
-                    b.enabled = c.enabled;
-                    b.h_low   = c.h_low;
-                    b.h_high  = c.h_high;
-                    b.s_min   = c.s_min;
-                    b.s_max   = c.s_max;
-                    b.v_min   = c.v_min;
-                    b.v_max   = c.v_max;
-                    ch_settings.colors.push_back(std::move(b));
-                }
-            }
-
-            std::optional<std::pair<double, double>> dyn_center;
-            if (ch_settings.enabled && has_active_profile)
-            {
-                cv::Mat frame_snapshot;
-                {
-                    std::lock_guard<std::mutex> lk(frameMutex);
-                    if (!latestFrame.empty())
-                        frame_snapshot = latestFrame.clone();
-                }
-                if (!frame_snapshot.empty())
-                {
-                    auto hit = crosshairDetector.detect(frame_snapshot, ch_settings);
-                    if (hit)
-                        dyn_center = std::make_pair(static_cast<double>(hit->x),
-                                                    static_cast<double>(hit->y));
-                }
-            }
-            mouseThread.setDynamicAimCenter(dyn_center);
-        }
-
         if (has_active_profile)
         {
+            const auto pivot = resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
+            const bool pivot_event = pivot.from_color && pivot.snap_ts != last_consumed_pivot_ts;
+
             if (activeTarget && hasAimObservation)
             {
-                mouseThread.moveMouseToObservedTarget(activeTarget->pivotX, activeTarget->pivotY);
+                // Path A â€” fresh detection: feed Kalman, push controller.
+                mouseThread.moveMouseToObservedTarget(activeTarget->pivotX,
+                                                      activeTarget->pivotY,
+                                                      pivot.x, pivot.y);
+                if (pivot.from_color)
+                    last_consumed_pivot_ts = pivot.snap_ts;
             }
-            else
+            else if (activeTarget && pivot_event)
             {
-                // Fallback path: PID driven by Kalman extrapolation if the
-                // user opted into Kalman. If Kalman is off or no prior
-                // observation exists, we just stop sending moves.
-                if (!mouseThread.moveMouseToPredictedTarget())
+                // Path B â€” fresh crosshair snapshot, no new detection.
+                // Recoil moved the reticle: re-push using the stale target
+                // (or Kalman extrapolation when enabled) without feeding
+                // Kalman a duplicate observation.
+                if (!mouseThread.moveMouseToPredictedTarget(pivot.x, pivot.y))
+                {
+                    mouseThread.moveMouseUsingLastTarget(activeTarget->pivotX,
+                                                         activeTarget->pivotY,
+                                                         pivot.x, pivot.y);
+                }
+                last_consumed_pivot_ts = pivot.snap_ts;
+            }
+            else if (!activeTarget)
+            {
+                // No live target: try Kalman extrapolation, otherwise
+                // stop sending moves so the gun can settle.
+                if (!mouseThread.moveMouseToPredictedTarget(pivot.x, pivot.y))
                     mouseThread.clearQueuedMoves();
             }
+            // else: have target, no fresh event â€” sleep until something changes.
         }
         else
         {

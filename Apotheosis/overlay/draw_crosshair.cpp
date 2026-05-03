@@ -213,16 +213,14 @@ void draw_crosshair()
         OverlayUI::EndSection();
     }
 
-    if (OverlayUI::BeginSection(u8"噪点过滤（轮廓面积）", "crosshair_section_area"))
+    if (OverlayUI::BeginSection(u8"形状容差", "crosshair_section_shape"))
     {
-        changed |= ImGui::SliderInt(u8"最小面积（像素²）", &config.crosshair_min_area, 1, 2000);
-        changed |= ImGui::SliderInt(u8"最大面积（像素²）", &config.crosshair_max_area, 1, 5000);
-        if (config.crosshair_max_area < config.crosshair_min_area)
-        {
-            config.crosshair_max_area = config.crosshair_min_area;
-            changed = true;
-        }
-        ImGui::TextDisabled(u8"只会保留面积在此范围内的色块；距离取样区域中心最近的色块优先。 ");
+        changed |= ImGui::SliderInt(u8"最少红像素数", &config.crosshair_min_pixel_count, 1, 200);
+        ImGui::TextDisabled(u8"ROI 内累计的红色像素低于此阈值时认为没看到准星。 ");
+
+        changed |= ImGui::SliderInt(u8"形状闭合半径（px）", &config.crosshair_close_radius, 0, 7);
+        ImGui::TextDisabled(u8"0 = 不闭合（适合纯实心准星）。1~3 适合白心红点 / 渐变红点 / 十字。\n"
+                            u8"过大会把附近红色噪点（血量条、击中反馈）粘进准星 blob。");
         OverlayUI::EndSection();
     }
 

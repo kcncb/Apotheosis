@@ -1,7 +1,11 @@
 #include "tcp_capture.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
+
+#include "gpu_color_ops.h"
 
 TCPCapture::TCPCapture(int width, int height, const std::string& ip, int port)
     : width_(width)
@@ -28,6 +32,17 @@ TCPCapture::TCPCapture(int width, int height, const std::string& ip, int port)
 TCPCapture::~TCPCapture()
 {
     Cleanup();
+    if (pinned_jpeg_buffer_)
+    {
+        cudaFreeHost(pinned_jpeg_buffer_);
+        pinned_jpeg_buffer_ = nullptr;
+        pinned_jpeg_capacity_ = 0;
+    }
+    if (decode_stream_)
+    {
+        cudaStreamDestroy(decode_stream_);
+        decode_stream_ = nullptr;
+    }
     WSACleanup();
 }
 
@@ -143,10 +158,35 @@ cv::Mat TCPCapture::GetNextFrameCpu()
     return frame;
 }
 
+GpuImage TCPCapture::GetNextFrameGpu()
+{
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (gpu_frame_queue_.empty())
+        return GpuImage();
+
+    GpuImage frame = std::move(gpu_frame_queue_.front());
+    gpu_frame_queue_.pop();
+    return frame;
+}
+
 void TCPCapture::ReceiveThread()
 {
     try
     {
+        if (!gpu_decoder_)
+        {
+            gpu_decoder_ = std::make_unique<capture::GpuJpegDecoder>();
+            if (!gpu_decoder_->init())
+            {
+                std::cerr << "[TCPCapture] nvJPEG unavailable; using CPU cv::imdecode" << std::endl;
+                gpu_decoder_.reset();
+            }
+            else if (!decode_stream_)
+            {
+                cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+            }
+        }
+
         std::vector<uint8_t> buffer(64 * 1024);
         std::vector<uint8_t> frame_data;
         frame_data.reserve(MAX_FRAME_SIZE);
@@ -208,24 +248,76 @@ void TCPCapture::ReceiveThread()
 
             while (true)
             {
-                cv::Mat frame;
-                if (!ParseMJPEGFrame(frame_data, frame))
+                if (frame_data.size() < 4)
                     break;
 
-                if (frame.empty())
-                    continue;
-
-                if (frame.cols != width_ || frame.rows != height_)
-                    cv::resize(frame, frame, cv::Size(width_, height_));
-
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                while (frame_queue_.size() >= MAX_QUEUE_SIZE)
+                size_t start_pos = std::string::npos;
+                for (size_t i = 0; i + 1 < frame_data.size(); ++i)
                 {
-                    frame_queue_.pop();
-                    dropped_frames_++;
+                    if (frame_data[i] == 0xFF && frame_data[i + 1] == 0xD8)
+                    {
+                        start_pos = i;
+                        break;
+                    }
                 }
-                frame_queue_.push(frame.clone());
-                received_frames_++;
+
+                if (start_pos == std::string::npos)
+                {
+                    frame_data.clear();
+                    break;
+                }
+
+                size_t end_pos = std::string::npos;
+                for (size_t i = start_pos + 2; i + 1 < frame_data.size(); ++i)
+                {
+                    if (frame_data[i] == 0xFF && frame_data[i + 1] == 0xD9)
+                    {
+                        end_pos = i + 2;
+                        break;
+                    }
+                }
+
+                if (end_pos == std::string::npos)
+                {
+                    if (start_pos > 0)
+                        frame_data.erase(frame_data.begin(), frame_data.begin() + start_pos);
+                    break;
+                }
+
+                const uint8_t* jpeg = frame_data.data() + start_pos;
+                const size_t jpeg_size = end_pos - start_pos;
+
+                const bool gpu_ok = DecodeJpegGpu(jpeg, jpeg_size);
+                if (!gpu_ok)
+                {
+                    cv::Mat frame;
+                    std::vector<uint8_t> jpeg_data(jpeg, jpeg + jpeg_size);
+                    try
+                    {
+                        frame = cv::imdecode(jpeg_data, cv::IMREAD_COLOR);
+                    }
+                    catch (const cv::Exception& e)
+                    {
+                        std::cerr << "[TCPCapture] JPEG decode error: " << e.what() << std::endl;
+                    }
+
+                    if (!frame.empty())
+                    {
+                        if (frame.cols != width_ || frame.rows != height_)
+                            cv::resize(frame, frame, cv::Size(width_, height_));
+
+                        std::lock_guard<std::mutex> lock(frame_mutex_);
+                        while (frame_queue_.size() >= MAX_QUEUE_SIZE)
+                        {
+                            frame_queue_.pop();
+                            dropped_frames_++;
+                        }
+                        frame_queue_.push(std::move(frame));
+                        received_frames_++;
+                    }
+                }
+
+                frame_data.erase(frame_data.begin(), frame_data.begin() + end_pos);
             }
 
             if (frame_data.size() > static_cast<size_t>(MAX_FRAME_SIZE))
@@ -242,6 +334,64 @@ void TCPCapture::ReceiveThread()
     {
         std::cerr << "[TCPCapture] Receive thread crashed: unknown exception." << std::endl;
     }
+}
+
+bool TCPCapture::DecodeJpegGpu(const uint8_t* jpeg, size_t jpeg_size)
+{
+    if (!gpu_decoder_ || !decode_stream_ || !jpeg || jpeg_size == 0)
+        return false;
+
+    if (pinned_jpeg_capacity_ < jpeg_size)
+    {
+        if (pinned_jpeg_buffer_)
+            cudaFreeHost(pinned_jpeg_buffer_);
+        pinned_jpeg_buffer_ = nullptr;
+        pinned_jpeg_capacity_ = 0;
+
+        const size_t want = std::max<size_t>(jpeg_size, 64 * 1024);
+        if (cudaHostAlloc(reinterpret_cast<void**>(&pinned_jpeg_buffer_),
+                          want, cudaHostAllocDefault) == cudaSuccess)
+        {
+            pinned_jpeg_capacity_ = want;
+        }
+    }
+
+    const uint8_t* decode_src = jpeg;
+    if (pinned_jpeg_buffer_ && pinned_jpeg_capacity_ >= jpeg_size)
+    {
+        std::memcpy(pinned_jpeg_buffer_, jpeg, jpeg_size);
+        decode_src = pinned_jpeg_buffer_;
+    }
+
+    GpuImage decoded;
+    if (!gpu_decoder_->decode(decode_src, jpeg_size, decoded, decode_stream_))
+        return false;
+
+    GpuImage finalFrame = decoded;
+    if (!decoded.empty() && (decoded.cols() != width_ || decoded.rows() != height_))
+    {
+        GpuImage resized;
+        if (resized.create(height_, width_, 3))
+        {
+            launch_resize_bgr_u8_bilinear(
+                decoded.data(), decoded.step(), decoded.cols(), decoded.rows(),
+                resized.data(), resized.step(), width_, height_,
+                decode_stream_);
+            finalFrame = std::move(resized);
+        }
+    }
+
+    cudaStreamSynchronize(decode_stream_);
+
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    while (gpu_frame_queue_.size() >= MAX_QUEUE_SIZE)
+    {
+        gpu_frame_queue_.pop();
+        dropped_frames_++;
+    }
+    gpu_frame_queue_.push(std::move(finalFrame));
+    received_frames_++;
+    return true;
 }
 
 bool TCPCapture::ParseMJPEGFrame(std::vector<uint8_t>& data, cv::Mat& frame)

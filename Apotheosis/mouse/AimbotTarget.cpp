@@ -227,7 +227,8 @@ bool MultiTargetTracker::evaluateTrack(int trackIndex,
                                       int   threat_body_class_id,
                                       int& outRank,
                                       double& outScore,
-                                      float& outThreat) const
+                                      float& outThreat,
+                                      bool is_locked) const
 {
     outThreat = 0.5f;
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks_.size()))
@@ -256,7 +257,11 @@ bool MultiTargetTracker::evaluateTrack(int trackIndex,
 
     // Dynamic-FOV gate. Standard ellipse equation: (dx/rx)^2 + (dy/ry)^2 ≤ 1.
     // Skipped when either radius is non-positive (legacy / disabled).
-    if (lastFovRadiusXpx_ > 0.0f && lastFovRadiusYpx_ > 0.0f)
+    // The currently-locked track bypasses this gate: a tight dynamic-FOV
+    // ellipse can briefly exclude the lock when the pivot oscillates near
+    // the boundary, which would otherwise force the lock to hand off to a
+    // different candidate even though the user clearly wants to stick.
+    if (!is_locked && lastFovRadiusXpx_ > 0.0f && lastFovRadiusYpx_ > 0.0f)
     {
         const double nx = dx / lastFovRadiusXpx_;
         const double ny = dy / lastFovRadiusYpx_;
@@ -336,6 +341,7 @@ void MultiTargetTracker::reset()
     lockedTrackId_ = -1;
     challengerTrackId_ = -1;
     challengerStreak_ = 0;
+    lockHoldRemaining_ = 0;
 }
 
 void MultiTargetTracker::update(const TrackerUpdate& in)
@@ -419,7 +425,7 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         const double missGate = t.missed * std::max(14.0, diag * 0.18);
         double maxDist = baseGate + speedGate + missGate;
         if (relaxedForLocked)
-            maxDist *= 1.6;
+            maxDist *= 1.10;
 
         if (dist > maxDist)
             return std::numeric_limits<double>::infinity();
@@ -427,7 +433,29 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         const double overlap = iou(predBox, d.box);
         const double missPenalty = t.missed * 0.025;
         const double hitBonus = std::min(6, t.hits) * 0.01;
-        return (dist / maxDist) + (1.0 - overlap) * 0.30 + missPenalty - hitBonus;
+
+        // Heavy IoU bias for the locked track. High-recoil / muzzle-flash
+        // weapons spawn phantom same-class detections offset from the real
+        // target; they are *close in distance* but *poorly overlap* the
+        // predicted bbox. A 5x stronger overlap weight makes the matcher
+        // prefer the real (well-overlapping) detection even when a phantom
+        // sits a few pixels nearer the predicted centre.
+        const bool is_locked_track = (t.id == lockedTrackId_);
+        // Locked track: extreme IoU bias and a steep cliff when overlap is
+        // poor. Phantom boxes from muzzle flash / smoke / heavy recoil
+        // typically land near the predicted centre but with little overlap;
+        // these penalties make them lose to a real detection that still has
+        // any meaningful overlap, even when several pixels further away.
+        const double overlapWeight = is_locked_track ? 4.00 : 0.30;
+        double score = (dist / maxDist) + (1.0 - overlap) * overlapWeight + missPenalty - hitBonus;
+        if (is_locked_track)
+        {
+            if (overlap < 0.20)
+                score += 8.0;
+            else if (overlap < 0.35)
+                score += 2.0;
+        }
+        return score;
     };
 
     auto tryAssignTrack = [&](int trackIndex, bool relaxedForLocked) {
@@ -532,11 +560,75 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
                 rawVel *= scale;
             }
 
-            const float blend = (t.id == lockedTrackId_) ? 0.45f : 0.35f;
+            const bool is_locked = (t.id == lockedTrackId_);
+
+            // Locked-track jump-rejection. With high-recoil weapons the
+            // matcher may briefly latch onto a phantom whose centre jumps
+            // many bbox-widths in one frame. Compare the implied per-frame
+            // displacement against the smoothed velocity; if it is far
+            // larger than physically plausible, reject the match and let
+            // the track coast on prediction this frame.
+            if (is_locked && t.hits >= 2)
+            {
+                const double smoothSpeed = std::hypot(t.velocity.x, t.velocity.y);
+                const double jumpDist = std::hypot(newCx - oldCx, newCy - oldCy);
+                const double diag = std::hypot(t.box.width, t.box.height);
+                // Tighter tolerance — only allow displacements that are
+                // close to the smoothed velocity prediction plus a small
+                // slack proportional to the bbox.
+                const double jumpBudget = smoothSpeed * dt + 0.30 * diag + 8.0;
+                if (jumpDist > jumpBudget * 1.30)
+                {
+                    // Treat this frame as missed — coast on prediction.
+                    const double dt_coast = std::clamp(
+                        std::chrono::duration<double>(now - t.lastUpdate).count(),
+                        0.0, 0.2);
+                    t.box.x += t.velocity.x * static_cast<float>(dt_coast);
+                    t.box.y += t.velocity.y * static_cast<float>(dt_coast);
+                    t.pivotX += t.velocity.x * dt_coast;
+                    t.pivotY += t.velocity.y * dt_coast;
+                    t.velocity *= 0.92f;
+                    t.missed += 1;
+                    t.observedThisFrame = false;
+                    t.lastUpdate = now;
+                    // Free the detection so other tracks (or new tracks)
+                    // can pick it up.
+                    detAssigned[di] = -1;
+                    trackAssigned[ti] = -1;
+                    continue;
+                }
+            }
+
+            const float blend = is_locked ? 0.45f : 0.35f;
             t.velocity = t.velocity * (1.0f - blend) + rawVel * blend;
-            t.box = d.box;
-            t.pivotX = d.pivotX;
-            t.pivotY = d.pivotY;
+
+            // Locked-track box / pivot smoothing. Blend the new detection
+            // toward the predicted position so a single noisy frame cannot
+            // teleport the aim pivot. Non-locked tracks snap as before.
+            if (is_locked)
+            {
+                const float predCx = oldCx + t.velocity.x * static_cast<float>(dt);
+                const float predCy = oldCy + t.velocity.y * static_cast<float>(dt);
+                const float predBoxX = predCx - d.box.width * 0.5f;
+                const float predBoxY = predCy - d.box.height * 0.5f;
+                const float boxBlend = 0.50f; // 50% detection, 50% prediction
+                t.box.x = predBoxX * (1.0f - boxBlend) + d.box.x * boxBlend;
+                t.box.y = predBoxY * (1.0f - boxBlend) + d.box.y * boxBlend;
+                t.box.width = d.box.width;
+                t.box.height = d.box.height;
+
+                const double predPivotX = t.pivotX + t.velocity.x * dt;
+                const double predPivotY = t.pivotY + t.velocity.y * dt;
+                const double pivotBlend = 0.50;
+                t.pivotX = predPivotX * (1.0 - pivotBlend) + d.pivotX * pivotBlend;
+                t.pivotY = predPivotY * (1.0 - pivotBlend) + d.pivotY * pivotBlend;
+            }
+            else
+            {
+                t.box = d.box;
+                t.pivotX = d.pivotX;
+                t.pivotY = d.pivotY;
+            }
             t.classId = d.classId;
             t.hits += 1;
             t.missed = 0;
@@ -587,6 +679,7 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         lockedTrackId_ = -1;
         challengerTrackId_ = -1;
         challengerStreak_ = 0;
+        lockHoldRemaining_ = 0;
     }
 
     // Helper that drops any in-flight challenger streak — used whenever the
@@ -596,10 +689,20 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         challengerStreak_ = 0;
     };
 
+    // Helper to commit a new locked track id while seeding the minimum-hold
+    // counter. Pass -1 to clear the lock.
+    const auto setLockedTrack = [&](int newId) {
+        if (newId != lockedTrackId_)
+        {
+            lockedTrackId_ = newId;
+            lockHoldRemaining_ = (newId >= 0) ? std::max(0, in.lock_hold_min_frames) : 0;
+        }
+    };
+
     if (!in.keep_current_lock)
     {
         const int bestIdx = chooseBestTrack(in.priority_class_ids, in.screen_width, in.screen_height);
-        lockedTrackId_ = (bestIdx >= 0) ? tracks_[bestIdx].id : -1;
+        setLockedTrack((bestIdx >= 0) ? tracks_[bestIdx].id : -1);
         clearChallenger();
         return;
     }
@@ -607,7 +710,18 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
     if (lockedTrackId_ == -1)
     {
         const int bestIdx = chooseBestTrack(in.priority_class_ids, in.screen_width, in.screen_height);
-        lockedTrackId_ = (bestIdx >= 0) ? tracks_[bestIdx].id : -1;
+        setLockedTrack((bestIdx >= 0) ? tracks_[bestIdx].id : -1);
+        clearChallenger();
+        return;
+    }
+
+    // Minimum-hold gate. If the user-configured lock_hold_min_frames says
+    // "stay locked for N frames after acquisition", honour that here before
+    // any switch logic runs. The counter ticks down once per update cycle
+    // and is reset on every lock transition (see setLockedTrack).
+    if (lockHoldRemaining_ > 0)
+    {
+        --lockHoldRemaining_;
         clearChallenger();
         return;
     }
@@ -638,7 +752,8 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         lockedIdx, in.priority_class_ids,
         in.screen_width, in.screen_height,
         in.threat_priority_enabled, in.threat_weight, in.threat_head_class_id, in.threat_body_class_id,
-        lockedRank, lockedScore, lockedThreat);
+        lockedRank, lockedScore, lockedThreat,
+        /*is_locked=*/true);
 
     int bestRank = 0;
     double bestScore = 0.0;
@@ -657,31 +772,35 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
     // dropped out, etc.) — hand the lock over without waiting.
     if (!lockedEligible)
     {
-        lockedTrackId_ = tracks_[bestIdx].id;
+        setLockedTrack(tracks_[bestIdx].id);
         clearChallenger();
         return;
     }
 
-    // Higher-priority class always wins immediately. Hysteresis only applies
-    // among same-priority candidates (e.g. two `head` tracks).
+    // Higher-priority class always wins immediately.
     if (bestRank < lockedRank)
     {
-        lockedTrackId_ = tracks_[bestIdx].id;
+        setLockedTrack(tracks_[bestIdx].id);
         clearChallenger();
         return;
     }
 
-    // Same or lower rank — require a score margin. We normalise the score
-    // delta by half the screen diagonal so the margin is unit-free (a 15%
-    // margin means "15% of half-diagonal closer to crosshair than the
-    // current lock"). Lower score = better.
+    // Same or lower rank — apply switch hysteresis. A challenger track must
+    // beat the locked track's score by at least `lock_switch_score_margin`
+    // (fraction of half-diagonal) for at least `lock_switch_min_frames`
+    // consecutive frames before the lock transfers. Higher values = stickier
+    // lock. Set margin large or frames high to make same-rank switching
+    // effectively never happen.
+    (void)lockedThreat;
+    (void)bestThreat;
+
     const double scale = std::max(
         1.0,
         std::hypot(static_cast<double>(in.screen_width),
                    static_cast<double>(in.screen_height)) * 0.5);
     const double normalisedAdvantage = (lockedScore - bestScore) / scale;
 
-    const float marginPct = std::clamp(in.lock_switch_score_margin, 0.0f, 1.0f);
+    const float marginPct = std::max(0.0f, in.lock_switch_score_margin);
     const int   minFrames = std::max(1, in.lock_switch_min_frames);
 
     if (normalisedAdvantage <= static_cast<double>(marginPct))
@@ -691,7 +810,6 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         return;
     }
 
-    // Challenger has a margin advantage this frame. Need K consecutive.
     if (challengerTrackId_ == tracks_[bestIdx].id)
     {
         challengerStreak_ += 1;
@@ -704,7 +822,7 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
 
     if (challengerStreak_ >= minFrames)
     {
-        lockedTrackId_ = tracks_[bestIdx].id;
+        setLockedTrack(tracks_[bestIdx].id);
         clearChallenger();
     }
 }

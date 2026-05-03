@@ -57,6 +57,8 @@ packages
 /Apotheosis/config.ini
 /Apotheosis/modules/TensorRT-10.14.1.48
 /Apotheosis/modules/TensorRT-10.15.1.29/
+/Apotheosis/modules/TensorRT-8.6.1.6/
+/Apotheosis/modules/cudnn-windows-x86_64-*/
 setup_opencv_dml_run.log
 setup_opencv_dml_run.log
 .DS_Store

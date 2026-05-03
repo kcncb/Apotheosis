@@ -40,16 +40,6 @@ std::atomic<int>  g_replay_playback_frame{ 0 };
 int prev_screenshot_delay = config.screenshot_delay;
 bool prev_verbose = config.verbose;
 
-static ID3D11Texture2D* g_debugTex = nullptr;
-static ID3D11ShaderResourceView* g_debugSRV = nullptr;
-static int texW = 0, texH = 0;
-
-static ID3D11Texture2D* g_maskTex = nullptr;
-static ID3D11ShaderResourceView* g_maskSRV = nullptr;
-static int maskTexW = 0, maskTexH = 0;
-
-static float debug_scale = 0.5f;
-
 static int findDebugKeyIndexByName(const std::string& keyName)
 {
     for (size_t k = 0; k < key_names.size(); ++k)
@@ -132,6 +122,7 @@ static bool drawScreenshotButtonRows()
     return changed;
 }
 
+#if 0
 static void uploadDebugFrame(const cv::Mat& bgr)
 {
     if (bgr.empty()) return;
@@ -326,23 +317,7 @@ void draw_debug_frame()
     }
 }
 
-void draw_capture_preview()
-{
-    if (OverlayUI::BeginSection(u8"采集预览", "capture_section_preview"))
-    {
-        if (ImGui::Checkbox(u8"显示预览窗口", &config.show_window))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        if (config.show_window)
-        {
-            draw_debug_frame();
-        }
-
-        OverlayUI::EndSection();
-    }
-}
+#endif // 0
 
 void draw_debug()
 {
