@@ -19,6 +19,7 @@
 #include "capture.h"
 #include "config/config.h"
 #include "crosshair/crosshair_detector.h"
+#include "crosshair/laser_detector.h"
 #include "detection_buffer.h"
 #include "draw_settings.h"
 #include "i_detector.h"
@@ -101,7 +102,56 @@ cv::Rect center_roi(const cv::Size& frame, int rect_w, int rect_h)
     const int w = std::max(4, rect_w);
     const int h = std::max(4, rect_h);
     const cv::Rect frame_rect(0, 0, frame.width, frame.height);
-    return cv::Rect(frame.width / 2 - w / 2, frame.height / 2 - h / 2, w, h) & frame_rect;
+    // Bottom-edge midpoint anchored at the frame centre (square sits above
+    // the centre line), then nudged down by a fixed offset. Must match
+    // clipped_center_roi() in crosshair/crosshair_detector.cpp so the preview
+    // matches where colour is actually sampled.
+    constexpr int kVerticalOffset = 10;
+    return cv::Rect(frame.width / 2 - w / 2, frame.height / 2 - h + kVerticalOffset, w, h) & frame_rect;
+}
+
+// Explicitly-centred ROI used by the laser module — must match laser_roi() in
+// crosshair/laser_detector.cpp so the preview box matches where it samples.
+cv::Rect laser_center_roi(const cv::Size& frame, int rect_w, int rect_h,
+                          int center_x, int center_y)
+{
+    const int w = std::max(4, rect_w);
+    const int h = std::max(4, rect_h);
+    const cv::Rect frame_rect(0, 0, frame.width, frame.height);
+    return cv::Rect(center_x - w / 2, center_y - h / 2, w, h) & frame_rect;
+}
+
+crosshair::LaserDetectorSettings snapshot_laser_settings(bool& has_enabled_color)
+{
+    crosshair::LaserDetectorSettings settings;
+    settings.enabled = true;
+
+    std::lock_guard<std::recursive_mutex> cfg(configMutex);
+    settings.rect_w         = config.laser_rect_w;
+    settings.rect_h         = config.laser_rect_h;
+    settings.center_x       = config.laser_center_x;
+    settings.center_y       = config.laser_center_y;
+    settings.min_pixel_count = config.laser_min_pixel_count;
+    settings.close_radius   = config.laser_close_radius;
+    settings.min_elongation = config.laser_min_elongation;
+    settings.target_center_x = config.laser_target_center_x;
+    settings.target_center_y = config.laser_target_center_y;
+    settings.target_rect_w   = config.laser_target_rect_w;
+    settings.target_rect_h   = config.laser_target_rect_h;
+    settings.colors.reserve(config.laser_colors.size());
+
+    has_enabled_color = false;
+    for (const auto& c : config.laser_colors)
+    {
+        crosshair::CrosshairColorBand b;
+        b.name = c.name; b.enabled = c.enabled;
+        b.h_low = c.h_low; b.h_high = c.h_high;
+        b.s_min = c.s_min; b.s_max = c.s_max;
+        b.v_min = c.v_min; b.v_max = c.v_max;
+        has_enabled_color = has_enabled_color || b.enabled;
+        settings.colors.push_back(std::move(b));
+    }
+    return settings;
 }
 
 crosshair::CrosshairDetectorSettings snapshot_crosshair_settings(bool& has_enabled_color)
@@ -327,20 +377,26 @@ void draw_detection_preview()
         }
     }
 
-    bool has_enabled_color = false;
-    const auto crosshair_settings = snapshot_crosshair_settings(has_enabled_color);
-    const cv::Rect roi = center_roi(frame.size(), crosshair_settings.rect_w, crosshair_settings.rect_h);
-    if (roi.width > 0 && roi.height > 0)
+    // Both detectors are independent; draw whichever has colours configured so
+    // the user can tune each one. Crosshair box is cyan, laser box is orange.
+    bool cross_has_color = false;
+    bool laser_has_color = false;
+    const auto crosshair_settings = snapshot_crosshair_settings(cross_has_color);
+    const auto laser_settings     = snapshot_laser_settings(laser_has_color);
+
+    // --- Crosshair (centroid) ROI + marker ---
+    const cv::Rect croi = center_roi(frame.size(), crosshair_settings.rect_w, crosshair_settings.rect_h);
+    if (croi.width > 0 && croi.height > 0)
     {
-        const ImVec2 roiTl(originScreen.x + roi.x * scale, originScreen.y + roi.y * scale);
-        const ImVec2 roiBr(originScreen.x + (roi.x + roi.width) * scale, originScreen.y + (roi.y + roi.height) * scale);
-        drawList->AddRectFilled(roiTl, roiBr, IM_COL32(0, 190, 255, 28));
-        drawList->AddRect(roiTl, roiBr, IM_COL32(0, 190, 255, 240), 0.0f, 0, 1.5f);
-        drawList->AddText(ImVec2(roiTl.x + 4.0f, roiTl.y + 3.0f), IM_COL32(0, 220, 255, 255), u8"准星找色范围");
+        const ImVec2 tl(originScreen.x + croi.x * scale, originScreen.y + croi.y * scale);
+        const ImVec2 br(originScreen.x + (croi.x + croi.width) * scale, originScreen.y + (croi.y + croi.height) * scale);
+        drawList->AddRectFilled(tl, br, IM_COL32(0, 190, 255, 24));
+        drawList->AddRect(tl, br, IM_COL32(0, 190, 255, 240), 0.0f, 0, 1.5f);
+        drawList->AddText(ImVec2(tl.x + 4.0f, tl.y + 3.0f), IM_COL32(0, 220, 255, 255), u8"准星找色范围");
     }
 
     bool crosshair_hit = false;
-    if (has_enabled_color && frame.type() == CV_8UC3)
+    if (cross_has_color && frame.type() == CV_8UC3)
     {
         static crosshair::CrosshairDetector detector;
         auto hit = detector.detect(frame, crosshair_settings);
@@ -353,16 +409,70 @@ void draw_detection_preview()
         }
     }
 
+    // --- Laser ROI + tip marker (YELLOW, to distinguish from the cyan
+    // crosshair box) ---
+    const ImU32 laserBox = IM_COL32(255, 230, 0, 240);
+    const cv::Rect lroi = laser_center_roi(frame.size(), laser_settings.rect_w, laser_settings.rect_h,
+                                           laser_settings.center_x, laser_settings.center_y);
+    if (lroi.width > 0 && lroi.height > 0)
+    {
+        const ImVec2 tl(originScreen.x + lroi.x * scale, originScreen.y + lroi.y * scale);
+        const ImVec2 br(originScreen.x + (lroi.x + lroi.width) * scale, originScreen.y + (lroi.y + lroi.height) * scale);
+        drawList->AddRectFilled(tl, br, IM_COL32(255, 230, 0, 26));
+        drawList->AddRect(tl, br, laserBox, 0.0f, 0, 1.8f);
+        drawList->AddText(ImVec2(tl.x + 4.0f, br.y - 18.0f), IM_COL32(255, 240, 80, 255), u8"镭射识别范围");
+    }
+
+    // Target box (BROWN): where the fitted line is projected to estimate the tip.
+    {
+        const int tw = std::max(4, laser_settings.target_rect_w);
+        const int th = std::max(4, laser_settings.target_rect_h);
+        const cv::Rect troi = cv::Rect(laser_settings.target_center_x - tw / 2,
+                                       laser_settings.target_center_y - th / 2, tw, th)
+                              & cv::Rect(0, 0, frame.cols, frame.rows);
+        if (troi.width > 0 && troi.height > 0)
+        {
+            const ImVec2 tl(originScreen.x + troi.x * scale, originScreen.y + troi.y * scale);
+            const ImVec2 br(originScreen.x + (troi.x + troi.width) * scale, originScreen.y + (troi.y + troi.height) * scale);
+            drawList->AddRectFilled(tl, br, IM_COL32(150, 90, 40, 30));
+            drawList->AddRect(tl, br, IM_COL32(170, 100, 40, 240), 0.0f, 0, 1.8f);
+            drawList->AddText(ImVec2(tl.x + 4.0f, tl.y + 3.0f), IM_COL32(200, 130, 70, 255), u8"镭射终点范围");
+        }
+    }
+
+    bool laser_hit = false;
+    if (laser_has_color && frame.type() == CV_8UC3)
+    {
+        static crosshair::LaserDetector laser_detector;
+        const crosshair::LaserResult lr = laser_detector.detectLine(frame, laser_settings);
+        if (lr.found)
+        {
+            laser_hit = true;
+            const ImVec2 m(originScreen.x + lr.muzzle.x * scale, originScreen.y + lr.muzzle.y * scale);
+            const ImVec2 t(originScreen.x + lr.tip.x * scale, originScreen.y + lr.tip.y * scale);
+            // Beam line (muzzle -> extended tip) overlaying the laser.
+            drawList->AddLine(m, t, IM_COL32(0, 0, 0, 220), 4.0f);
+            drawList->AddLine(m, t, IM_COL32(255, 230, 0, 255), 2.0f);
+            const float r = std::clamp(6.0f * scale, 4.0f, 12.0f);
+            drawList->AddCircleFilled(t, r * 0.45f, IM_COL32(255, 230, 0, 255), 16);
+            drawList->AddCircle(t, r, IM_COL32(0, 0, 0, 220), 20, 3.0f);
+            drawList->AddCircle(t, r, IM_COL32(255, 230, 0, 255), 20, 1.8f);
+        }
+    }
+
     ImGui::Text(u8"检测数: %d（帧 #%d）", static_cast<int>(boxes.size()), version);
     if (session->detector())
     {
         ImGui::SameLine();
         ImGui::TextDisabled(u8"| 推理 %.1f ms", session->detector()->lastInferenceTime().count());
     }
-    ImGui::TextDisabled(u8"准星找色: %s | 范围 %dx%d | 阈值 %d px | 闭合 %d",
-        crosshair_hit ? u8"已命中" : (has_enabled_color ? u8"未命中" : u8"无启用颜色"),
-        crosshair_settings.rect_w,
-        crosshair_settings.rect_h,
-        crosshair_settings.min_pixel_count,
-        crosshair_settings.close_radius);
+    ImGui::TextDisabled(u8"准星找色: %s | 范围 %dx%d",
+        crosshair_hit ? u8"已命中" : (cross_has_color ? u8"未命中" : u8"无启用颜色"),
+        crosshair_settings.rect_w, crosshair_settings.rect_h);
+    ImGui::SameLine();
+    ImGui::TextDisabled(u8"|| 镭射: %s | 识别框 %dx%d | 终点框 %dx%d | 细长 %.1f",
+        laser_hit ? u8"已命中" : (laser_has_color ? u8"未命中" : u8"无启用颜色"),
+        laser_settings.rect_w, laser_settings.rect_h,
+        laser_settings.target_rect_w, laser_settings.target_rect_h,
+        laser_settings.min_elongation);
 }

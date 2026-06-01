@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -88,6 +89,7 @@ std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
 void apply_default_hotkey(HotkeyProfile& hk)
 {
     hk.name = "Aim";
+    hk.group = u8"默认";
     hk.keys = { "RightMouseButton" };
     hk.aim_classes.clear();
 }
@@ -131,6 +133,11 @@ void Config::writeDefaultsInPlace()
     udp_port = 1234;
     tcp_ip = "0.0.0.0";
     tcp_port = 1235;
+    eth_adapter = "";
+    eth_ethertype = 0x88B5;
+    capture_crop = 0;
+    capture_format = "MJPG";
+    capture_mf_gpu = true;
     detection_resolution = 320;
     capture_fps = 60;
     circle_mask = true;
@@ -140,12 +147,15 @@ void Config::writeDefaultsInPlace()
     confidence_threshold = 0.10f;
     nms_threshold = 0.50f;
     max_detections = 100;
+    small_target_enabled = false;
+    small_target_area_frac = 0.012f;
+    small_target_confidence = 0.06f;
     export_enable_fp8 = false;
     export_enable_fp16 = true;
     fixed_input_size = false;
 
-    use_cuda_graph = false;
-    use_double_buffer = false;
+    use_cuda_graph = true;
+    use_double_buffer = true;
     use_pinned_memory = false;
     gpuMemoryReserveMB = 2048;
     enableGpuExclusiveMode = true;
@@ -164,6 +174,12 @@ void Config::writeDefaultsInPlace()
     depth_model_path = "depth_anything_v2.engine";
     depth_fps = 100;
     depth_colormap = 18;
+    depth_opt_input_size = 224;
+    depth_show_heatmap = false;
+    depth_heatmap_gamma = 1.0f;
+    depth_show_bbox_distance = false;
+    depth_norm_clip_low_pct = 0.0f;
+    depth_norm_clip_high_pct = 100.0f;
     depth_mask_enabled = false;
     depth_mask_fps = 5;
     depth_mask_near_percent = 20;
@@ -182,6 +198,10 @@ void Config::writeDefaultsInPlace()
     HotkeyProfile hk;
     apply_default_hotkey(hk);
     hotkeys.push_back(std::move(hk));
+
+    macro_enabled = false;
+    macro_script_path.clear();
+    macro_primary_button_events = false;
 }
 
 bool Config::loadConfig(const std::string& filename)
@@ -223,8 +243,18 @@ bool Config::loadConfig(const std::string& filename)
 
     // ---------- Capture ----------
     capture_method = get_string("", "capture_method", "udp_capture");
+    // 旧版本持久化的各种采集卡后端迁移到当前两套实现:
+    //   裸 capture_card / _cv / _ds -> opencv_capture(cv::VideoCapture)
+    //   capture_card_mf            -> mf_capture(自写 Media Foundation)
+    if (capture_method == "capture_card"
+        || capture_method == "capture_card_cv"
+        || capture_method == "capture_card_ds")
+        capture_method = "opencv_capture";
+    if (capture_method == "capture_card_mf")
+        capture_method = "mf_capture";
     if (capture_method != "udp_capture" && capture_method != "tcp_capture"
-        && capture_method != "capture_card")
+        && capture_method != "eth_capture"
+        && capture_method != "opencv_capture" && capture_method != "mf_capture")
         capture_method = "udp_capture";
     udp_ip = get_string("", "udp_ip", "0.0.0.0");
     udp_port = get_long("", "udp_port", 1234);
@@ -232,23 +262,30 @@ bool Config::loadConfig(const std::string& filename)
     tcp_ip = get_string("", "tcp_ip", "0.0.0.0");
     tcp_port = get_long("", "tcp_port", 1235);
     if (tcp_port < 1 || tcp_port > 65535) tcp_port = 1235;
-    capture_card_index = get_long("", "capture_card_index", 0);
-    if (capture_card_index < 0) capture_card_index = 0;
-    capture_card_width = get_long("", "capture_card_width", 0);
-    capture_card_height = get_long("", "capture_card_height", 0);
-    capture_card_fps = get_long("", "capture_card_fps", 0);
-    capture_card_format = get_string("", "capture_card_format", "AUTO");
-    if (capture_card_format != "AUTO" && capture_card_format != "NV12"
-        && capture_card_format != "MJPG" && capture_card_format != "YUY2"
-        && capture_card_format != "RGB32")
-        capture_card_format = "AUTO";
-    capture_card_crop_width = get_long("", "capture_card_crop_width", 0);
-    capture_card_crop_height = get_long("", "capture_card_crop_height", 0);
-    if (capture_card_width < 0) capture_card_width = 0;
-    if (capture_card_height < 0) capture_card_height = 0;
-    if (capture_card_fps < 0) capture_card_fps = 0;
-    if (capture_card_crop_width < 0) capture_card_crop_width = 0;
-    if (capture_card_crop_height < 0) capture_card_crop_height = 0;
+    eth_adapter = get_string("", "eth_adapter", "");
+    eth_ethertype = (int)get_long("", "eth_ethertype", 0x88B5);
+    if (eth_ethertype < 0x0600 || eth_ethertype > 0xFFFF) eth_ethertype = 0x88B5;
+    opencv_capture_index = get_long("", "opencv_capture_index", 0);
+    if (opencv_capture_index < 0) opencv_capture_index = 0;
+    opencv_capture_api = get_string("", "opencv_capture_api", "DSHOW");
+    if (opencv_capture_api != "DSHOW" && opencv_capture_api != "MSMF"
+        && opencv_capture_api != "FFMPEG" && opencv_capture_api != "ANY")
+        opencv_capture_api = "DSHOW";
+    opencv_capture_url = get_string("", "opencv_capture_url", "");
+    opencv_capture_width = get_long("", "opencv_capture_width", 0);
+    opencv_capture_height = get_long("", "opencv_capture_height", 0);
+    opencv_capture_fps = get_long("", "opencv_capture_fps", 0);
+    if (opencv_capture_width < 0) opencv_capture_width = 0;
+    if (opencv_capture_height < 0) opencv_capture_height = 0;
+    if (opencv_capture_fps < 0) opencv_capture_fps = 0;
+    capture_crop = get_long("", "capture_crop", 0);
+    if (capture_crop < 0) capture_crop = 0;
+    if (capture_crop > 0) capture_crop = std::clamp(capture_crop, 32, 2048);
+    capture_format = get_string("", "capture_format", "MJPG");
+    if (capture_format != "NV12" && capture_format != "MJPG"
+        && capture_format != "YUY2" && capture_format != "RGB32")
+        capture_format = "MJPG";
+    capture_mf_gpu = get_bool("", "capture_mf_gpu", true);
     detection_resolution = std::clamp(get_long("", "detection_resolution", 320), 32, 2048);
     capture_fps = get_long("", "capture_fps", 60);
     circle_mask = get_bool("", "circle_mask", true);
@@ -272,13 +309,16 @@ bool Config::loadConfig(const std::string& filename)
     ai_model = get_string("", "ai_model", "sunxds_0.5.6.engine");
     confidence_threshold = static_cast<float>(get_double("", "confidence_threshold", 0.15));
     nms_threshold = static_cast<float>(get_double("", "nms_threshold", 0.50));
-    max_detections = get_long("", "max_detections", 20);
+    max_detections = get_long("", "max_detections", 100);
+    small_target_enabled = get_bool("", "small_target_enabled", false);
+    small_target_area_frac = static_cast<float>(get_double("", "small_target_area_frac", 0.012));
+    small_target_confidence = static_cast<float>(get_double("", "small_target_confidence", 0.06));
     export_enable_fp8 = get_bool("", "export_enable_fp8", false);
     export_enable_fp16 = get_bool("", "export_enable_fp16", true);
     fixed_input_size = get_bool("", "fixed_input_size", false);
 
-    use_cuda_graph = get_bool("", "use_cuda_graph", false);
-    use_double_buffer = get_bool("", "use_double_buffer", false);
+    use_cuda_graph = get_bool("", "use_cuda_graph", true);
+    use_double_buffer = get_bool("", "use_double_buffer", true);
     use_pinned_memory = get_bool("", "use_pinned_memory", true);
     gpuMemoryReserveMB = get_long("", "gpuMemoryReserveMB", 2048);
     enableGpuExclusiveMode = get_bool("", "enableGpuExclusiveMode", true);
@@ -302,6 +342,18 @@ bool Config::loadConfig(const std::string& filename)
     if (depth_fps < 0) depth_fps = 0;
     depth_colormap = get_long("", "depth_colormap", 18);
     if (depth_colormap < 0 || depth_colormap > 21) depth_colormap = 18;
+    depth_opt_input_size = std::clamp(get_long("", "depth_opt_input_size", 224), 160, 640);
+    depth_show_heatmap = get_bool("", "depth_show_heatmap", false);
+    depth_heatmap_gamma = std::clamp(
+        static_cast<float>(get_double("", "depth_heatmap_gamma", 1.0)),
+        0.1f, 5.0f);
+    depth_show_bbox_distance = get_bool("", "depth_show_bbox_distance", false);
+    depth_norm_clip_low_pct = std::clamp(
+        static_cast<float>(get_double("", "depth_norm_clip_low_pct", 0.0)),
+        0.0f, 50.0f);
+    depth_norm_clip_high_pct = std::clamp(
+        static_cast<float>(get_double("", "depth_norm_clip_high_pct", 100.0)),
+        50.0f, 100.0f);
     depth_mask_enabled = get_bool("", "depth_mask_enabled", false);
     depth_mask_fps = std::max(0, get_long("", "depth_mask_fps", 5));
     depth_mask_near_percent = std::clamp(get_long("", "depth_mask_near_percent", 20), 1, 100);
@@ -331,6 +383,19 @@ bool Config::loadConfig(const std::string& filename)
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
     crosshair_min_pixel_count  = std::clamp(get_long("", "crosshair_min_pixel_count", 4), 1, 10000);
     crosshair_close_radius     = std::clamp(get_long("", "crosshair_close_radius",    1), 0, 7);
+    crosshair_smooth           = std::clamp(static_cast<float>(get_double("", "crosshair_smooth", 0.5)), 0.0f, 1.0f);
+    laser_rect_w               = std::clamp(get_long("", "laser_rect_w",  160), 4, 4096);
+    laser_rect_h               = std::clamp(get_long("", "laser_rect_h",  240), 4, 4096);
+    laser_center_x             = std::clamp(get_long("", "laser_center_x", 160), 0, 8192);
+    laser_center_y             = std::clamp(get_long("", "laser_center_y", 200), 0, 8192);
+    laser_min_pixel_count      = std::clamp(get_long("", "laser_min_pixel_count", 10), 1, 10000);
+    laser_close_radius         = std::clamp(get_long("", "laser_close_radius",     1), 0, 9);
+    laser_min_elongation       = std::clamp(static_cast<float>(get_double("", "laser_min_elongation", 3.0)), 1.0f, 30.0f);
+    laser_smooth               = std::clamp(static_cast<float>(get_double("", "laser_smooth", 0.5)), 0.0f, 1.0f);
+    laser_target_center_x      = std::clamp(get_long("", "laser_target_center_x", 160), 0, 8192);
+    laser_target_center_y      = std::clamp(get_long("", "laser_target_center_y", 160), 0, 8192);
+    laser_target_rect_w        = std::clamp(get_long("", "laser_target_rect_w",    60), 4, 4096);
+    laser_target_rect_h        = std::clamp(get_long("", "laser_target_rect_h",    60), 4, 4096);
     crosshair_colors.clear();
     {
         // Each [crosshair_color.N] section = one HSV band in the palette.
@@ -375,6 +440,59 @@ bool Config::loadConfig(const std::string& filename)
             crosshair_colors.push_back(std::move(hi));
         }
     }
+
+    laser_colors.clear();
+    {
+        // Each [laser_color.N] section = one HSV band in the laser palette
+        // (independent from crosshair_color.*).
+        CSimpleIniA::TNamesDepend sections;
+        ini.GetAllSections(sections);
+        std::vector<std::pair<int, std::string>> lc_sections;
+        const std::string prefix = "laser_color.";
+        for (const auto& s : sections)
+        {
+            std::string sname = s.pItem;
+            if (sname.rfind(prefix, 0) != 0) continue;
+            int idx = 0;
+            try { idx = std::stoi(sname.substr(prefix.size())); }
+            catch (...) { continue; }
+            lc_sections.emplace_back(idx, std::move(sname));
+        }
+        std::sort(lc_sections.begin(), lc_sections.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& entry : lc_sections)
+        {
+            const char* sec = entry.second.c_str();
+            CrosshairColorProfileConfig c;
+            c.name    = get_string(sec, "name", "Color");
+            c.enabled = get_bool(sec, "enabled", true);
+            c.h_low   = std::clamp(get_long(sec, "h_low",   0),   0, 179);
+            c.h_high  = std::clamp(get_long(sec, "h_high",  10),  0, 179);
+            c.s_min   = std::clamp(get_long(sec, "s_min",   45),  0, 255);
+            c.s_max   = std::clamp(get_long(sec, "s_max",   255), 0, 255);
+            c.v_min   = std::clamp(get_long(sec, "v_min",   50),  0, 255);
+            c.v_max   = std::clamp(get_long(sec, "v_max",   255), 0, 255);
+            laser_colors.push_back(std::move(c));
+        }
+        if (laser_colors.empty())
+        {
+            // Seed with a red double-band (laser sights are usually red); the
+            // user can recolour / add bands on the laser panel.
+            CrosshairColorProfileConfig low;
+            low.name = "Laser-Red-Low";  low.h_low = 0;   low.h_high = 10;
+            low.s_min = 45; low.v_min = 50;
+            CrosshairColorProfileConfig hi;
+            hi.name  = "Laser-Red-High"; hi.h_low  = 160; hi.h_high  = 179;
+            hi.s_min = 45; hi.v_min = 50;
+            laser_colors.push_back(std::move(low));
+            laser_colors.push_back(std::move(hi));
+        }
+    }
+
+    // ---------- Macro (Lua / G HUB-compatible) ----------
+    macro_enabled = get_bool("", "macro_enabled", false);
+    macro_script_path = get_string("", "macro_script_path", "");
+    macro_primary_button_events = get_bool("", "macro_primary_button_events", false);
 
     // ---------- Class filters ----------
     class_filters.clear();
@@ -428,48 +546,39 @@ bool Config::loadConfig(const std::string& filename)
             const char* sec = entry.second.c_str();
             HotkeyProfile hk; // defaults come from the struct initializer
             hk.name = get_string(sec, "name", hk.name);
+            hk.group = get_string(sec, "group", hk.group);
+            if (hk.group.empty())
+                hk.group = u8"默认";
             hk.keys = splitString(get_string(sec, "keys", "RightMouseButton"));
             hk.aim_classes = parse_aim_classes(get_string(sec, "aim_classes", ""));
 
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
-            hk.speed_x       = static_cast<float>(get_double(sec, "speed_x",       hk.speed_x));
-            hk.speed_y       = static_cast<float>(get_double(sec, "speed_y",       hk.speed_y));
-            hk.lock_strength = static_cast<float>(get_double(sec, "lock_strength", hk.lock_strength));
-            hk.lock_radius_px = static_cast<float>(get_double(sec, "lock_radius_px", hk.lock_radius_px));
-
-            {
-                const long mode_raw = get_long(sec, "aim_trajectory_mode",
-                    static_cast<long>(hk.aim_trajectory_mode));
-                hk.aim_trajectory_mode = (mode_raw == 1)
-                    ? AimTrajectoryMode::Bezier
-                    : AimTrajectoryMode::Direct;
-            }
-            hk.bezier_cx1 = static_cast<float>(get_double(sec, "bezier_cx1", hk.bezier_cx1));
-            hk.bezier_cy1 = static_cast<float>(get_double(sec, "bezier_cy1", hk.bezier_cy1));
-            hk.bezier_cx2 = static_cast<float>(get_double(sec, "bezier_cx2", hk.bezier_cx2));
-            hk.bezier_cy2 = static_cast<float>(get_double(sec, "bezier_cy2", hk.bezier_cy2));
-            hk.bezier_follow_alpha = static_cast<float>(
-                get_double(sec, "bezier_follow_alpha", hk.bezier_follow_alpha));
-            hk.bezier_reanchor_threshold_px = static_cast<float>(
-                get_double(sec, "bezier_reanchor_threshold_px", hk.bezier_reanchor_threshold_px));
+            // 经典 PID,X / Y 轴各一套 P / I / D。向后兼容:旧 config 只有单套
+            // pid_p/pid_i/pid_d,先用它作为两轴的种子,再被新的 pid_x_*/pid_y_* 覆盖
+            // (若存在)。旧的 pid_track_* / flick_track_* / aim_lock_strength 读到也忽略。
+            const double legacy_p = get_double(sec, "pid_p", hk.pid_x_p);
+            const double legacy_i = get_double(sec, "pid_i", hk.pid_x_i);
+            const double legacy_d = get_double(sec, "pid_d", hk.pid_x_d);
+            hk.pid_x_p = static_cast<float>(get_double(sec, "pid_x_p", legacy_p));
+            hk.pid_x_i = static_cast<float>(get_double(sec, "pid_x_i", legacy_i));
+            hk.pid_x_d = static_cast<float>(get_double(sec, "pid_x_d", legacy_d));
+            hk.pid_y_p = static_cast<float>(get_double(sec, "pid_y_p", legacy_p));
+            hk.pid_y_i = static_cast<float>(get_double(sec, "pid_y_i", legacy_i));
+            hk.pid_y_d = static_cast<float>(get_double(sec, "pid_y_d", legacy_d));
 
             hk.predictionInterval = static_cast<float>(get_double(sec, "predictionInterval", hk.predictionInterval));
             hk.prediction_futurePositions = get_long(sec, "prediction_futurePositions", hk.prediction_futurePositions);
             hk.draw_futurePositions = get_bool(sec, "draw_futurePositions", hk.draw_futurePositions);
 
-            hk.kalman_enabled = get_bool(sec, "kalman_enabled", hk.kalman_enabled);
-            hk.kalman_process_noise_position = static_cast<float>(get_double(sec, "kalman_process_noise_position", hk.kalman_process_noise_position));
-            hk.kalman_process_noise_velocity = static_cast<float>(get_double(sec, "kalman_process_noise_velocity", hk.kalman_process_noise_velocity));
-            hk.kalman_measurement_noise = static_cast<float>(get_double(sec, "kalman_measurement_noise", hk.kalman_measurement_noise));
-            hk.kalman_velocity_damping = static_cast<float>(get_double(sec, "kalman_velocity_damping", hk.kalman_velocity_damping));
-            hk.kalman_max_velocity = static_cast<float>(get_double(sec, "kalman_max_velocity", hk.kalman_max_velocity));
-            hk.kalman_warmup_frames = get_long(sec, "kalman_warmup_frames", hk.kalman_warmup_frames);
-            hk.kalman_compensate_detection_delay = get_bool(sec, "kalman_compensate_detection_delay", hk.kalman_compensate_detection_delay);
-            hk.kalman_additional_prediction_ms = static_cast<float>(get_double(sec, "kalman_additional_prediction_ms", hk.kalman_additional_prediction_ms));
-            hk.kalman_reset_timeout_sec = static_cast<float>(get_double(sec, "kalman_reset_timeout_sec", hk.kalman_reset_timeout_sec));
+            // 卡尔曼:精简为 启用 / 平滑度 / 预测提前量(旧的 α/β/阻尼/最大速度/预热/
+            // 补偿/额外预测/重置超时 已移除,内部固定)。
+            hk.kalman_enabled    = get_bool(sec, "kalman_enabled", hk.kalman_enabled);
+            hk.kalman_smoothness = static_cast<float>(get_double(sec, "kalman_smoothness", hk.kalman_smoothness));
+            hk.kalman_lead       = static_cast<float>(get_double(sec, "kalman_lead",       hk.kalman_lead));
 
             hk.crosshair_detect_enabled = get_bool(sec, "crosshair_detect_enabled", false);
+            hk.laser_detect_enabled     = get_bool(sec, "laser_detect_enabled", false);
 
             hk.lock_switch_score_margin = static_cast<float>(
                 get_double(sec, "lock_switch_score_margin", hk.lock_switch_score_margin));
@@ -482,49 +591,26 @@ bool Config::loadConfig(const std::string& filename)
             hk.y_offset_size_decay_high_frac = static_cast<float>(
                 get_double(sec, "y_offset_size_decay_high_frac", hk.y_offset_size_decay_high_frac));
 
-            hk.smart_trigger_enabled         = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
-            hk.smart_trigger_hit_radius_frac = static_cast<float>(get_double(sec, "smart_trigger_hit_radius_frac", hk.smart_trigger_hit_radius_frac));
-            hk.smart_trigger_variance_max_px = static_cast<float>(get_double(sec, "smart_trigger_variance_max_px", hk.smart_trigger_variance_max_px));
-            hk.smart_trigger_window_frames   = get_long(sec, "smart_trigger_window_frames", hk.smart_trigger_window_frames);
-            hk.smart_trigger_min_prob        = static_cast<float>(get_double(sec, "smart_trigger_min_prob", hk.smart_trigger_min_prob));
-            hk.smart_trigger_fire_duration_ms = get_long(sec, "smart_trigger_fire_duration_ms", hk.smart_trigger_fire_duration_ms);
+            hk.smart_trigger_enabled      = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
+            hk.smart_trigger_hit_scale_x  = static_cast<float>(get_double(sec, "smart_trigger_hit_scale_x", hk.smart_trigger_hit_scale_x));
+            hk.smart_trigger_hit_scale_y  = static_cast<float>(get_double(sec, "smart_trigger_hit_scale_y", hk.smart_trigger_hit_scale_y));
+            hk.smart_trigger_reaction_ms  = get_long(sec, "smart_trigger_reaction_ms", hk.smart_trigger_reaction_ms);
+            hk.smart_trigger_hold_ms      = get_long(sec, "smart_trigger_hold_ms", hk.smart_trigger_hold_ms);
+            hk.smart_trigger_cooldown_ms  = get_long(sec, "smart_trigger_cooldown_ms", hk.smart_trigger_cooldown_ms);
 
-            hk.threat_priority_enabled = get_bool(sec, "threat_priority_enabled", hk.threat_priority_enabled);
-            hk.threat_weight           = static_cast<float>(get_double(sec, "threat_weight", hk.threat_weight));
-            hk.threat_head_class_id    = get_long(sec, "threat_head_class_id", hk.threat_head_class_id);
-            hk.threat_body_class_id    = get_long(sec, "threat_body_class_id", hk.threat_body_class_id);
+            hk.threat_priority_enabled  = get_bool(sec, "threat_priority_enabled", hk.threat_priority_enabled);
+            hk.threat_weight            = static_cast<float>(get_double(sec, "threat_weight", hk.threat_weight));
+            hk.threat_head_class_id     = get_long(sec, "threat_head_class_id", hk.threat_head_class_id);
+            hk.threat_depth_head_ratio  = static_cast<float>(get_double(sec, "threat_depth_head_ratio", hk.threat_depth_head_ratio));
 
             hk.dynamic_fov_enabled         = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
             hk.dynamic_fov_margin_frac     = static_cast<float>(get_double(sec, "dynamic_fov_margin_frac",     hk.dynamic_fov_margin_frac));
             hk.dynamic_fov_min_radius_frac = static_cast<float>(get_double(sec, "dynamic_fov_min_radius_frac", hk.dynamic_fov_min_radius_frac));
 
-            // Per-class Kalman overrides: one ini key per aim class:
-            //   aim_class_kalman_<class_id> = enabled,pnp,pnv,mn,vd,mxv
-            // Missing keys mean "no override" (the hotkey-level Kalman wins).
-            for (auto& ac : hk.aim_classes)
-            {
-                const std::string key = "aim_class_kalman_" + std::to_string(ac.class_id);
-                const std::string raw = get_string(sec, key.c_str(), "");
-                if (raw.empty())
-                    continue;
-                const auto parts = splitString(raw);
-                if (parts.size() < 6)
-                    continue;
-                try
-                {
-                    ac.kalman_override_enabled       = (parts[0] == "true" || parts[0] == "1");
-                    ac.kalman_process_noise_position = std::stof(parts[1]);
-                    ac.kalman_process_noise_velocity = std::stof(parts[2]);
-                    ac.kalman_measurement_noise      = std::stof(parts[3]);
-                    ac.kalman_velocity_damping       = std::stof(parts[4]);
-                    ac.kalman_max_velocity           = std::stof(parts[5]);
-                }
-                catch (...)
-                {
-                    // Malformed override: leave class on defaults.
-                    ac.kalman_override_enabled = false;
-                }
-            }
+            hk.close_range_head_aim_enabled    = get_bool(sec, "close_range_head_aim_enabled", hk.close_range_head_aim_enabled);
+            hk.close_range_head_class_id       = get_long(sec, "close_range_head_class_id",    hk.close_range_head_class_id);
+            hk.close_range_trigger_height_frac = static_cast<float>(
+                get_double(sec, "close_range_trigger_height_frac", hk.close_range_trigger_height_frac));
 
             hotkeys.push_back(std::move(hk));
         }
@@ -537,26 +623,16 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
-    // Clamp kalman params to safe ranges on every hotkey.
+    // Clamp PID / kalman params to safe ranges on every hotkey.
     auto clamp_kalman_fields = [](HotkeyProfile& hk) {
-        hk.kalman_process_noise_position = std::clamp(hk.kalman_process_noise_position, 0.0001f, 5000.0f);
-        hk.kalman_process_noise_velocity = std::clamp(hk.kalman_process_noise_velocity, 0.0001f, 50000.0f);
-        hk.kalman_measurement_noise = std::clamp(hk.kalman_measurement_noise, 0.0001f, 5000.0f);
-        hk.kalman_velocity_damping = std::clamp(hk.kalman_velocity_damping, 0.0f, 3.0f);
-        hk.kalman_max_velocity = std::clamp(hk.kalman_max_velocity, 100.0f, 60000.0f);
-        hk.kalman_warmup_frames = std::clamp(hk.kalman_warmup_frames, 0, 20);
-        hk.kalman_additional_prediction_ms = std::clamp(hk.kalman_additional_prediction_ms, -80.0f, 120.0f);
-        hk.kalman_reset_timeout_sec = std::clamp(hk.kalman_reset_timeout_sec, 0.05f, 3.0f);
-        hk.speed_x       = std::clamp(hk.speed_x, 0.0f, 1.0f);
-        hk.speed_y       = std::clamp(hk.speed_y, 0.0f, 1.0f);
-        hk.lock_strength = std::clamp(hk.lock_strength, 0.0f, 1.0f);
-        hk.lock_radius_px = std::clamp(hk.lock_radius_px, 0.0f, 200.0f);
-        hk.bezier_cx1 = std::clamp(hk.bezier_cx1, 0.0f, 1.0f);
-        hk.bezier_cx2 = std::clamp(hk.bezier_cx2, 0.0f, 1.0f);
-        hk.bezier_cy1 = std::clamp(hk.bezier_cy1, -1.0f, 1.0f);
-        hk.bezier_cy2 = std::clamp(hk.bezier_cy2, -1.0f, 1.0f);
-        hk.bezier_follow_alpha = std::clamp(hk.bezier_follow_alpha, 0.0f, 1.0f);
-        hk.bezier_reanchor_threshold_px = std::clamp(hk.bezier_reanchor_threshold_px, 1.0f, 4096.0f);
+        hk.kalman_smoothness = std::clamp(hk.kalman_smoothness, 0.0f, 1.0f);
+        hk.kalman_lead       = std::clamp(hk.kalman_lead,       0.0f, 2.0f);
+        hk.pid_x_p = std::max(hk.pid_x_p, 0.0f);
+        hk.pid_x_i = std::max(hk.pid_x_i, 0.0f);
+        hk.pid_x_d = std::max(hk.pid_x_d, 0.0f);
+        hk.pid_y_p = std::max(hk.pid_y_p, 0.0f);
+        hk.pid_y_i = std::max(hk.pid_y_i, 0.0f);
+        hk.pid_y_d = std::max(hk.pid_y_d, 0.0f);
 
         hk.lock_switch_score_margin = std::clamp(hk.lock_switch_score_margin, 0.0f, 200.0f);
         hk.lock_switch_min_frames   = std::clamp(hk.lock_switch_min_frames, 1, 6000);
@@ -566,29 +642,23 @@ bool Config::loadConfig(const std::string& filename)
         if (hk.y_offset_size_decay_high_frac <= hk.y_offset_size_decay_low_frac)
             hk.y_offset_size_decay_high_frac = std::min(1.0f, hk.y_offset_size_decay_low_frac + 0.01f);
 
-        hk.smart_trigger_hit_radius_frac = std::clamp(hk.smart_trigger_hit_radius_frac, 0.05f, 1.0f);
-        hk.smart_trigger_variance_max_px = std::clamp(hk.smart_trigger_variance_max_px, 0.0f, 100.0f);
-        hk.smart_trigger_window_frames   = std::clamp(hk.smart_trigger_window_frames,   2, 60);
-        hk.smart_trigger_min_prob        = std::clamp(hk.smart_trigger_min_prob,        0.0f, 1.0f);
-        hk.smart_trigger_fire_duration_ms = std::clamp(hk.smart_trigger_fire_duration_ms, 5, 1000);
+        hk.smart_trigger_hit_scale_x = std::clamp(hk.smart_trigger_hit_scale_x, 0.05f, 1.0f);
+        hk.smart_trigger_hit_scale_y = std::clamp(hk.smart_trigger_hit_scale_y, 0.05f, 1.0f);
+        hk.smart_trigger_reaction_ms = std::clamp(hk.smart_trigger_reaction_ms, 0, 1000);
+        hk.smart_trigger_hold_ms     = std::clamp(hk.smart_trigger_hold_ms,     5, 5000);
+        hk.smart_trigger_cooldown_ms = std::clamp(hk.smart_trigger_cooldown_ms, 0, 5000);
 
         hk.threat_weight = std::clamp(hk.threat_weight, 0.0f, 1.0f);
+        hk.threat_depth_head_ratio = std::clamp(hk.threat_depth_head_ratio, 0.0f, 1.0f);
         if (hk.threat_head_class_id < -1)
             hk.threat_head_class_id = -1;
-        if (hk.threat_body_class_id < -1)
-            hk.threat_body_class_id = -1;
+
+        hk.close_range_trigger_height_frac = std::clamp(hk.close_range_trigger_height_frac, 0.05f, 1.0f);
+        if (hk.close_range_head_class_id < -1)
+            hk.close_range_head_class_id = -1;
 
         hk.dynamic_fov_margin_frac     = std::clamp(hk.dynamic_fov_margin_frac,     1.0f, 3.0f);
         hk.dynamic_fov_min_radius_frac = std::clamp(hk.dynamic_fov_min_radius_frac, 0.05f, 1.0f);
-
-        for (auto& ac : hk.aim_classes)
-        {
-            ac.kalman_process_noise_position = std::clamp(ac.kalman_process_noise_position, 0.0001f, 5000.0f);
-            ac.kalman_process_noise_velocity = std::clamp(ac.kalman_process_noise_velocity, 0.0001f, 50000.0f);
-            ac.kalman_measurement_noise      = std::clamp(ac.kalman_measurement_noise,      0.0001f, 5000.0f);
-            ac.kalman_velocity_damping       = std::clamp(ac.kalman_velocity_damping,       0.0f,    3.0f);
-            ac.kalman_max_velocity           = std::clamp(ac.kalman_max_velocity,           100.0f,  60000.0f);
-        }
     };
     for (auto& hk : hotkeys)
         clamp_kalman_fields(hk);
@@ -647,13 +717,17 @@ bool Config::saveConfig(const std::string& filename)
         << "udp_port = " << udp_port << "\n"
         << "tcp_ip = " << tcp_ip << "\n"
         << "tcp_port = " << tcp_port << "\n"
-        << "capture_card_index = " << capture_card_index << "\n"
-        << "capture_card_width = " << capture_card_width << "\n"
-        << "capture_card_height = " << capture_card_height << "\n"
-        << "capture_card_fps = " << capture_card_fps << "\n"
-        << "capture_card_format = " << capture_card_format << "\n"
-        << "capture_card_crop_width = " << capture_card_crop_width << "\n"
-        << "capture_card_crop_height = " << capture_card_crop_height << "\n"
+        << "eth_adapter = " << eth_adapter << "\n"
+        << "eth_ethertype = " << eth_ethertype << "\n"
+        << "opencv_capture_index = " << opencv_capture_index << "\n"
+        << "opencv_capture_api = " << opencv_capture_api << "\n"
+        << "opencv_capture_url = " << opencv_capture_url << "\n"
+        << "opencv_capture_width = " << opencv_capture_width << "\n"
+        << "opencv_capture_height = " << opencv_capture_height << "\n"
+        << "opencv_capture_fps = " << opencv_capture_fps << "\n"
+        << "capture_crop = " << capture_crop << "\n"
+        << "capture_format = " << capture_format << "\n"
+        << "capture_mf_gpu = " << to_bool_str(capture_mf_gpu) << "\n"
         << "detection_resolution = " << detection_resolution << "\n"
         << "capture_fps = " << capture_fps << "\n"
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
@@ -681,6 +755,12 @@ bool Config::saveConfig(const std::string& filename)
         << "nms_threshold = " << nms_threshold << "\n"
         << std::setprecision(0)
         << "max_detections = " << max_detections << "\n"
+        << "small_target_enabled = " << to_bool_str(small_target_enabled) << "\n"
+        << std::setprecision(3)
+        << "small_target_area_frac = " << small_target_area_frac << "\n"
+        << std::setprecision(2)
+        << "small_target_confidence = " << small_target_confidence << "\n"
+        << std::setprecision(0)
         << "export_enable_fp8 = " << to_bool_str(export_enable_fp8) << "\n"
         << "export_enable_fp16 = " << to_bool_str(export_enable_fp16) << "\n"
         << "fixed_input_size = " << to_bool_str(fixed_input_size) << "\n\n";
@@ -708,6 +788,13 @@ bool Config::saveConfig(const std::string& filename)
         << "depth_model_path = " << depth_model_path << "\n"
         << "depth_fps = " << depth_fps << "\n"
         << "depth_colormap = " << depth_colormap << "\n"
+        << "depth_opt_input_size = " << depth_opt_input_size << "\n"
+        << "depth_show_heatmap = " << to_bool_str(depth_show_heatmap) << "\n"
+        << std::fixed << std::setprecision(3)
+        << "depth_heatmap_gamma = " << depth_heatmap_gamma << "\n"
+        << "depth_show_bbox_distance = " << to_bool_str(depth_show_bbox_distance) << "\n"
+        << "depth_norm_clip_low_pct = " << depth_norm_clip_low_pct << "\n"
+        << "depth_norm_clip_high_pct = " << depth_norm_clip_high_pct << "\n"
         << "depth_mask_enabled = " << to_bool_str(depth_mask_enabled) << "\n"
         << "depth_mask_fps = " << depth_mask_fps << "\n"
         << "depth_mask_near_percent = " << depth_mask_near_percent << "\n"
@@ -725,7 +812,20 @@ bool Config::saveConfig(const std::string& filename)
         << "crosshair_rect_w = "          << crosshair_rect_w          << "\n"
         << "crosshair_rect_h = "          << crosshair_rect_h          << "\n"
         << "crosshair_min_pixel_count = " << crosshair_min_pixel_count << "\n"
-        << "crosshair_close_radius = "    << crosshair_close_radius    << "\n\n";
+        << "crosshair_close_radius = "    << crosshair_close_radius    << "\n"
+        << "crosshair_smooth = "          << crosshair_smooth          << "\n"
+        << "laser_rect_w = "              << laser_rect_w              << "\n"
+        << "laser_rect_h = "              << laser_rect_h              << "\n"
+        << "laser_center_x = "            << laser_center_x            << "\n"
+        << "laser_center_y = "            << laser_center_y            << "\n"
+        << "laser_min_pixel_count = "     << laser_min_pixel_count     << "\n"
+        << "laser_close_radius = "        << laser_close_radius        << "\n"
+        << "laser_min_elongation = "      << laser_min_elongation      << "\n"
+        << "laser_smooth = "              << laser_smooth              << "\n"
+        << "laser_target_center_x = "     << laser_target_center_x     << "\n"
+        << "laser_target_center_y = "     << laser_target_center_y     << "\n"
+        << "laser_target_rect_w = "       << laser_target_rect_w       << "\n"
+        << "laser_target_rect_h = "       << laser_target_rect_h       << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -733,6 +833,14 @@ bool Config::saveConfig(const std::string& filename)
         << "screenshot_button = " << joinStrings(screenshot_button) << "\n"
         << "screenshot_delay = " << screenshot_delay << "\n"
         << "verbose = " << to_bool_str(verbose) << "\n\n";
+
+    file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
+            "# macro_script_path; runtime loads it on startup when macro_enabled\n"
+            "# is true. macro_primary_button_events mirrors the script-side\n"
+            "# EnablePrimaryMouseButtonEvents default.\n"
+        << "macro_enabled = " << to_bool_str(macro_enabled) << "\n"
+        << "macro_script_path = " << macro_script_path << "\n"
+        << "macro_primary_button_events = " << to_bool_str(macro_primary_button_events) << "\n\n";
 
     // Class filter table.
     file << "[classes]\n";
@@ -753,25 +861,18 @@ bool Config::saveConfig(const std::string& filename)
         const auto& hk = hotkeys[i];
         file << "[hotkey." << i << "]\n";
         file << "name = " << hk.name << "\n";
+        file << "group = " << hk.group << "\n";
         file << "keys = " << joinStrings(hk.keys) << "\n";
         file << "aim_classes = " << serialize_aim_classes(hk.aim_classes) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
         file << std::fixed << std::setprecision(4)
-             << "speed_x = "       << hk.speed_x       << "\n"
-             << "speed_y = "       << hk.speed_y       << "\n"
-             << "lock_strength = " << hk.lock_strength << "\n"
-             << "lock_radius_px = " << hk.lock_radius_px << "\n"
-             << std::setprecision(0)
-             << "aim_trajectory_mode = " << static_cast<int>(hk.aim_trajectory_mode) << "\n"
-             << std::fixed << std::setprecision(4)
-             << "bezier_cx1 = " << hk.bezier_cx1 << "\n"
-             << "bezier_cy1 = " << hk.bezier_cy1 << "\n"
-             << "bezier_cx2 = " << hk.bezier_cx2 << "\n"
-             << "bezier_cy2 = " << hk.bezier_cy2 << "\n"
-             << "bezier_follow_alpha = " << hk.bezier_follow_alpha << "\n"
-             << std::setprecision(2)
-             << "bezier_reanchor_threshold_px = " << hk.bezier_reanchor_threshold_px << "\n";
+             << "pid_x_p = " << hk.pid_x_p << "\n"
+             << "pid_x_i = " << hk.pid_x_i << "\n"
+             << "pid_x_d = " << hk.pid_x_d << "\n"
+             << "pid_y_p = " << hk.pid_y_p << "\n"
+             << "pid_y_i = " << hk.pid_y_i << "\n"
+             << "pid_y_d = " << hk.pid_y_d << "\n";
         file << std::fixed << std::setprecision(2)
              << "predictionInterval = " << hk.predictionInterval << "\n"
              << std::setprecision(0)
@@ -779,18 +880,10 @@ bool Config::saveConfig(const std::string& filename)
              << "draw_futurePositions = " << to_bool_str(hk.draw_futurePositions) << "\n"
              << "kalman_enabled = " << to_bool_str(hk.kalman_enabled) << "\n"
              << std::fixed << std::setprecision(4)
-             << "kalman_process_noise_position = " << hk.kalman_process_noise_position << "\n"
-             << "kalman_process_noise_velocity = " << hk.kalman_process_noise_velocity << "\n"
-             << "kalman_measurement_noise = " << hk.kalman_measurement_noise << "\n"
-             << "kalman_velocity_damping = " << hk.kalman_velocity_damping << "\n"
-             << "kalman_max_velocity = " << hk.kalman_max_velocity << "\n"
-             << std::setprecision(0)
-             << "kalman_warmup_frames = " << hk.kalman_warmup_frames << "\n"
-             << "kalman_compensate_detection_delay = " << to_bool_str(hk.kalman_compensate_detection_delay) << "\n"
-             << std::fixed << std::setprecision(2)
-             << "kalman_additional_prediction_ms = " << hk.kalman_additional_prediction_ms << "\n"
-             << "kalman_reset_timeout_sec = " << hk.kalman_reset_timeout_sec << "\n"
+             << "kalman_smoothness = " << hk.kalman_smoothness << "\n"
+             << "kalman_lead = "       << hk.kalman_lead       << "\n"
              << "crosshair_detect_enabled = " << to_bool_str(hk.crosshair_detect_enabled) << "\n"
+             << "laser_detect_enabled = " << to_bool_str(hk.laser_detect_enabled) << "\n"
              << std::fixed << std::setprecision(4)
              << "lock_switch_score_margin = " << hk.lock_switch_score_margin << "\n"
              << std::setprecision(0)
@@ -802,38 +895,30 @@ bool Config::saveConfig(const std::string& filename)
              << "y_offset_size_decay_high_frac = " << hk.y_offset_size_decay_high_frac << "\n"
              << "smart_trigger_enabled = " << to_bool_str(hk.smart_trigger_enabled) << "\n"
              << std::fixed << std::setprecision(3)
-             << "smart_trigger_hit_radius_frac = " << hk.smart_trigger_hit_radius_frac << "\n"
-             << "smart_trigger_variance_max_px = " << hk.smart_trigger_variance_max_px << "\n"
+             << "smart_trigger_hit_scale_x = " << hk.smart_trigger_hit_scale_x << "\n"
+             << "smart_trigger_hit_scale_y = " << hk.smart_trigger_hit_scale_y << "\n"
              << std::setprecision(0)
-             << "smart_trigger_window_frames = " << hk.smart_trigger_window_frames << "\n"
-             << std::fixed << std::setprecision(3)
-             << "smart_trigger_min_prob = " << hk.smart_trigger_min_prob << "\n"
-             << std::setprecision(0)
-             << "smart_trigger_fire_duration_ms = " << hk.smart_trigger_fire_duration_ms << "\n"
+             << "smart_trigger_reaction_ms = " << hk.smart_trigger_reaction_ms << "\n"
+             << "smart_trigger_hold_ms = " << hk.smart_trigger_hold_ms << "\n"
+             << "smart_trigger_cooldown_ms = " << hk.smart_trigger_cooldown_ms << "\n"
              << "threat_priority_enabled = " << to_bool_str(hk.threat_priority_enabled) << "\n"
+             << std::fixed << std::setprecision(3)
              << "threat_weight = " << hk.threat_weight << "\n"
+             << std::setprecision(0)
              << "threat_head_class_id = " << hk.threat_head_class_id << "\n"
-             << "threat_body_class_id = " << hk.threat_body_class_id << "\n"
+             << std::fixed << std::setprecision(3)
+             << "threat_depth_head_ratio = " << hk.threat_depth_head_ratio << "\n"
+             << std::setprecision(0)
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "dynamic_fov_margin_frac = "     << hk.dynamic_fov_margin_frac << "\n"
-             << "dynamic_fov_min_radius_frac = " << hk.dynamic_fov_min_radius_frac << "\n";
+             << "dynamic_fov_min_radius_frac = " << hk.dynamic_fov_min_radius_frac << "\n"
+             << "close_range_head_aim_enabled = " << to_bool_str(hk.close_range_head_aim_enabled) << "\n"
+             << std::setprecision(0)
+             << "close_range_head_class_id = " << hk.close_range_head_class_id << "\n"
+             << std::fixed << std::setprecision(3)
+             << "close_range_trigger_height_frac = " << hk.close_range_trigger_height_frac << "\n";
 
-        // Per-class Kalman overrides: only emit keys for classes that have
-        // overrides enabled. Skipping the rest keeps config.ini readable.
-        for (const auto& ac : hk.aim_classes)
-        {
-            if (!ac.kalman_override_enabled)
-                continue;
-            file << "aim_class_kalman_" << ac.class_id << " = "
-                 << (ac.kalman_override_enabled ? "1" : "0") << ","
-                 << std::fixed << std::setprecision(4)
-                 << ac.kalman_process_noise_position << ","
-                 << ac.kalman_process_noise_velocity << ","
-                 << ac.kalman_measurement_noise << ","
-                 << ac.kalman_velocity_damping << ","
-                 << ac.kalman_max_velocity << "\n";
-        }
         file << "\n";
     }
 
@@ -843,6 +928,21 @@ bool Config::saveConfig(const std::string& filename)
     {
         const auto& c = crosshair_colors[i];
         file << "[crosshair_color." << i << "]\n"
+             << "name = "    << c.name    << "\n"
+             << "enabled = " << to_bool_str(c.enabled) << "\n"
+             << "h_low = "   << c.h_low   << "\n"
+             << "h_high = "  << c.h_high  << "\n"
+             << "s_min = "   << c.s_min   << "\n"
+             << "s_max = "   << c.s_max   << "\n"
+             << "v_min = "   << c.v_min   << "\n"
+             << "v_max = "   << c.v_max   << "\n\n";
+    }
+
+    // Laser color palette: independent from the crosshair palette above.
+    for (size_t i = 0; i < laser_colors.size(); ++i)
+    {
+        const auto& c = laser_colors[i];
+        file << "[laser_color." << i << "]\n"
              << "name = "    << c.name    << "\n"
              << "enabled = " << to_bool_str(c.enabled) << "\n"
              << "h_low = "   << c.h_low   << "\n"

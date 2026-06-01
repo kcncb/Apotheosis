@@ -94,11 +94,14 @@ set(APP_SOURCES
     "${SRC_DIR}/capture/capture_utils.cpp"
     "${SRC_DIR}/capture/gpu_color_ops.cu"
     "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
-    "${SRC_DIR}/capture/capture_card.cpp"
+    "${SRC_DIR}/capture/eth_capture.cpp"
+    "${SRC_DIR}/capture/mf_capture.cpp"
+    "${SRC_DIR}/capture/opencv_capture.cpp"
     "${SRC_DIR}/capture/tcp_capture.cpp"
     "${SRC_DIR}/capture/udp_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/crosshair/crosshair_detector.cpp"
+    "${SRC_DIR}/crosshair/laser_detector.cpp"
     "${SRC_DIR}/crosshair/crosshair_runtime.cpp"
     "${SRC_DIR}/depth/depth_anything_trt.cpp"
     "${SRC_DIR}/depth/depth_mask.cpp"
@@ -117,6 +120,10 @@ set(APP_SOURCES
     "${SRC_DIR}/imgui/imgui_widgets.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
+    "${SRC_DIR}/macro/macro_keymap.cpp"
+    "${SRC_DIR}/macro/macro_input.cpp"
+    "${SRC_DIR}/macro/lua_runtime.cpp"
+    "${SRC_DIR}/macro/ghub_api.cpp"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
     "${SRC_DIR}/mem/gpu_image.cpp"
     "${SRC_DIR}/mem/gpu_resource_manager.cpp"
@@ -126,7 +133,6 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
-    "${SRC_DIR}/mouse/bezier_aim_controller.cpp"
     "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
@@ -148,6 +154,7 @@ set(APP_SOURCES
     "${SRC_DIR}/overlay/draw_hardware.cpp"
     "${SRC_DIR}/overlay/draw_hotkeys.cpp"
     "${SRC_DIR}/overlay/draw_log.cpp"
+    "${SRC_DIR}/overlay/draw_macro.cpp"
     "${SRC_DIR}/overlay/draw_model_tools.cpp"
     "${SRC_DIR}/overlay/draw_overlay.cpp"
     "${SRC_DIR}/overlay/draw_session.cpp"
@@ -174,6 +181,43 @@ add_library(serial_embedded STATIC
 target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/include")
 target_link_libraries(serial_embedded PUBLIC setupapi)
 
+# ---------------------------------------------------------------------------
+# Lua 5.1.5 static library — used by the macro layer for G HUB-compatible
+# scripting. Sources are vendored under Apotheosis/modules/lua-5.1.5/src/.
+# Run modules/lua-5.1.5/fetch_lua.ps1 once to populate that directory; the
+# script downloads the official tarball from www.lua.org. We pin 5.1 so
+# scripts copy-pasted from G HUB / LGS run unmodified.
+# ---------------------------------------------------------------------------
+set(LUA_VENDOR_DIR "${SRC_DIR}/modules/lua-5.1.5")
+set(LUA_SRC_DIR    "${LUA_VENDOR_DIR}/src")
+
+if(NOT EXISTS "${LUA_SRC_DIR}/lua.h")
+    message(FATAL_ERROR
+        "Lua 5.1.5 sources missing. Run:\n"
+        "  powershell -NoProfile -ExecutionPolicy Bypass -File \"${LUA_VENDOR_DIR}/fetch_lua.ps1\"\n"
+        "and re-configure. The script downloads lua-5.1.5.tar.gz from www.lua.org and extracts the .c/.h files into ${LUA_SRC_DIR}.")
+endif()
+
+file(GLOB LUA_SOURCES CONFIGURE_DEPENDS "${LUA_SRC_DIR}/*.c")
+list(FILTER LUA_SOURCES EXCLUDE REGEX "(lua|luac|print)\\.c$")
+
+add_library(lua_static STATIC ${LUA_SOURCES})
+target_include_directories(lua_static PUBLIC "${LUA_SRC_DIR}")
+set_target_properties(lua_static PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+    set_target_properties(lua_static PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Lua 5.1 uses tmpfile/getenv/strcpy/etc. — silence /sdl + secure-CRT
+    # warnings for the vendor sources only. Our own code keeps /sdl.
+    target_compile_definitions(lua_static PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        _CRT_NONSTDC_NO_DEPRECATE)
+    target_compile_options(lua_static PRIVATE /wd4334 /wd4267 /wd4244 /wd4146 /wd4310 /wd4702 /wd4310 /wd4068)
+endif()
+
 add_executable(ai WIN32 ${APP_SOURCES})
 
 # Pin CUDA architectures to REAL SMs (no trailing "-virtual" or PTX-only).
@@ -185,17 +229,21 @@ add_executable(ai WIN32 ${APP_SOURCES})
 # anything to the engine input binding.
 #
 # Listing concrete SM real-arch numbers makes nvcc embed prebuilt SASS for
-# each GPU we care about; no driver JIT required:
-#   75  = Turing    (RTX 20 / GTX 16)
+# every GPU TensorRT 10 still supports — no driver JIT required:
+#   70  = Volta     (V100 / Titan V)
+#   75  = Turing    (RTX 20 / GTX 16 / T4)
 #   80  = Ampere    (A100)
 #   86  = Ampere    (RTX 30)
 #   89  = Ada       (RTX 40)
-#   120 = Blackwell (RTX 50)
+#   90  = Hopper    (H100 / H200)
+#   100 = Blackwell datacenter (B100 / B200)
+#   120 = Blackwell client     (RTX 50)
+# (SM 72 / 87 — Xavier / Orin — are Jetson embedded only and skipped here.)
 set_target_properties(ai PROPERTIES
     OUTPUT_NAME "Apotheosis"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
-    CUDA_ARCHITECTURES "75-real;80-real;86-real;89-real;120-real")
+    CUDA_ARCHITECTURES "70-real;75-real;80-real;86-real;89-real;90-real;100-real;120-real")
 
 foreach(target serial_embedded ai)
     if(MSVC)
@@ -226,6 +274,7 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/imgui"
     "${SRC_DIR}/include"
     "${SRC_DIR}/keyboard"
+    "${SRC_DIR}/macro"
     "${SRC_DIR}/mem"
     "${SRC_DIR}/mouse"
     "${SRC_DIR}/overlay"
@@ -237,6 +286,7 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/modules/makcu/include"
     "${SRC_DIR}/modules/serial/include"
     "${SRC_DIR}/modules/stb"
+    "${SRC_DIR}/modules/npcap-sdk/Include"
     "${OPENCV_INCLUDE_DIR}"
     "${ONNXRUNTIME_DIR}/build/native/include"
     "${CPPWINRT_INCLUDE_DIR}"
@@ -251,6 +301,7 @@ endif()
 target_link_directories(ai PRIVATE "${TENSORRT_ROOT}/lib")
 target_link_libraries(ai PRIVATE
     serial_embedded
+    lua_static
     "${OPENCV_LIB}"
     "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"
     CUDA::cuda_driver
@@ -259,6 +310,8 @@ target_link_libraries(ai PRIVATE
     CUDA::nppc
     CUDA::nppicc
     CUDA::nppidei
+    "${SRC_DIR}/modules/npcap-sdk/Lib/x64/wpcap.lib"
+    "${SRC_DIR}/modules/npcap-sdk/Lib/x64/Packet.lib"
     nvinfer_10
     nvonnxparser_10
     bcrypt
@@ -268,6 +321,7 @@ target_link_libraries(ai PRIVATE
     dxgi
     d2d1
     setupapi
+    cfgmgr32
     strmiids
     mf
     mfplat
@@ -275,6 +329,7 @@ target_link_libraries(ai PRIVATE
     mfuuid
     ole32
     oleaut32
+    winmm
     WindowsApp)
 
 copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")

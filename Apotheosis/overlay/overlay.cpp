@@ -392,6 +392,8 @@ static const OverlayTabItem kOverlayTabs[] = {
     { u8"目标",     u8"核心", u8"按类别分配：删除、过滤、瞄准。",                             draw_target },
     { u8"瞄准热键", u8"控制", u8"定义每个瞄准热键的触发键、类别优先级、Y 偏移与完整鼠标参数。", draw_hotkeys },
     { u8"准星找色", u8"控制", u8"BGR 到 HSV 识别动态准星颜色，替代静态画面中心作为瞄准参考点。", draw_crosshair },
+    { u8"镭射找色", u8"控制", u8"独立识别镭射线并取其末端作为瞄准参考点;与准星找色互不影响、准星优先。", draw_laser },
+    { u8"宏脚本",   u8"控制", u8"G HUB / LGS 兼容的 Lua 宏。脚本可直接复制粘贴运行,自动走当前硬件后端。", draw_macro },
     { u8"硬件",     u8"核心", u8"物理输入设备：Win32 / GHUB / Arduino / Kmbox / MAKCU。",       draw_hardware },
     { u8"AI 模型",  u8"核心", u8"模型与检测器阈值。",                                         draw_ai },
     { u8"界面外观", u8"控制", u8"编辑器外观与缩放。",                                         draw_overlay },

@@ -16,15 +16,6 @@ enum class ClassBucket
     Aim = 2,
 };
 
-// 瞄准轨迹模式。Direct = 现有非线性 P 控制器(直线靠近)。
-// Bezier = 用一条用户在 UI 里画好的三次贝塞尔曲线塑形从起点到目标的轨迹,
-// 输出仍交给同一份 speed_x/speed_y 比例缩放和子像素残差累积。
-enum class AimTrajectoryMode
-{
-    Direct = 0,
-    Bezier = 1,
-};
-
 struct ClassFilterState
 {
     int class_id = 0;
@@ -40,20 +31,7 @@ struct HotkeyAimClass
     int class_id = 0;
     float y_offset = 0.5f;
 
-    // Per-class Kalman override. Heads have a much higher acceleration
-    // density than torsos (a flicked head movement covers far more bbox
-    // diameters per frame than a torso shift covering the same pixel count),
-    // so a one-size-fits-all process/measurement noise pair is a poor fit
-    // when both classes share a hotkey. When `kalman_override_enabled` is
-    // true the five fields below replace the matching HotkeyProfile values
-    // for any track of this class. The remaining Kalman knobs (warmup,
-    // delay-compensation, reset timeout) stay at the hotkey level.
-    bool  kalman_override_enabled = false;
-    float kalman_process_noise_position = 40.0f;
-    float kalman_process_noise_velocity = 1800.0f;
-    float kalman_measurement_noise = 35.0f;
-    float kalman_velocity_damping = 0.08f;
-    float kalman_max_velocity = 20000.0f;
+    // 已精简:不再有每类别卡尔曼覆盖。卡尔曼参数统一在热键级(平滑度/预测提前量)。
 };
 
 // A single aim hotkey. Multiple HotkeyProfiles can exist; whichever one has
@@ -63,83 +41,71 @@ struct HotkeyAimClass
 struct HotkeyProfile
 {
     std::string name = "Aim";
+    // Hotkey 所属"组"。同名的热键在 UI 里会聚成一段方便管理(预设/职业/武器)。
+    // 运行时仍按 Config::hotkeys 的扁平顺序匹配,组名只影响展示和拷贝粘贴范围,
+    // 留空时归入"默认"组。
+    std::string group = u8"默认";
     std::vector<std::string> keys;                    // any-of: pressing any triggers the profile
     std::vector<HotkeyAimClass> aim_classes;          // priority-ordered
 
     int fovX = 106;
     int fovY = 74;
 
-    // 三参数瞄准控制器。
-    //   speed_x / speed_y: 远距追击的比例增益（move = speed * err * mult）
-    //   lock_strength    : 近距吸附力度 [0,1]，0 = 关闭，
-    //                      mult = 1 + 4 * lock_strength * R²/(R²+err²)
-    //                      R = 0.08 * 检测分辨率（隐藏常量）
-    // 没有积分/微分项，没有 Flick/Track 双模，没有 per-tick 钳位 ——
-    // 大移动一次推到位，准星找色控枪不被限速。
-    float speed_x = 0.6f;
-    float speed_y = 0.6f;
-    float lock_strength = 0.0f;
-    // 锁死范围 / 动态锁死阈值 (检测像素)。对应文档里"锁死范围 8-16"或
-    // "动态锁死阈值 40-65"。R 越小，吸附区越窄、越靠近准星才放大；R 越大，
-    // 整张图都偏吸附，开了锁死力度更容易抖。0 退化到 0.08 * 检测分辨率。
-    float lock_radius_px = 25.0f;
+    // 经典离散 PID,X / Y 轴各一套独立的 P / I / D(共 6 个参数,每轴恰好 3 个)。
+    // Kp 决定追击力度、Ki 修正常驻偏置(通常 0;Y 轴对抗后坐力时可小量加)、Kd 提供阻尼。
+    // 误差(检测像素)直接喂控制器,输出 lround 后送驱动。鲁棒处理(不完全微分/反算抗饱和/
+    // 积分分离/微分限幅)全部内部自适应,每轴对外仍只有 P/I/D。算法见 mouse/pid_controller.h。
+    float pid_x_p = 0.6f;
+    float pid_x_i = 0.0f;
+    float pid_x_d = 0.05f;
+    float pid_y_p = 0.6f;
+    float pid_y_i = 0.0f;
+    float pid_y_d = 0.05f;
 
-    // 瞄准曲线 (Bezier 轨迹)。Direct 模式下后续字段全部忽略。Bezier 模式时
-    // 每次锁定开始或目标 ID 切换时,以当前 pivot 为起点、目标为终点锚定一条
-    // 三次贝塞尔(P0=(0,0), P3=(1,0), P1/P2 由用户拖)。归一化坐标系 X 沿
-    // 起→终方向,Y 垂直于该方向(单位 = 起终段长度)。每帧用当前 pivot 投
-    // 影到锚定段得到进度 p,采样曲线得到偏置位置喂给 speed_x/speed_y。
-    AimTrajectoryMode aim_trajectory_mode = AimTrajectoryMode::Direct;
-    float bezier_cx1 = 0.30f;
-    float bezier_cy1 = 0.25f;
-    float bezier_cx2 = 0.70f;
-    float bezier_cy2 = -0.15f;
-    // 目标移动平滑系数 [0,1]。0 = 锚定后不再跟随目标位置(快速横移会脱靶),
-    // 1 = 每帧完全跟随(等于直线)。中间值 ≈ 一阶低通,曲线形状随目标缓慢漂移。
-    float bezier_follow_alpha = 0.15f;
-    // 目标瞬移阈值 (px)。当锚定的 target 与最新 target 距离超过此值时强制
-    // 重锚 (engage 一次新曲线),避免目标切换造成的伪轨迹。
-    float bezier_reanchor_threshold_px = 60.0f;
-
-    // Smart trigger — automatic fire. When enabled, the controller actually
-    // dispatches a left-button press (whichever input driver is bound) the
-    // moment all three gates open simultaneously:
-    //   (a) pivot inside the locked bbox shrunk by `hit_radius_frac`
-    //       (hit-probability threshold below)
-    //   (b) recent mouse-step RMS magnitude below `variance_max_px`
-    //       (gun is settled, not still flicking)
-    //   (c) cooldown elapsed since the last release.
-    // The press is held for `fire_duration_ms`, then released. After
-    // release a refractory period of the same length is enforced before
-    // another fire can trigger — caps duty cycle at 50% so the system
-    // always behaves like a controlled tap, not a stuck button. If the
-    // hotkey is released or the toggle goes false mid-fire, the button is
-    // force-released so it can never get stuck down.
+    // Smart trigger — automatic fire, rewritten as a pure geometric
+    // triggerbot decoupled from the aim controller. The crosshair (visible
+    // reticle when crosshair-colour is on, otherwise detection centre) is
+    // tested against the locked target's bounding box scaled per-axis by
+    // `hit_scale_x` / `hit_scale_y` about the target's aim anchor. The test
+    // is rectangular and uses the OBSERVED target position (never the Kalman
+    // prediction) so lead/prediction never desyncs the fire decision.
+    //
+    // State machine: the crosshair must stay inside that region for
+    // `reaction_ms` (human-like dwell) before the first press; the button is
+    // then held for `hold_ms`, released, and a `cooldown_ms` refractory is
+    // enforced before the next tap. Holding the aim hotkey is implicit (the
+    // trigger only runs while a hotkey is active). Hotkey release, toggle
+    // off, target loss, or session end all force-release the button so it can
+    // never get stuck down.
     bool  smart_trigger_enabled = false;
-    float smart_trigger_hit_radius_frac = 0.55f; // fraction of bbox half-size
-    float smart_trigger_variance_max_px = 6.0f;  // RMS px over recent steps
-    int   smart_trigger_window_frames = 8;       // window for variance calc
-    float smart_trigger_min_prob = 0.70f;        // hit-probability threshold
-    int   smart_trigger_fire_duration_ms = 40;   // press hold time per tap
+    float smart_trigger_hit_scale_x = 0.60f;  // frac of bbox half-width  (X tolerance)
+    float smart_trigger_hit_scale_y = 0.60f;  // frac of bbox half-height (Y tolerance)
+    int   smart_trigger_reaction_ms = 40;     // dwell-on-target before first press
+    int   smart_trigger_hold_ms = 45;         // left-button hold time per tap
+    int   smart_trigger_cooldown_ms = 55;     // refractory after release before next tap
 
     float predictionInterval = 0.01f;
     int prediction_futurePositions = 20;
     bool draw_futurePositions = true;
 
-    bool kalman_enabled = true;
-    float kalman_process_noise_position = 40.0f;
-    float kalman_process_noise_velocity = 1800.0f;
-    float kalman_measurement_noise = 35.0f;
-    float kalman_velocity_damping = 0.08f;
-    float kalman_max_velocity = 20000.0f;
-    int kalman_warmup_frames = 2;
-    bool kalman_compensate_detection_delay = true;
-    float kalman_additional_prediction_ms = 0.0f;
-    float kalman_reset_timeout_sec = 0.5f;
+    // 卡尔曼:精简为两个旋钮(详见 aim_kalman.h)。
+    //   smoothness [0,1] — 越大越平滑抗抖,越小越紧跟检测反应快
+    //   lead       [0,2] — 预测提前量,0=不预测,1≈物理正确,>1 主动多领先
+    // 其余(机动自适应、延迟补偿、预热、尺寸缩放…)全部内部自动。
+    bool  kalman_enabled = true;
+    float kalman_smoothness = 0.5f;
+    float kalman_lead = 1.0f;
 
     // Per-hotkey crosshair color detection toggle. Global config still owns
     // the ROI size / color palette / area filters; each hotkey just opts in.
     bool crosshair_detect_enabled = false;
+
+    // Per-hotkey laser color detection toggle. INDEPENDENT of crosshair
+    // detection: both may be on at once. When both produce a pivot the
+    // crosshair (centroid) result WINS — the laser tip is only used as a
+    // fallback when crosshair-colour found nothing this frame. Global config
+    // owns the laser ROI / palette / params (separate from the crosshair set).
+    bool laser_detect_enabled = false;
 
     // Lock-switch hysteresis. A challenger track must beat the current lock
     // by `lock_switch_score_margin` (fraction of half-diagonal) for at least
@@ -179,15 +145,28 @@ struct HotkeyProfile
     float dynamic_fov_margin_frac = 1.10f;        // bbox padding factor
     float dynamic_fov_min_radius_frac = 0.20f;    // floor as frac of base
 
-    // Threat-weighted target priority. This is the production heuristic:
-    // class score (user-selected head/body/other tiers), motion direction
-    // relative to crosshair (closing -> threatening), and hit-frame count.
-    // The score multiplies into lock candidate ranking. Set weight=0 to
-    // disable entirely (legacy ranking). Class ids may be -1 when unselected.
+    // Threat-weighted target priority. The threat score is a [0,1] blend of
+    // (a) normalized depth at the track pivot (closer = higher threat) and
+    // (b) head-class detection confidence (higher conf = higher threat).
+    // `threat_depth_head_ratio` linearly mixes the two: 0 = full depth, 1 =
+    // full head-conf. The result multiplies into the lock-candidate score
+    // via `threat_weight` (0 = disable, 1 = full multiplicative effect).
+    // `threat_head_class_id` may be -1 when no head class is selected — the
+    // head-conf term then falls back to neutral 0.5.
     bool  threat_priority_enabled = false;
     float threat_weight = 0.50f;             // 0=ignore, 1=full multiply
     int   threat_head_class_id = -1;         // user-selected head class, -1 = unset
-    int   threat_body_class_id = -1;         // user-selected body class, -1 = unset
+    float threat_depth_head_ratio = 0.5f;    // 0=full depth, 1=full head-conf
+
+    // 近距离瞄头(body→head pivot 吸附)。当一个 body(非 head)目标框够大(近距离,
+    // 框高 / 检测高 ≥ close_range_trigger_height_frac),且其内部上半区存在一个
+    // close_range_head_class_id 的 head 检测时,把该目标的瞄准点吸附到 head 框,让贴脸
+    // 大目标优先瞄头 / 上半身。只移动 pivot、不改变锁定的 track 身份,因此不会触发锁切换
+    // 或卡尔曼重置。head 类别无需加入瞄准类别列表。与 y_offset_size_decay(把大框拉向
+    // 中心)方向相反,建议二选一。默认关闭以保持旧行为。
+    bool  close_range_head_aim_enabled = false;
+    int   close_range_head_class_id = -1;          // 头部类别;-1 = 未选(功能不生效)
+    float close_range_trigger_height_frac = 0.30f; // 框高 / 检测高 ≥ 此值才触发
 
 };
 
@@ -214,13 +193,20 @@ public:
     int udp_port = 0;
     std::string tcp_ip;
     int tcp_port = 0;
-    int capture_card_index = 0;
-    int capture_card_width = 0;             // 0 = let device decide
-    int capture_card_height = 0;
-    int capture_card_fps = 0;
-    std::string capture_card_format = "AUTO"; // AUTO | NV12 | MJPG | YUY2 | RGB32
-    int capture_card_crop_width = 0;        // 0 = use full captured width
-    int capture_card_crop_height = 0;       // 0 = use full captured height
+    // eth_capture: ProSexy 原始以太网帧接收端。eth_adapter 为 npcap 设备名
+    // (\Device\NPF_{GUID}); eth_ethertype 须与发送端一致(ProSexy 默认 0x88B5)。
+    std::string eth_adapter;
+    int eth_ethertype = 0x88B5;
+    // 采集卡几何参数,由 opencv_capture 与 mf_capture 两套后端共用。
+    int opencv_capture_index = 0;
+    std::string opencv_capture_api = "DSHOW"; // DSHOW | MSMF | FFMPEG | ANY (仅 opencv)
+    std::string opencv_capture_url;           // 可选连接 URL (rtsp:// / 文件路径); 空 = 用设备索引 (仅 opencv)
+    int opencv_capture_width = 0;             // 原始采集宽度, 0 = 让设备决定
+    int opencv_capture_height = 0;            // 原始采集高度, 0 = 让设备决定
+    int opencv_capture_fps = 0;               // 采集 FPS, 0 = 设备默认
+    int capture_crop = 0;                     // 中心裁切正方形边长; >0 时驱动 detection_resolution, 0 = 整帧缩放到 detection_resolution
+    std::string capture_format = "MJPG";      // NV12 | MJPG | YUY2 | RGB32
+    bool capture_mf_gpu = true;               // 仅 mf_capture: true=GPU 解码(nvJPEG/NPP), false=CPU 解码
     int detection_resolution = 320;
     int capture_fps = 60;
     bool circle_mask = true;
@@ -248,16 +234,26 @@ public:
     float confidence_threshold = 0.15f;
     float nms_threshold = 0.50f;
     int max_detections = 20;
+    // 小目标召回增强:面积自适应置信度阈值。开启后,框面积 < small_target_area_frac
+    // × detection_resolution² 的小目标用 small_target_confidence 作为保留门槛,大目标
+    // 仍用 confidence_threshold;GPU 粗筛阈值同步降到两者较小值,让弱小目标候选先进入
+    // CPU 再按面积二次过滤。默认关闭以保持旧行为。
+    bool  small_target_enabled = false;
+    float small_target_area_frac = 0.012f;
+    float small_target_confidence = 0.06f;
     bool export_enable_fp8 = false;
     bool export_enable_fp16 = true;
     bool fixed_input_size = false;
 
     // CUDA / System
-    bool use_cuda_graph = false;
+    bool use_cuda_graph = true;
     // Double-buffer pipeline: overlap CPU post-processing of frame N with
     // GPU preprocess+inference of frame N+1. Trades ~1 frame of latency for
     // throughput. Disables CUDA Graph path when enabled (simpler code path).
-    bool use_double_buffer = false;
+    // Default ON: hides the CPU NMS / D2H sync from the inference critical
+    // path. The 1-frame extra latency is well below typical capture jitter
+    // (~8ms at 120fps), and downstream Kalman prediction compensates.
+    bool use_double_buffer = true;
     bool use_pinned_memory = true;
     int gpuMemoryReserveMB = 2048;
     bool enableGpuExclusiveMode = true;
@@ -278,6 +274,21 @@ public:
     std::string depth_model_path = "depth_anything_v2.engine";
     int depth_fps = 100;
     int depth_colormap = 18;
+    // TRT OptimizationProfile 的 OPT 档输入边长(方形)。只在导出 .engine 时被用作
+    // kernel autotune 最优尺寸,改完必须删旧 .engine 重新导出才生效。范围 [160, 640]。
+    int depth_opt_input_size = 224;
+    bool depth_show_heatmap = false;
+    // 热力图 gamma 曲线。pow(d_normalized, gamma) 后再着色。
+    // < 1 把暗端(远景)拉亮、亮端(近景)轻微压暗;> 1 反之。1 = 不变。
+    // 只影响显示,不影响深度遮罩。范围 [0.1, 5.0]。
+    float depth_heatmap_gamma = 1.0f;
+    // 在独立检测预览窗口里给每个 bbox 标注相对深度(每帧 0..1)。
+    bool depth_show_bbox_distance = false;
+    // 深度归一化时裁掉的低/高百分位。0/100 = 纯 MIN-MAX(传统行为);
+    // 把上限调到 95 可以裁掉极近离群值(贴脸的枪/手),避免远景
+    // 被压扁到 depth_norm≈0、和敌人一起被遮罩误伤。范围 [0, 50] / [50, 100]。
+    float depth_norm_clip_low_pct  = 0.0f;
+    float depth_norm_clip_high_pct = 100.0f;
     bool depth_mask_enabled = false;
     int depth_mask_fps = 5;
     int depth_mask_near_percent = 20;
@@ -325,12 +336,61 @@ public:
     // MORPH_CLOSE radius (px). 0 = off. 1–3 covers most gradient/white-
     // centred crosshair styles. >5 risks merging red noise.
     int crosshair_close_radius = 1;
+    // Anti-jitter: adaptive (One-Euro) temporal smoothing of the published
+    // pivot. 0 = off (raw). Higher = steadier when settled while staying
+    // responsive on fast moves (so it won't lag recoil/tracking). [0,1].
+    float crosshair_smooth = 0.5f;
+
     std::vector<CrosshairColorProfileConfig> crosshair_colors; // defaults to red double-band
+
+    // ---- Laser-sight color find (independent module) ----------------------
+    // Fully separate from the crosshair centroid detector above: its own
+    // enable (HotkeyProfile::laser_detect_enabled), its own colour palette,
+    // ROI and params. Both can run at once; crosshair has priority and the
+    // laser tip is only the fallback. The beam is found as a line and its AIM
+    // END (tip near centre) is reported, optionally extrapolated a few px along
+    // the beam to recover the faint gradient end. See crosshair/laser_detector.h
+    // for the geometry-based, background-robust selection (elongation gate +
+    // muzzle-below-tip orientation).
+    std::vector<CrosshairColorProfileConfig> laser_colors; // separate palette
+    // Laser sampling rectangle, freely positionable: width/height + explicit
+    // CENTRE point (x,y) in detection-image pixels. Lets the user drag the
+    // laser ROI anywhere (the beam body sits below the crosshair, often
+    // off-centre). Clamped to the frame at use time.
+    int   laser_rect_w = 160;          // detect rect width  (det px)
+    int   laser_rect_h = 240;          // detect rect height (det px)
+    int   laser_center_x = 160;        // detect ROI centre X (det px)
+    int   laser_center_y = 200;        // detect ROI centre Y (det px)
+    int   laser_min_pixel_count = 10;  // min matched pixels for a beam component
+    int   laser_close_radius = 1;      // MORPH_CLOSE radius to bridge the beam (0=off)
+    float laser_min_elongation = 3.0f; // line-likeness gate (rejects red blobs)
+    float laser_smooth = 0.5f;         // anti-jitter adaptive smoothing of the tip [0,1], 0=off
+    // Target region (the 2nd box, drawn brown) near the static screen centre
+    // where the true beam endpoint lies. The fitted line (from the reliable
+    // front segment) is projected into this box to estimate the tip — this
+    // REPLACES a fixed pixel extension, so a fuzzy/flickering visible end no
+    // longer makes the reported tip jump. The tip is clamped inside this box,
+    // which bounds over/under-extension.
+    int   laser_target_center_x = 160; // target box centre X (det px)
+    int   laser_target_center_y = 160; // target box centre Y (det px)
+    int   laser_target_rect_w = 60;    // target box width  (det px)
+    int   laser_target_rect_h = 60;    // target box height (det px)
 
     // Aim hotkeys. Must contain at least one entry so the UI always has
     // something to show; defaultConfig() populates a single "Aim" hotkey
     // bound to RightMouseButton.
     std::vector<HotkeyProfile> hotkeys;
+
+    // Macro layer (G HUB-compatible Lua). When `macro_enabled` is true the
+    // runtime loads `macro_script_path` at startup and dispatches mouse-
+    // button events to its OnEvent callback. macro_primary_button_events
+    // mirrors the script-side EnablePrimaryMouseButtonEvents() default —
+    // when true the script will receive LMB events without having to opt
+    // in. Persisted so the user's last-used script auto-attaches across
+    // process restarts.
+    bool        macro_enabled = false;
+    std::string macro_script_path;
+    bool        macro_primary_button_events = false;
 
     bool loadConfig(const std::string& filename = "config.ini");
     bool saveConfig(const std::string& filename = "config.ini");

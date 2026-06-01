@@ -22,8 +22,13 @@ cv::Rect clipped_center_roi(const cv::Size& frame, int rect_w, int rect_h)
 {
     const int w = std::max(4, rect_w);
     const int h = std::max(4, rect_h);
+    // The ROI's bottom-edge midpoint is anchored to the static frame centre,
+    // so the square sits ABOVE the centre line (entire square shifted up by
+    // h/2 compared to a centred ROI). x remains horizontally centred. The
+    // whole region is then nudged DOWN by a fixed vertical offset.
+    constexpr int kVerticalOffset = 10;
     int x = frame.width / 2 - w / 2;
-    int y = frame.height / 2 - h / 2;
+    int y = frame.height / 2 - h + kVerticalOffset;
     cv::Rect roi(x, y, w, h);
     return roi & cv::Rect(0, 0, frame.width, frame.height);
 }
@@ -123,8 +128,26 @@ std::optional<cv::Point2f> CrosshairDetector::detect(
 
     const float local_x = static_cast<float>(m.m10 / m.m00);
     const float local_y = static_cast<float>(m.m01 / m.m00);
-    return cv::Point2f(local_x + static_cast<float>(roi.x),
-                       local_y + static_cast<float>(roi.y));
+    const float global_x = local_x + static_cast<float>(roi.x);
+    const float global_y = local_y + static_cast<float>(roi.y);
+
+    // Centring gate. A real reticle (ring, dot, or thin cross) sits on the
+    // frame centre — that is exactly what the ROI is anchored to. Off-centre
+    // red mass (a health bar, kill-feed text, a scene prop bleeding into the
+    // ROI) pulls the centroid toward one side. Reject hits whose centroid
+    // strays too far from the frame centre so they never get published as a
+    // pivot. A centred ring whose radius approaches the ROI edge still passes
+    // because its mass is symmetric, so the centroid stays put. The tolerance
+    // scales with the ROI to stay resolution-independent.
+    // NOTE: 0.5 is a conservative starting point — tighten it (toward ~0.3)
+    // if off-centre reds still leak through, using the debug preview to tune.
+    const float cx  = bgrFrame.cols * 0.5f;
+    const float cy  = bgrFrame.rows * 0.5f;
+    const float tol = 0.5f * static_cast<float>(std::min(roi.width, roi.height));
+    if (std::hypot(global_x - cx, global_y - cy) > tol)
+        return std::nullopt;
+
+    return cv::Point2f(global_x, global_y);
 }
 
 } // namespace crosshair

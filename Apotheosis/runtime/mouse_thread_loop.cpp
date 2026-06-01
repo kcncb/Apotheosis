@@ -14,6 +14,7 @@
 #include "active_hotkey.h"
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
+#include "depth/depth_mask.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
@@ -31,13 +32,9 @@ void assignInputDevices();
 namespace
 {
 
-// Build mouse runtime parameters from a hotkey, optionally honouring a
-// per-class Kalman override. When `class_id >= 0` and the matching
-// HotkeyAimClass has `kalman_override_enabled = true`, the five overridden
-// Kalman noise/damping/velocity fields replace the hotkey-level values. All
-// other Kalman knobs (enabled flag, warmup, delay compensation, reset
-// timeout) stay at the hotkey level �?they are orthogonal to per-class
-// motion characteristics.
+// Build mouse runtime parameters from a hotkey. `class_id` is accepted for
+// call-site compatibility but no longer used — per-class Kalman overrides were
+// removed in the simplification (Kalman is now just 启用/平滑度/预测提前量).
 MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
 {
     MouseRuntimeParams p;
@@ -51,56 +48,34 @@ MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
 
     p.fovX = hk.fovX;
     p.fovY = hk.fovY;
-    p.aim.speed_x       = static_cast<double>(hk.speed_x);
-    p.aim.speed_y       = static_cast<double>(hk.speed_y);
-    p.aim.lock_strength = static_cast<double>(hk.lock_strength);
-    p.aim.lock_radius_px = static_cast<double>(hk.lock_radius_px);
-    p.aim.lock_attenuation = 1.0;
-
-    p.bezier_enabled = (hk.aim_trajectory_mode == AimTrajectoryMode::Bezier);
-    p.bezier.curve.cx1 = static_cast<double>(hk.bezier_cx1);
-    p.bezier.curve.cy1 = static_cast<double>(hk.bezier_cy1);
-    p.bezier.curve.cx2 = static_cast<double>(hk.bezier_cx2);
-    p.bezier.curve.cy2 = static_cast<double>(hk.bezier_cy2);
-    p.bezier.follow_alpha = static_cast<double>(hk.bezier_follow_alpha);
-    p.bezier.reanchor_threshold_px = static_cast<double>(hk.bezier_reanchor_threshold_px);
+    // PID gains map directly (no scaling). err in detection pixels → raw
+    // controller output → lround → driver counts. X / Y 各一套,每轴仅 P/I/D。
+    p.pid_x.p = static_cast<double>(hk.pid_x_p);
+    p.pid_x.i = static_cast<double>(hk.pid_x_i);
+    p.pid_x.d = static_cast<double>(hk.pid_x_d);
+    p.pid_y.p = static_cast<double>(hk.pid_y_p);
+    p.pid_y.i = static_cast<double>(hk.pid_y_i);
+    p.pid_y.d = static_cast<double>(hk.pid_y_d);
 
     p.predictionInterval = hk.predictionInterval;
 
     // Smart trigger wiring.
-    p.smart_trigger_enabled          = hk.smart_trigger_enabled;
-    p.smart_trigger_hit_radius_frac  = hk.smart_trigger_hit_radius_frac;
-    p.smart_trigger_variance_max_px  = hk.smart_trigger_variance_max_px;
-    p.smart_trigger_window_frames    = hk.smart_trigger_window_frames;
-    p.smart_trigger_min_prob         = hk.smart_trigger_min_prob;
-    p.smart_trigger_fire_duration_ms = hk.smart_trigger_fire_duration_ms;
+    p.smart_trigger_enabled      = hk.smart_trigger_enabled;
+    p.smart_trigger_hit_scale_x  = hk.smart_trigger_hit_scale_x;
+    p.smart_trigger_hit_scale_y  = hk.smart_trigger_hit_scale_y;
+    p.smart_trigger_reaction_ms  = hk.smart_trigger_reaction_ms;
+    p.smart_trigger_hold_ms      = hk.smart_trigger_hold_ms;
+    p.smart_trigger_cooldown_ms  = hk.smart_trigger_cooldown_ms;
 
-    p.kalman.enabled = hk.kalman_enabled;
-    p.kalman.process_noise_position = hk.kalman_process_noise_position;
-    p.kalman.process_noise_velocity = hk.kalman_process_noise_velocity;
-    p.kalman.measurement_noise = hk.kalman_measurement_noise;
-    p.kalman.velocity_damping = hk.kalman_velocity_damping;
-    p.kalman.max_velocity = hk.kalman_max_velocity;
-    p.kalman.warmup_frames = hk.kalman_warmup_frames;
-    p.kalman_compensate_detection_delay = hk.kalman_compensate_detection_delay;
-    p.kalman_additional_prediction_ms = hk.kalman_additional_prediction_ms;
-    p.kalman_reset_timeout_sec = hk.kalman_reset_timeout_sec;
+    // 卡尔曼:仅 启用 / 平滑度 / 预测提前量。时序相关项固定为合理默认(内部不再暴露)。
+    p.kalman.enabled    = hk.kalman_enabled;
+    p.kalman.smoothness = hk.kalman_smoothness;
+    p.kalman.lead       = hk.kalman_lead;
+    p.kalman_compensate_detection_delay = true;
+    p.kalman_additional_prediction_ms   = 0.0f;
+    p.kalman_reset_timeout_sec          = 0.5f;
 
-    if (class_id >= 0)
-    {
-        for (const auto& ac : hk.aim_classes)
-        {
-            if (ac.class_id != class_id || !ac.kalman_override_enabled)
-                continue;
-            p.kalman.process_noise_position = ac.kalman_process_noise_position;
-            p.kalman.process_noise_velocity = ac.kalman_process_noise_velocity;
-            p.kalman.measurement_noise      = ac.kalman_measurement_noise;
-            p.kalman.velocity_damping       = ac.kalman_velocity_damping;
-            p.kalman.max_velocity           = ac.kalman_max_velocity;
-            break;
-        }
-    }
-
+    (void)class_id;   // 不再有每类别覆盖
     return p;
 }
 
@@ -123,7 +98,10 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     PivotResolved out;
     out.x = centre;
     out.y = centre;
-    if (!profile || !profile->crosshair_detect_enabled)
+    // Use the published colour pivot when EITHER crosshair-colour or laser
+    // detection is enabled for this hotkey (the runtime already applies the
+    // crosshair-priority / laser-fallback policy before publishing).
+    if (!profile || !(profile->crosshair_detect_enabled || profile->laser_detect_enabled))
         return out;
 
     const auto snap = crosshair_runtime::read();
@@ -171,14 +149,25 @@ void mouseThreadFunction(MouseThread& mouseThread)
     int lastVersion = -1;
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
+    std::vector<float> confidences;
     MultiTargetTracker targetTracker;
     std::optional<AimbotTarget> activeTarget;
-    auto lastTrackerUpdate = std::chrono::steady_clock::time_point::min();
+    // Wall-clock of the last frame our LOCKED target was actually observed
+    // (not merely "some detection arrived"). activeTarget staleness keys off
+    // this so a vanished target releases promptly even while other targets
+    // keep producing detections.
+    auto lastAimObserved = std::chrono::steady_clock::time_point::min();
 
     int last_hotkey_index_seen = -2; // force first-pass update
     int last_resolution_seen = -1;
     int last_kalman_class_id = -1;   // track class id of last Kalman push so
                                      // we only re-apply on class change
+    int last_locked_track_id = -1;   // id of the track we last aimed at; a
+                                     // change means the lock handed off to a
+                                     // new target and the predictor must be
+                                     // reset so the old target's Kalman
+                                     // position/velocity isn't applied to the
+                                     // new one as a phantom jump
 
     // Track the last crosshair snapshot we acted on. When a new snapshot
     // arrives between detection events (recoil moved the visible reticle)
@@ -190,6 +179,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
     {
         bool hasNewDetection = false;
         bool hasAimObservation = false;
+        bool detectionStale = false;
 
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);
@@ -203,9 +193,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
             {
                 boxes = detectionBuffer.boxes;
                 classes = detectionBuffer.classes;
+                confidences = detectionBuffer.confidences;
                 lastVersion = detectionBuffer.version;
                 hasNewDetection = true;
             }
+
+            // Inference stalled relative to the detector's own cadence: the
+            // cached boxes/lock no longer reflect the live frame. Treat the
+            // lock as "no target" below so we don't keep driving toward a
+            // detection that's already gone.
+            detectionStale = detectionBuffer.staleLocked();
         }
 
         if (input_method_changed.load())
@@ -216,7 +213,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
 
         // Snapshot the currently-active hotkey under configMutex so the UI
-        // can't mutate config.hotkeys out from under us while we read.
+        // can't mutate config.hotkeys out from under us while we read. Keep
+        // the critical section to just the vector read; the atomic store and
+        // anything that doesn't touch config.* is hoisted out so UI writes
+        // aren't blocked on us.
         HotkeyProfile profile_snapshot;
         const HotkeyProfile* profile_ptr = nullptr;
         int active_idx = runtime::g_active_hotkey_index.load();
@@ -227,8 +227,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 profile_snapshot = config.hotkeys[active_idx];
                 profile_ptr = &profile_snapshot;
             }
-            aiming.store(profile_ptr != nullptr);
         }
+        aiming.store(profile_ptr != nullptr);
 
         const bool hotkey_changed = (active_idx != last_hotkey_index_seen);
         const bool resolution_changed = (config.detection_resolution != last_resolution_seen);
@@ -247,6 +247,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (resolution_changed)
             {
+                last_locked_track_id = -1;
                 targetTracker.reset();
                 {
                     std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
@@ -273,9 +274,23 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 visibilityMask.release();
             }
 
+            // Snapshot the normalized depth map (CV_8UC1, 255 = closest) for
+            // the threat-scoring "depth" term. Same dim/type validation as the
+            // visibility mask; on mismatch drop and fall back to a neutral
+            // depth score inside compute_threat_score.
+            cv::Mat depthNormalized = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
+            if (!depthNormalized.empty()
+                && (depthNormalized.cols != config.detection_resolution
+                    || depthNormalized.rows != config.detection_resolution
+                    || depthNormalized.type() != CV_8UC1))
+            {
+                depthNormalized.release();
+            }
+
             TrackerUpdate in;
             in.boxes = &boxes;
             in.classes = &classes;
+            in.confidences = &confidences;
             in.aim_class_ids = std::move(selection.aim_class_ids);
             in.y_offsets = std::move(selection.y_offsets);
             in.priority_class_ids = std::move(selection.priority_class_ids);
@@ -283,6 +298,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             in.screen_height = config.detection_resolution;
             in.keep_current_lock = has_active_profile;
             in.visibility_mask = visibilityMask.empty() ? nullptr : &visibilityMask;
+            in.depth_normalized = depthNormalized.empty() ? nullptr : &depthNormalized;
             // Dynamic FOV: compute the effective aim region BEFORE
             // tracker.update() so the candidate gate is in effect this
             // frame. Uses last frame's locked target (one-frame delay,
@@ -325,6 +341,15 @@ void mouseThreadFunction(MouseThread& mouseThread)
             g_dynamic_fov_radius_x_px.store(fov_rx);
             g_dynamic_fov_radius_y_px.store(fov_ry);
 
+            // Tell the capture thread whether the normalized depth map must be
+            // produced for threat scoring (ratio < 1 => depth term has nonzero
+            // weight), even when no depth display option is enabled. Cleared
+            // when there is no active profile.
+            g_threat_depth_required.store(
+                profile_ptr != nullptr
+                && profile_ptr->threat_priority_enabled
+                && profile_ptr->threat_depth_head_ratio < 1.0f);
+
             if (profile_ptr)
             {
                 in.lock_switch_score_margin       = profile_ptr->lock_switch_score_margin;
@@ -336,12 +361,26 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 in.threat_priority_enabled        = profile_ptr->threat_priority_enabled;
                 in.threat_weight                  = profile_ptr->threat_weight;
                 in.threat_head_class_id           = profile_ptr->threat_head_class_id;
-                in.threat_body_class_id           = profile_ptr->threat_body_class_id;
+                in.threat_depth_head_ratio        = profile_ptr->threat_depth_head_ratio;
                 in.fov_radius_x_px                = fov_rx;
                 in.fov_radius_y_px                = fov_ry;
+                in.close_range_head_aim_enabled    = profile_ptr->close_range_head_aim_enabled;
+                in.close_range_head_class_id       = profile_ptr->close_range_head_class_id;
+                in.close_range_trigger_height_frac = profile_ptr->close_range_trigger_height_frac;
             }
+
+            // Aim origin for target selection: rank candidates by proximity to
+            // the live crosshair-colour pivot (where the reticle actually sits
+            // after recoil), falling back to the detection-image centre when
+            // crosshair-colour isn't active or hasn't hit this frame.
+            {
+                const auto sel_pivot =
+                    resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
+                in.aim_origin_x = sel_pivot.x;
+                in.aim_origin_y = sel_pivot.y;
+            }
+
             targetTracker.update(in);
-            lastTrackerUpdate = std::chrono::steady_clock::now();
 
             {
                 std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
@@ -352,6 +391,24 @@ void mouseThreadFunction(MouseThread& mouseThread)
             LockedTargetInfo lockInfo;
             if (has_active_profile && targetTracker.getLockedTarget(lockInfo) && lockInfo.observedThisFrame)
             {
+                // Lock handoff. When the lock moves to a different track (the
+                // previous target died/left and a new one was acquired) the
+                // predictor still holds the OLD target's Kalman position and
+                // velocity. Feeding the new target's pivot into that state
+                // looks like a huge instantaneous jump, so the filter spits
+                // out a wild velocity and the aim flings around / circles
+                // while settling. Reset the predictor on the transition so the
+                // new target starts from a clean state. (resetPrediction also
+                // clears queued moves and target_detected_; we re-arm both
+                // below.) Force a per-class param re-push too, since the reset
+                // wiped the Kalman noise config.
+                if (lockInfo.trackId != last_locked_track_id)
+                {
+                    mouseThread.resetPrediction();
+                    last_locked_track_id = lockInfo.trackId;
+                    last_kalman_class_id = -1;
+                }
+
                 // Re-push mouse params when the locked target's class changes
                 // so the per-class Kalman override (e.g. head vs body) takes
                 // effect. updateParams already resets the Kalman state when
@@ -368,16 +425,23 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
                 activeTarget = lockInfo.target;
                 hasAimObservation = true;
+                lastAimObserved = std::chrono::steady_clock::now();
                 mouseThread.setLastTargetTime(std::chrono::steady_clock::now());
                 mouseThread.setTargetDetected(true);
 
-                // Hand the bbox half-extent (short side / 2) to the mouse
-                // loop so the smart trigger can compute hit probability
-                // without re-reading detection state. Using the short side
-                // keeps tall-thin targets (players) from falsely claiming
-                // head-sized hitboxes.
+                // Kalman measurement-noise scaling keys off the short-side
+                // half-extent (tall-thin player boxes shouldn't claim large,
+                // confident hitboxes for the filter).
                 const double half_extent = std::min(activeTarget->w, activeTarget->h) * 0.5;
                 mouseThread.setLockedTargetBboxHalfExtent(half_extent);
+
+                // Hand the full observed box (aim anchor + per-axis half
+                // extents) to the triggerbot so it can test the live
+                // crosshair against the real, axis-aligned target rectangle.
+                mouseThread.setLockedTargetBox(activeTarget->pivotX,
+                                               activeTarget->pivotY,
+                                               activeTarget->w * 0.5,
+                                               activeTarget->h * 0.5);
 
 
                 auto futurePositions = mouseThread.predictFuturePositions(
@@ -394,6 +458,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 mouseThread.setTargetDetected(false);
                 mouseThread.clearQueuedMoves();
                 mouseThread.setLockedTargetBboxHalfExtent(0.0);
+                mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
             }
 
             // Aim-trajectory replay: push a single snapshot per detection
@@ -452,15 +517,36 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
         }
 
+        // Detection went stale (inference stalled): drop the lock now instead
+        // of waiting out the staleMs window. Without this the crosshair-feedback
+        // re-push keeps oscillating toward the departed target until the next
+        // detection lands — the "circles with nothing on screen" symptom.
+        if (activeTarget && detectionStale)
+        {
+            activeTarget.reset();
+            mouseThread.clearFuturePositions();
+            mouseThread.setTargetDetected(false);
+            mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
+        }
+
         if (activeTarget)
         {
             const int fps = std::max(1, captureFps.load());
             const int staleMs = std::clamp(2000 / fps, 25, 180);
-            if (std::chrono::steady_clock::now() - lastTrackerUpdate > std::chrono::milliseconds(staleMs))
+            // Key off the locked target's last OBSERVATION, not the last
+            // detection batch. Otherwise, when the first target disappears but
+            // a replacement target keeps detections flowing, this never fires:
+            // activeTarget stays pinned to the dead target's last position and
+            // Path B keeps re-pushing toward that ghost point through the
+            // crosshair-colour feedback loop — the "aim wobbles / circles in
+            // place while hunting the next target" symptom. The short window
+            // still preserves Path B re-push across brief recoil dropouts.
+            if (std::chrono::steady_clock::now() - lastAimObserved > std::chrono::milliseconds(staleMs))
             {
                 activeTarget.reset();
                 mouseThread.clearFuturePositions();
                 mouseThread.setTargetDetected(false);
+                mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
             }
         }
 
@@ -494,10 +580,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
             else if (!activeTarget)
             {
-                // No live target: try Kalman extrapolation, otherwise
-                // stop sending moves so the gun can settle.
-                if (!mouseThread.moveMouseToPredictedTarget(pivot.x, pivot.y))
-                    mouseThread.clearQueuedMoves();
+                // 目标已丢失:立即停止驱动,不再向卡尔曼最后锁定的位置外推。
+                // 否则准星会滑向那个"幽灵点"(尤其打静止目标:目标消失后准星仍被
+                // 推向它最后所在处,滑动一段距离,且与预测提前量无关 —— 之前的 bug)。
+                // 短暂检测丢帧由上面"目标仍锁定"的 Path B 负责,这里只处理真正丢失。
+                mouseThread.clearQueuedMoves();
             }
             // else: have target, no fresh event — sleep until something changes.
         }

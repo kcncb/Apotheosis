@@ -58,7 +58,7 @@ std::vector<CrosshairColorBand> default_red_bands();
 // Stateless detector: given a full BGR frame in detection-image space, returns
 // the centroid (x, y) in the same coordinate space of the reticle pixel blob
 // that sits closest to the frame center, or std::nullopt if nothing passes
-// the filter.
+// the filter. For laser-style reticles use LaserDetector instead.
 class CrosshairDetector
 {
 public:

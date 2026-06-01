@@ -25,48 +25,48 @@ MouseRuntimeParams sanitize(MouseRuntimeParams p)
     if (p.detection_resolution < 32) p.detection_resolution = 32;
     if (p.fovX < 1) p.fovX = 1;
     if (p.fovY < 1) p.fovY = 1;
-    if (!(p.aim.speed_x >= 0.0)) p.aim.speed_x = 0.0;
-    if (p.aim.speed_x > 2.0)     p.aim.speed_x = 2.0;
-    if (!(p.aim.speed_y >= 0.0)) p.aim.speed_y = 0.0;
-    if (p.aim.speed_y > 2.0)     p.aim.speed_y = 2.0;
-    if (!(p.aim.lock_strength >= 0.0)) p.aim.lock_strength = 0.0;
-    if (p.aim.lock_strength > 1.0)     p.aim.lock_strength = 1.0;
-    if (p.smart_trigger_window_frames < 2) p.smart_trigger_window_frames = 2;
-    if (p.smart_trigger_window_frames > 60) p.smart_trigger_window_frames = 60;
-    if (!(p.smart_trigger_hit_radius_frac > 0.0f)) p.smart_trigger_hit_radius_frac = 0.0001f;
-    if (p.smart_trigger_hit_radius_frac > 1.0f) p.smart_trigger_hit_radius_frac = 1.0f;
-    if (!(p.smart_trigger_variance_max_px >= 0.0f)) p.smart_trigger_variance_max_px = 0.0f;
-    if (!(p.smart_trigger_min_prob >= 0.0f)) p.smart_trigger_min_prob = 0.0f;
-    if (p.smart_trigger_min_prob > 1.0f) p.smart_trigger_min_prob = 1.0f;
-    if (p.smart_trigger_fire_duration_ms < 5)   p.smart_trigger_fire_duration_ms = 5;
-    if (p.smart_trigger_fire_duration_ms > 1000) p.smart_trigger_fire_duration_ms = 1000;
+    if (!(p.pid_x.p >= 0.0)) p.pid_x.p = 0.0;
+    if (!(p.pid_x.i >= 0.0)) p.pid_x.i = 0.0;
+    if (!(p.pid_x.d >= 0.0)) p.pid_x.d = 0.0;
+    if (!(p.pid_y.p >= 0.0)) p.pid_y.p = 0.0;
+    if (!(p.pid_y.i >= 0.0)) p.pid_y.i = 0.0;
+    if (!(p.pid_y.d >= 0.0)) p.pid_y.d = 0.0;
+    p.smart_trigger_hit_scale_x = std::clamp(p.smart_trigger_hit_scale_x, 0.05f, 1.0f);
+    p.smart_trigger_hit_scale_y = std::clamp(p.smart_trigger_hit_scale_y, 0.05f, 1.0f);
+    p.smart_trigger_reaction_ms = std::clamp(p.smart_trigger_reaction_ms, 0, 1000);
+    p.smart_trigger_hold_ms     = std::clamp(p.smart_trigger_hold_ms,     5, 5000);
+    p.smart_trigger_cooldown_ms = std::clamp(p.smart_trigger_cooldown_ms, 0, 5000);
     return p;
 }
 
-bool aim_gains_equal(const aim::AimGains& a, const aim::AimGains& b)
+bool pid_gains_equal(const aim::PidGains& a, const aim::PidGains& b)
 {
-    return a.speed_x == b.speed_x
-        && a.speed_y == b.speed_y
-        && a.lock_strength == b.lock_strength;
+    return a.p == b.p && a.i == b.i && a.d == b.d;
 }
 
 } // namespace
 
 // -------------------------------------------------------------------------
-// Smart-trigger global state. Lives at namespace scope so the overlay can
-// peek at it cheaply (atomic read, no lock). The trigger NEVER actuates the
-// mouse — it's a hint surface for the user to wire to a virtual key on
-// their hardware (kmbox / makcu) if they want.
+// Smart-trigger telemetry. Lives at namespace scope so the overlay can peek
+// at it cheaply (atomic read, no lock). The trigger DOES actuate the bound
+// input device (left button) — these mirror its state for the UI:
+//   g_smart_trigger_ready              -> true while the button is held down
+//   g_smart_trigger_hit_prob           -> on-target fraction [0,1] (1 = dead-centre)
+//   g_smart_trigger_recent_variance_px -> current on-target dwell time in ms
 // -------------------------------------------------------------------------
 std::atomic<bool>   g_smart_trigger_ready{ false };
 std::atomic<float>  g_smart_trigger_hit_prob{ 0.0f };
 std::atomic<float>  g_smart_trigger_recent_variance_px{ 0.0f };
 
 // -------------------------------------------------------------------------
-// Aim telemetry. Read-only from the overlay; the controller publishes the
-// latest crosshair-to-target error in detection pixels.
+// Flick / Track telemetry. Read-only from the overlay; the controller
+// publishes the latest crosshair-to-target error and which gain set
+// (Flick vs Track) is active so the user can tune the threshold.
 // -------------------------------------------------------------------------
 std::atomic<float> g_pid_last_err_px{ 0.0f };
+// false = Flick(远/快甩增益), true = Track(近/稳跟增益)。供 UI 显示。
+std::atomic<bool>  g_pid_mode_track{ false };
+std::atomic<bool>  g_threat_depth_required{ false };
 
 // Dynamic-FOV telemetry — published from mouse_thread_loop, consumed by
 // the overlay to draw the aim region indicator.
@@ -149,6 +149,8 @@ void MouseThread::sendLeftUpToDriver()
 
 void MouseThread::forceTriggerRelease()
 {
+    // Always drop the dwell so a re-acquire must re-satisfy the reaction time.
+    on_target_ = false;
     if (!firing_active_)
         return;
     sendLeftUpToDriver();
@@ -164,15 +166,12 @@ void MouseThread::updateParams(const MouseRuntimeParams& in)
     const bool resolution_changed = first_time ||
         sanitized.detection_resolution != params_.detection_resolution;
     const bool gains_changed = first_time ||
-        !aim_gains_equal(sanitized.aim, params_.aim);
+        !pid_gains_equal(sanitized.pid_x, params_.pid_x) ||
+        !pid_gains_equal(sanitized.pid_y, params_.pid_y);
     const bool kalman_changed = first_time ||
-        sanitized.kalman.enabled != params_.kalman.enabled ||
-        sanitized.kalman.process_noise_position != params_.kalman.process_noise_position ||
-        sanitized.kalman.process_noise_velocity != params_.kalman.process_noise_velocity ||
-        sanitized.kalman.measurement_noise != params_.kalman.measurement_noise ||
-        sanitized.kalman.velocity_damping != params_.kalman.velocity_damping ||
-        sanitized.kalman.max_velocity != params_.kalman.max_velocity ||
-        sanitized.kalman.warmup_frames != params_.kalman.warmup_frames;
+        sanitized.kalman.enabled    != params_.kalman.enabled ||
+        sanitized.kalman.smoothness != params_.kalman.smoothness ||
+        sanitized.kalman.lead       != params_.kalman.lead;
 
     params_ = sanitized;
 
@@ -181,41 +180,23 @@ void MouseThread::updateParams(const MouseRuntimeParams& in)
     center_x_ = screen_width_ * 0.5;
     center_y_ = screen_height_ * 0.5;
 
-    aim_.setGains(params_.aim);
+    // 积分分离阈值与输出饱和限现由 PidController2D 内部按画面尺度自算(见 pid_controller.h),
+    // 不再在此设置。X / Y 各一套独立增益。
+    pid_.setScreenExtent(screen_width_);
+    pid_.setGains(params_.pid_x, params_.pid_y);
     if (first_time || gains_changed)
-        aim_.reset();
+        pid_.reset();
 
-    // Bezier 轨迹控制器:始终把最新参数推下去;速度从 aim 复制,曲线/跟随
-    // 由 bezier_* 字段提供。参数变更不强制 reset 锚定 (会在下一次 engage
-    // 条件满足时自然重锚),但在第一次或速度变化时清掉残留状态。
-    {
-        aim::BezierParams bp = params_.bezier;
-        bp.speed_x = params_.aim.speed_x;
-        bp.speed_y = params_.aim.speed_y;
-        bezier_aim_.setParams(bp);
-        if (first_time || gains_changed)
-            bezier_aim_.reset();
-    }
-
-    // Resize the variance ring to match the current window.
-    {
-        const size_t cap = static_cast<size_t>(std::max(2, params_.smart_trigger_window_frames));
-        if (recent_dx_.size() != cap)
-        {
-            recent_dx_.assign(cap, 0);
-            recent_dy_.assign(cap, 0);
-            recent_steps_head_ = 0;
-        }
-    }
     g_smart_trigger_ready.store(false);
     g_smart_trigger_hit_prob.store(0.0f);
     g_smart_trigger_recent_variance_px.store(0.0f);
 
     // Param change implies the user may have toggled the trigger or swapped
-    // hotkey — drop any in-progress fire so we don't carry it across
-    // contexts.
+    // hotkey — drop any in-progress fire and reset the dwell so we don't
+    // carry trigger state across contexts.
     forceTriggerRelease();
     fire_cooldown_until_ = {};
+    on_target_ = false;
 
     targetKalman_.setSettings(params_.kalman);
     if (first_time || kalman_changed || resolution_changed)
@@ -325,38 +306,48 @@ double MouseThread::currentPredictionLookaheadSec(double detectionDelaySec) cons
 
 void MouseThread::driveAimToTarget(double targetX, double targetY,
                                    double pivotX, double pivotY,
-                                   double lock_attenuation)
+                                   double outputScale)
 {
     // err = target − pivot. Pivot is the visible reticle (crosshair-color
-    // detected) when fed by the loop, otherwise screen centre. Recoil shows
-    // up here as an extra Y component on err, and the no-clamp controller
-    // is free to issue whatever counter-move the gains produce.
-    double errX = targetX - pivotX;
-    double errY = targetY - pivotY;
+    // detected) when fed by the loop, otherwise detection-image centre.
+    // Recoil shows up here as an extra Y component on err, and the PID is
+    // free to issue whatever counter-move the gains produce.
+    const double errX = targetX - pivotX;
+    const double errY = targetY - pivotY;
     const double errPx = std::hypot(errX, errY);
     g_pid_last_err_px.store(static_cast<float>(errPx));
 
-    prev_time_ = std::chrono::steady_clock::now();
+    // Wall-clock dt since the last PID step on this thread, so derivative /
+    // integral terms have correct units across cadence changes (Path A
+    // detection events vs Path B crosshair re-pushes run at different rates).
+    const auto now = std::chrono::steady_clock::now();
+    double dt = 1.0 / 120.0;
+    if (has_prev_time_)
+        dt = std::chrono::duration<double>(now - prev_time_).count();
+    prev_time_ = now;
     has_prev_time_ = true;
+    if (!(dt > 1e-6)) dt = 1e-6;
+    if (dt > 0.25)    dt = 0.25;
 
-    // Bezier 轨迹模式:用曲线控制器把直线 err 替换成曲线偏置后的等效 err,
-    // 后续仍走同一份 P 控制器残差累积。锁定 ID 这一层不可见,传 -1 由
-    // controller 用距离阈值兜底重锚。
-    if (params_.bezier_enabled)
-    {
-        auto [bx, by] = bezier_aim_.computeError(targetX, targetY,
-                                                 pivotX, pivotY, -1);
-        errX = bx;
-        errY = by;
-    }
+    // X / Y 各一套独立 PID(每轴 P/I/D)。卡尔曼负责"目标在哪/将到哪",PID 只负责把
+    // 准星平稳驱到该点。鲁棒处理全部内部,见 pid_controller.h。
+    pid_.setGains(params_.pid_x, params_.pid_y);
+    auto [rawX, rawY] = pid_.step(errX, errY, dt);
 
-    aim::AimGains g = params_.aim;
-    g.lock_attenuation = std::clamp(lock_attenuation, 0.0, 1.0);
-    aim_.setGains(g);
-    auto [mx, my] = aim_.step(errX, errY, screen_width_);
+    // Path B passes outputScale < 1 to damp close-range jitter (stale target +
+    // recoil fed at full gain); Path A uses 1.0.
+    rawX *= outputScale;
+    rawY *= outputScale;
+
+    const int mx = static_cast<int>(std::lround(rawX));
+    const int my = static_cast<int>(std::lround(rawY));
     queueMove(mx, my);
 
-    updateSmartTrigger(errPx, mx, my);
+    // The triggerbot decides purely on crosshair-vs-target geometry, using
+    // the OBSERVED target (set via setLockedTargetBox) rather than this
+    // step's PID target — which may be a Kalman lead/prediction and would
+    // desync the fire decision. Pass the crosshair (pivotX/pivotY).
+    updateSmartTrigger(pivotX, pivotY);
 }
 
 void MouseThread::setLockedTargetBboxHalfExtent(double half_extent_px)
@@ -364,99 +355,91 @@ void MouseThread::setLockedTargetBboxHalfExtent(double half_extent_px)
     locked_bbox_half_extent_px_.store(half_extent_px);
 }
 
-void MouseThread::updateSmartTrigger(double errPx, int dx, int dy)
+void MouseThread::setLockedTargetBox(double pivotX, double pivotY,
+                                     double halfW, double halfH)
+{
+    trig_target_x_.store(pivotX);
+    trig_target_y_.store(pivotY);
+    trig_half_w_.store(halfW);
+    trig_half_h_.store(halfH);
+}
+
+void MouseThread::updateSmartTrigger(double crosshairX, double crosshairY)
 {
     const auto now = std::chrono::steady_clock::now();
 
-    // Trigger off-switch: any time the toggle is false we must release if
-    // we're still mid-fire. Same is true if the locked target evaporated
-    // (half_extent goes to 0).
+    // Off-switch: release immediately if we were mid-fire and clear telemetry.
     if (!params_.smart_trigger_enabled)
     {
-        if (firing_active_)
-            forceTriggerRelease();
+        forceTriggerRelease();
         g_smart_trigger_ready.store(false);
         g_smart_trigger_hit_prob.store(0.0f);
+        g_smart_trigger_recent_variance_px.store(0.0f);
         return;
     }
 
-    // Push latest step into the variance ring.
-    if (recent_dx_.empty() || recent_dy_.empty())
-    {
-        const size_t cap = static_cast<size_t>(std::max(2, params_.smart_trigger_window_frames));
-        recent_dx_.assign(cap, 0);
-        recent_dy_.assign(cap, 0);
-        recent_steps_head_ = 0;
-    }
-    const size_t cap = recent_dx_.size();
-    recent_dx_[recent_steps_head_] = dx;
-    recent_dy_[recent_steps_head_] = dy;
-    recent_steps_head_ = (recent_steps_head_ + 1) % cap;
+    // --- On-target test --------------------------------------------------
+    // Rectangular hit region centred on the observed target anchor, scaled
+    // per-axis by hit_scale_{x,y}. half_w/half_h == 0 ⇒ no locked target.
+    const double halfW = trig_half_w_.load();
+    const double halfH = trig_half_h_.load();
+    const double tolX  = halfW * static_cast<double>(params_.smart_trigger_hit_scale_x);
+    const double tolY  = halfH * static_cast<double>(params_.smart_trigger_hit_scale_y);
 
-    // RMS magnitude over the window. We use combined dx/dy because either
-    // axis being noisy is a valid "gun isn't settled" signal.
-    double sumsq = 0.0;
-    for (size_t i = 0; i < cap; ++i)
+    bool on_target = false;
+    double hit_frac = 0.0; // 1 = dead-centre, 0 = at/over the edge
+    if (tolX > 0.5 && tolY > 0.5)
     {
-        const double v = std::hypot(static_cast<double>(recent_dx_[i]),
-                                    static_cast<double>(recent_dy_[i]));
-        sumsq += v * v;
+        const double ex = std::abs(crosshairX - trig_target_x_.load());
+        const double ey = std::abs(crosshairY - trig_target_y_.load());
+        on_target = (ex <= tolX) && (ey <= tolY);
+        const double worst = std::max(ex / tolX, ey / tolY);
+        hit_frac = std::clamp(1.0 - worst, 0.0, 1.0);
     }
-    const double rms = std::sqrt(sumsq / static_cast<double>(cap));
-    g_smart_trigger_recent_variance_px.store(static_cast<float>(rms));
+    g_smart_trigger_hit_prob.store(static_cast<float>(hit_frac));
 
-    // Hit probability heuristic: 1 when crosshair is dead-on, 0 when it is
-    // outside an effective hitbox of half_extent * hit_radius_frac. Linear
-    // ramp in between. Without a locked bbox we treat hit prob as 0 — the
-    // trigger will never fire on an empty target, which is the safe default.
-    const double half = locked_bbox_half_extent_px_.load();
-    double prob = 0.0;
-    if (half > 0.5)
+    // --- Dwell bookkeeping ----------------------------------------------
+    // Track how long the crosshair has continuously sat inside the region.
+    if (on_target)
     {
-        const double effective = half * static_cast<double>(params_.smart_trigger_hit_radius_frac);
-        if (effective > 0.5)
+        if (!on_target_)
         {
-            const double inside = 1.0 - std::clamp(errPx / effective, 0.0, 1.0);
-            prob = inside;
+            on_target_ = true;
+            on_target_since_ = now;
         }
     }
-    g_smart_trigger_hit_prob.store(static_cast<float>(prob));
+    else
+    {
+        on_target_ = false;
+    }
+    const double dwell_ms = on_target_
+        ? std::chrono::duration<double, std::milli>(now - on_target_since_).count()
+        : 0.0;
+    g_smart_trigger_recent_variance_px.store(static_cast<float>(dwell_ms));
 
-    // Step 1: if we're already firing, release when the hold time has
-    // elapsed. We always release on schedule — even if the gates are still
-    // open — so duty cycle stays bounded by the cooldown logic below. This
-    // turns continuous "ready" into a controlled tap-tap-tap rather than a
-    // glued button.
+    // --- State machine ---------------------------------------------------
+    // 1) Release when the hold time elapses, then start the cooldown.
     if (firing_active_ && now >= fire_release_at_)
     {
         sendLeftUpToDriver();
         firing_active_ = false;
-        const auto hold = std::chrono::milliseconds(params_.smart_trigger_fire_duration_ms);
-        // Refractory == hold time → 50% max duty cycle. Keeps full-auto
-        // mode realistic and gives semi-auto plenty of recovery between
-        // taps.
-        fire_cooldown_until_ = now + hold;
+        fire_cooldown_until_ =
+            now + std::chrono::milliseconds(params_.smart_trigger_cooldown_ms);
     }
 
-    const bool prob_ok = prob >= static_cast<double>(params_.smart_trigger_min_prob);
-    const bool variance_ok = rms <= static_cast<double>(params_.smart_trigger_variance_max_px);
-    const bool gates_open = prob_ok && variance_ok;
-
-    // Step 2: open a new fire window if all gates are aligned and the
-    // cooldown has elapsed. The aim hotkey gating is implicit — this
-    // function is only called from driveAimToTarget, which only runs while
-    // a hotkey is active. Hotkey release calls clearQueuedMoves →
-    // forceTriggerRelease, so an in-flight fire is always cleaned up.
-    if (gates_open && !firing_active_ && now >= fire_cooldown_until_)
+    // 2) Start a tap once the crosshair has dwelt on target long enough and
+    //    the cooldown has elapsed. Hotkey gating is implicit (this only runs
+    //    while a hotkey is active; release force-clears any in-flight fire).
+    const bool dwell_ok = on_target_
+        && dwell_ms >= static_cast<double>(params_.smart_trigger_reaction_ms);
+    if (dwell_ok && !firing_active_ && now >= fire_cooldown_until_)
     {
         sendLeftDownToDriver();
         firing_active_ = true;
-        fire_release_at_ = now + std::chrono::milliseconds(params_.smart_trigger_fire_duration_ms);
+        fire_release_at_ =
+            now + std::chrono::milliseconds(params_.smart_trigger_hold_ms);
     }
 
-    // `g_smart_trigger_ready` reflects the actual button state so the UI
-    // LED matches reality during the hold+cooldown cycle. Gate state is
-    // reconstructable from prob/rms which are separate atomics.
     g_smart_trigger_ready.store(firing_active_);
 }
 
@@ -465,10 +448,18 @@ void MouseThread::moveMouseToObservedTarget(double targetPivotX, double targetPi
 {
     std::lock_guard<std::recursive_mutex> lg(input_method_mutex);
 
+    // Kalman dt 必须用"上次 kalman 更新到现在"的真实时间,而不是 prev_time_
+    // (后者每次 driveAimToTarget 都会刷新,包括 Path B 的重推/外推路径)。
+    // 否则:Path B 在两次检测之间触发一次 -> prev_time_ 被推到几毫秒前 ->
+    // 下一次 Path A 喂给 kalman 的 dt 远小于真实测量间隔 -> 状态外推被严重
+    // 低估、测量新息巨大但 k1 因 p10 还没起来近 0、velocity 几乎不更新 ->
+    // 稳态下 velocity≈0、predict() ≈ measurement,表现为"开/关 kalman 效果差不多"。
     const auto now = std::chrono::steady_clock::now();
     double dt = 1.0 / 120.0;
-    if (has_prev_time_)
-        dt = std::chrono::duration<double>(now - prev_time_).count();
+    if (has_kalman_prev_time_)
+        dt = std::chrono::duration<double>(now - kalman_prev_time_).count();
+    kalman_prev_time_ = now;
+    has_kalman_prev_time_ = true;
     if (!(dt > 1e-6)) dt = 1e-6;
     if (dt > 0.25) dt = 0.25;
 
@@ -477,6 +468,8 @@ void MouseThread::moveMouseToObservedTarget(double targetPivotX, double targetPi
     lastPredictionLookaheadSec_ = lookaheadSec;
 
     targetKalman_.setSettings(params_.kalman);
+    // 小目标/远距离 bbox 更小 → 测量更抖 → 让 Kalman 自动加重平滑。
+    targetKalman_.setMeasurementHalfExtent(locked_bbox_half_extent_px_.load());
     lastKalmanTelemetry_ = targetKalman_.update(targetPivotX, targetPivotY, dt, lookaheadSec);
 
     double targetX = targetPivotX;
@@ -496,14 +489,13 @@ void MouseThread::moveMouseUsingLastTarget(double targetX, double targetY,
                                             double crosshairX, double crosshairY)
 {
     std::lock_guard<std::recursive_mutex> lg(input_method_mutex);
-    // Path B (recoil-only re-push using stale target). Crosshair-color saw
-    // the reticle move because of recoil, but the target hasn't actually
-    // moved — feeding full lock-snap here amplifies muzzle-jitter into a
-    // visible shake. Knock the lock multiplier down ~35% for this single
-    // step so corrections rely mostly on the proportional speed term.
-    constexpr double kPathBLockAttenuation = 0.65;
+    // Path B (recoil-only re-push using stale target): crosshair moved due to
+    // recoil, the target hasn't. Feed the PID at reduced output so close-range
+    // jitter from re-pushing a stale target at full gain doesn't shake the
+    // reticle (the PID has no landing-zone deadband of its own).
+    constexpr double kPathBOutputAttenuation = 0.65;
     driveAimToTarget(targetX, targetY, crosshairX, crosshairY,
-                     kPathBLockAttenuation);
+                     kPathBOutputAttenuation);
 }
 
 bool MouseThread::moveMouseToPredictedTarget(double crosshairX, double crosshairY)
@@ -528,12 +520,11 @@ bool MouseThread::moveMouseToPredictedTarget(double crosshairX, double crosshair
     if (!std::isfinite(predicted.first) || !std::isfinite(predicted.second))
         return false;
 
-    // Same Path B reasoning as moveMouseUsingLastTarget: this is a re-push
-    // driven by a fresh crosshair snapshot or stale-target Kalman extrapolation,
-    // not a fresh detection observation, so soften the lock boost.
-    constexpr double kPathBLockAttenuation = 0.65;
+    // Same as moveMouseUsingLastTarget: re-pushing an extrapolated target, so
+    // attenuate the output to damp close-range jitter.
+    constexpr double kPathBOutputAttenuation = 0.65;
     driveAimToTarget(predicted.first, predicted.second,
-                     crosshairX, crosshairY, kPathBLockAttenuation);
+                     crosshairX, crosshairY, kPathBOutputAttenuation);
     return true;
 }
 
@@ -544,8 +535,7 @@ void MouseThread::clearQueuedMoves()
         std::queue<Move> empty;
         moveQueue_.swap(empty);
     }
-    aim_.reset();
-    bezier_aim_.reset();
+    pid_.reset();
 
     // Hotkey lifted (or anything else that pre-empts pursuit) — make sure
     // we never leave the auto-fire button stuck down. The cooldown stays in
@@ -557,6 +547,7 @@ void MouseThread::resetPrediction()
 {
     clearQueuedMoves();
     has_prev_time_ = false;
+    has_kalman_prev_time_ = false;
     targetKalman_.reset();
     lastKalmanTelemetry_ = {};
     lastPredictionLookaheadSec_ = 0.0;
@@ -581,8 +572,8 @@ void MouseThread::checkAndResetPredictions()
     {
         sendLeftUpToDriver();
         firing_active_ = false;
-        const auto hold = std::chrono::milliseconds(params_.smart_trigger_fire_duration_ms);
-        fire_cooldown_until_ = now + hold;
+        fire_cooldown_until_ =
+            now + std::chrono::milliseconds(params_.smart_trigger_cooldown_ms);
         g_smart_trigger_ready.store(false);
     }
 }

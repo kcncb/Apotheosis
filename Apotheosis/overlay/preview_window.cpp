@@ -17,6 +17,8 @@
 #include "capture.h"
 #include "config/config.h"
 #include "crosshair/crosshair_detector.h"
+#include "crosshair/laser_detector.h"
+#include "depth/depth_mask.h"
 #include "detection_buffer.h"
 #include "i_detector.h"
 #include "preview_window.h"
@@ -73,11 +75,32 @@ struct PreviewConfigSnapshot
     std::vector<crosshair::CrosshairColorBand> crosshair_colors;
     bool   any_color_enabled = false;
 
+    // Laser color-find (independent module). The ROI is always drawn (yellow);
+    // when a beam is found the fitted line is overlaid.
+    int    laser_rect_w = 0;
+    int    laser_rect_h = 0;
+    int    laser_center_x = 0;
+    int    laser_center_y = 0;
+    int    laser_min_pixel_count = 0;
+    int    laser_close_radius = 0;
+    float  laser_min_elongation = 3.0f;
+    int    laser_target_center_x = 0;
+    int    laser_target_center_y = 0;
+    int    laser_target_rect_w = 0;
+    int    laser_target_rect_h = 0;
+    std::vector<crosshair::CrosshairColorBand> laser_colors;
+    bool   any_laser_color_enabled = false;
+
     // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
     int    fov_base_y = 0;
     bool   dynamic_fov_enabled = false;
     bool   hotkey_active = false;
+
+    // Depth heatmap overlay.
+    bool   depth_inference_enabled = false;
+    bool   depth_show_heatmap = false;
+    bool   depth_show_bbox_distance = false;
 };
 
 PreviewConfigSnapshot snapshot_config()
@@ -90,6 +113,9 @@ PreviewConfigSnapshot snapshot_config()
     s.crosshair_rect_h         = config.crosshair_rect_h;
     s.crosshair_min_pixel_count = config.crosshair_min_pixel_count;
     s.crosshair_close_radius   = config.crosshair_close_radius;
+    s.depth_inference_enabled  = config.depth_inference_enabled;
+    s.depth_show_heatmap       = config.depth_show_heatmap;
+    s.depth_show_bbox_distance = config.depth_show_bbox_distance;
     s.crosshair_colors.reserve(config.crosshair_colors.size());
     for (const auto& c : config.crosshair_colors)
     {
@@ -101,6 +127,30 @@ PreviewConfigSnapshot snapshot_config()
         b.v_min = c.v_min; b.v_max = c.v_max;
         s.any_color_enabled = s.any_color_enabled || b.enabled;
         s.crosshair_colors.push_back(std::move(b));
+    }
+
+    s.laser_rect_w          = config.laser_rect_w;
+    s.laser_rect_h          = config.laser_rect_h;
+    s.laser_center_x        = config.laser_center_x;
+    s.laser_center_y        = config.laser_center_y;
+    s.laser_min_pixel_count = config.laser_min_pixel_count;
+    s.laser_close_radius    = config.laser_close_radius;
+    s.laser_min_elongation  = config.laser_min_elongation;
+    s.laser_target_center_x = config.laser_target_center_x;
+    s.laser_target_center_y = config.laser_target_center_y;
+    s.laser_target_rect_w   = config.laser_target_rect_w;
+    s.laser_target_rect_h   = config.laser_target_rect_h;
+    s.laser_colors.reserve(config.laser_colors.size());
+    for (const auto& c : config.laser_colors)
+    {
+        crosshair::CrosshairColorBand b;
+        b.name = c.name;
+        b.enabled = c.enabled;
+        b.h_low = c.h_low; b.h_high = c.h_high;
+        b.s_min = c.s_min; b.s_max = c.s_max;
+        b.v_min = c.v_min; b.v_max = c.v_max;
+        s.any_laser_color_enabled = s.any_laser_color_enabled || b.enabled;
+        s.laser_colors.push_back(std::move(b));
     }
 
     const int idx_active = runtime::g_active_hotkey_index.load();
@@ -122,6 +172,20 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 {
     if (canvas.empty()) return;
 
+    // 0. Optional depth heatmap replacement. Done first so boxes/FOV/banner
+    //    are drawn on top of it.
+    if (cfg.depth_show_heatmap && cfg.depth_inference_enabled && canvas.type() == CV_8UC3)
+    {
+        cv::Mat heat = depth_anything::GetDepthMaskGenerator().getColormap();
+        if (!heat.empty())
+        {
+            if (heat.size() != canvas.size())
+                cv::resize(heat, heat, canvas.size(), 0, 0, cv::INTER_LINEAR);
+            if (heat.type() == canvas.type())
+                heat.copyTo(canvas);
+        }
+    }
+
     // 1. Detection boxes and class labels.
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
@@ -137,6 +201,13 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     const cv::Scalar textFg   = bgr(250, 245, 240);
     const cv::Scalar textBg   = bgr(0, 0, 0);
 
+    // Snapshot the latest normalized depth once for per-bbox sampling.
+    cv::Mat depthForBbox;
+    if (cfg.depth_show_bbox_distance && cfg.depth_inference_enabled)
+    {
+        depthForBbox = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
+    }
+
     for (size_t i = 0; i < boxes.size(); ++i)
     {
         const cv::Rect& r = boxes[i];
@@ -145,7 +216,23 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         cv::rectangle(canvas, clipped, boxColor, 1, cv::LINE_AA);
 
         const int cls = (i < classes.size()) ? classes[i] : -1;
-        std::string label = "#" + std::to_string(cls);
+        char label[64];
+        if (!depthForBbox.empty()
+            && depthForBbox.type() == CV_8UC1
+            && depthForBbox.size() == canvas.size())
+        {
+            // Sample depth at the box centre. 255 = nearest in frame, 0 =
+            // farthest. Show as 0..1 with 1 = nearest so users intuit
+            // "bigger = closer".
+            const cv::Point pc(clipped.x + clipped.width / 2,
+                               clipped.y + clipped.height / 2);
+            const uint8_t d = depthForBbox.at<uint8_t>(pc);
+            std::snprintf(label, sizeof(label), "#%d  d=%.2f", cls, d / 255.0f);
+        }
+        else
+        {
+            std::snprintf(label, sizeof(label), "#%d", cls);
+        }
         draw_text_with_bg(canvas, label,
                           cv::Point(clipped.x, std::max(12, clipped.y)),
                           textFg, textBg);
@@ -175,11 +262,15 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     }
 
     // 3. Crosshair colour-find ROI rectangle.
+    // Bottom-edge midpoint anchored at the frame centre (square sits above
+    // the centre line). Must match clipped_center_roi() in
+    // crosshair/crosshair_detector.cpp so the preview matches detection.
     if (cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)
     {
         const int rw = std::max(4, cfg.crosshair_rect_w);
         const int rh = std::max(4, cfg.crosshair_rect_h);
-        const cv::Rect roi(canvas.cols / 2 - rw / 2, canvas.rows / 2 - rh / 2, rw, rh);
+        constexpr int kVerticalOffset = 10;
+        const cv::Rect roi(canvas.cols / 2 - rw / 2, canvas.rows / 2 - rh + kVerticalOffset, rw, rh);
         const cv::Rect clipped = roi & cv::Rect(0, 0, canvas.cols, canvas.rows);
         if (clipped.area() > 0)
             cv::rectangle(canvas, clipped, bgr(255, 190, 0), 1, cv::LINE_AA);
@@ -208,7 +299,77 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
     }
 
-    // 5. Top-left status banner with detection FPS / count.
+    // 4b. Laser color-find ROI (YELLOW, always drawn so the user can see /
+    //     position the detection region) + the detected beam line on top.
+    if (cfg.laser_rect_w > 0 && cfg.laser_rect_h > 0)
+    {
+        const cv::Scalar laserCol = bgr(0, 255, 255); // yellow
+        const int rw = std::max(4, cfg.laser_rect_w);
+        const int rh = std::max(4, cfg.laser_rect_h);
+        const cv::Rect roi(cfg.laser_center_x - rw / 2, cfg.laser_center_y - rh / 2, rw, rh);
+        const cv::Rect clipped = roi & cv::Rect(0, 0, canvas.cols, canvas.rows);
+        if (clipped.area() > 0)
+        {
+            cv::rectangle(canvas, clipped, laserCol, 1, cv::LINE_AA);
+            draw_text_with_bg(canvas, "Laser ROI",
+                              cv::Point(clipped.x, std::max(12, clipped.y)),
+                              laserCol, bgr(0, 0, 0));
+        }
+
+        // Target box (BROWN): where the fitted line is projected to estimate
+        // the endpoint. Always drawn so the user can position it near centre.
+        if (cfg.laser_target_rect_w > 0 && cfg.laser_target_rect_h > 0)
+        {
+            const cv::Scalar brown = bgr(40, 100, 170); // B,G,R -> brown/orange
+            const int tw = std::max(4, cfg.laser_target_rect_w);
+            const int th = std::max(4, cfg.laser_target_rect_h);
+            const cv::Rect troi(cfg.laser_target_center_x - tw / 2,
+                                cfg.laser_target_center_y - th / 2, tw, th);
+            const cv::Rect tclip = troi & cv::Rect(0, 0, canvas.cols, canvas.rows);
+            if (tclip.area() > 0)
+            {
+                cv::rectangle(canvas, tclip, brown, 1, cv::LINE_AA);
+                draw_text_with_bg(canvas, "Laser tip zone",
+                                  cv::Point(tclip.x, std::max(12, tclip.y)),
+                                  brown, bgr(0, 0, 0));
+            }
+        }
+
+        // Detected beam: overlay a yellow line on the laser, dot at the tip.
+        if (cfg.any_laser_color_enabled && canvas.type() == CV_8UC3)
+        {
+            crosshair::LaserDetectorSettings ls;
+            ls.enabled = true;
+            ls.rect_w = cfg.laser_rect_w;
+            ls.rect_h = cfg.laser_rect_h;
+            ls.center_x = cfg.laser_center_x;
+            ls.center_y = cfg.laser_center_y;
+            ls.min_pixel_count = cfg.laser_min_pixel_count;
+            ls.close_radius = cfg.laser_close_radius;
+            ls.min_elongation = cfg.laser_min_elongation;
+            ls.target_center_x = cfg.laser_target_center_x;
+            ls.target_center_y = cfg.laser_target_center_y;
+            ls.target_rect_w = cfg.laser_target_rect_w;
+            ls.target_rect_h = cfg.laser_target_rect_h;
+            ls.colors = cfg.laser_colors;
+
+            static crosshair::LaserDetector laser_detector;
+            const crosshair::LaserResult lr = laser_detector.detectLine(canvas, ls);
+            if (lr.found)
+            {
+                const cv::Point m(static_cast<int>(lr.muzzle.x), static_cast<int>(lr.muzzle.y));
+                const cv::Point t(static_cast<int>(lr.tip.x), static_cast<int>(lr.tip.y));
+                // Beam line (muzzle -> extended tip), dark underlay for contrast.
+                cv::line(canvas, m, t, bgr(0, 0, 0), 4, cv::LINE_AA);
+                cv::line(canvas, m, t, laserCol, 2, cv::LINE_AA);
+                // Tip marker.
+                cv::circle(canvas, t, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
+                cv::circle(canvas, t, 5, laserCol, 1, cv::LINE_AA);
+            }
+        }
+    }
+
+    // 5. Top-left status banner with inference FPS + latency.
     runtime::InferenceSession* session = g_inference_session;
     float infer_ms = 0.0f;
     if (session && session->detector())
@@ -221,9 +382,33 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             + session->detector()->lastNmsTime().count());
     }
 
+    static int    s_last_version  = -1;
+    static int    s_frames_seen   = 0;
+    static auto   s_window_start  = std::chrono::steady_clock::now();
+    static float  s_inference_fps = 0.0f;
+    const auto now = std::chrono::steady_clock::now();
+    if (version != s_last_version)
+    {
+        if (s_last_version >= 0)
+            s_frames_seen += std::max(0, version - s_last_version);
+        s_last_version = version;
+    }
+    const double elapsed_s =
+        std::chrono::duration<double>(now - s_window_start).count();
+    if (elapsed_s >= 0.5)
+    {
+        s_inference_fps = static_cast<float>(s_frames_seen / elapsed_s);
+        s_frames_seen = 0;
+        s_window_start = now;
+    }
+
+    float displayed_fps = s_inference_fps;
+    if (displayed_fps <= 0.01f && infer_ms > 0.01f)
+        displayed_fps = 1000.0f / infer_ms;
+
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "v%d  %d det  %.1fms",
-                  version, static_cast<int>(boxes.size()), infer_ms);
+    std::snprintf(buf, sizeof(buf), "Infer %.1f FPS | Lat %.1f ms",
+                  displayed_fps, infer_ms);
     draw_text_with_bg(canvas, buf, cv::Point(6, 16), bgr(245, 245, 245), bgr(0, 0, 0));
 }
 
