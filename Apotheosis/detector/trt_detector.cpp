@@ -10,6 +10,7 @@
 #include <opencv2/dnn.hpp>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -324,14 +325,37 @@ TrtDetector::TrtDetector()
     shouldExit(false),
     useCudaGraph(false),
     cudaGraphCaptured(false),
-    cudaGraph(nullptr),
-    cudaGraphExec(nullptr),
     inputBufferDevice(nullptr),
     img_scale(1.0f),
     numClasses(0)
 {
     stream = nullptr;
-    cudaStreamCreate(&stream);
+    // Run inference on a high-priority stream so the GPU scheduler favors it
+    // over the capture-side nvJPEG decode stream, which runs continuously at
+    // the full capture rate (~240fps of 1080p MJPEG) and otherwise steals SMs
+    // mid-inference, inflating and destabilizing inference wall-time. Falls
+    // back to a default-priority stream if stream priorities are unsupported.
+    {
+        // cudaStreamNonBlocking (NOT cudaStreamDefault): a default-flag stream
+        // implicitly synchronizes with the legacy NULL stream, so any NULL-
+        // stream op elsewhere (e.g. the capture thread's synchronous D2H
+        // download for the preview window) would serialize against inference.
+        // The capture/decode streams are already non-blocking; this makes the
+        // inference stream consistent so it truly runs concurrently.
+        int priLow = 0, priHigh = 0;
+        if (cudaDeviceGetStreamPriorityRange(&priLow, &priHigh) == cudaSuccess &&
+            priHigh != priLow &&
+            cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, priHigh) == cudaSuccess)
+        {
+            // high-priority non-blocking stream created
+        }
+        else
+        {
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+        }
+    }
+    // cudaGraphs / cudaGraphExecs are std::array<...,2>, default-init to
+    // {nullptr,nullptr} via the in-class initializer in trt_detector.h.
 }
 
 TrtDetector::~TrtDetector()
@@ -343,12 +367,12 @@ TrtDetector::~TrtDetector()
     for (auto& binding : inputBindings) if (binding.second) cudaFree(binding.second);
     for (auto& binding : outputBindings) if (binding.second) cudaFree(binding.second);
     if (inputBufferDevice) cudaFree(inputBufferDevice);
-    if (preprocessStartEvent) cudaEventDestroy(preprocessStartEvent);
-    if (inferenceStartEvent) cudaEventDestroy(inferenceStartEvent);
-    if (inferenceCompleteEvent) cudaEventDestroy(inferenceCompleteEvent);
-    if (copyCompleteEvent) cudaEventDestroy(copyCompleteEvent);
     for (int s = 0; s < 2; ++s)
     {
+        if (preprocessStartEvent[s]) cudaEventDestroy(preprocessStartEvent[s]);
+        if (inferenceStartEvent[s]) cudaEventDestroy(inferenceStartEvent[s]);
+        if (inferenceCompleteEvent[s]) cudaEventDestroy(inferenceCompleteEvent[s]);
+        if (copyCompleteEvent[s]) cudaEventDestroy(copyCompleteEvent[s]);
         if (slotDoneEvent[s]) { cudaEventDestroy(slotDoneEvent[s]); slotDoneEvent[s] = nullptr; }
     }
     if (stream) cudaStreamDestroy(stream);
@@ -420,40 +444,162 @@ void TrtDetector::allocatePinnedOutputs()
 
 void TrtDetector::destroyCudaGraph()
 {
-    if (cudaGraphExec)
+    for (int s = 0; s < 2; ++s)
     {
-        cudaGraphExecDestroy(cudaGraphExec);
-        cudaGraphExec = nullptr;
-    }
-    if (cudaGraph)
-    {
-        cudaGraphDestroy(cudaGraph);
-        cudaGraph = nullptr;
+        if (cudaGraphExecs[s])
+        {
+            cudaGraphExecDestroy(cudaGraphExecs[s]);
+            cudaGraphExecs[s] = nullptr;
+        }
+        if (cudaGraphs[s])
+        {
+            cudaGraphDestroy(cudaGraphs[s]);
+            cudaGraphs[s] = nullptr;
+        }
     }
     cudaGraphCaptured = false;
+    graphInputRows = 0;
+    graphInputCols = 0;
+    graphInputChannels = 0;
+    graphInputStep = 0;
 }
 
-void TrtDetector::captureCudaGraph()
+bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
 {
-    if (!useCudaGraph || cudaGraphCaptured) return;
+    // Returns true when the caller should (re)capture the graph: either no
+    // graph exists yet, or the staging shape needs to grow/shrink to match a
+    // new frame.
+    const bool shapeChanged =
+        (rows != graphInputRows) ||
+        (cols != graphInputCols) ||
+        (channels != graphInputChannels);
 
-    destroyCudaGraph();
+    bool needsCapture = !cudaGraphCaptured || shapeChanged;
+
+    for (int s = 0; s < numSlots; ++s)
+    {
+        auto& staging = graphInputBuffers[s];
+        if (staging.empty() || staging.rows() != rows
+            || staging.cols() != cols || staging.channels() != channels)
+        {
+            if (!staging.create(rows, cols, channels))
+            {
+                std::cerr << "[Detector] Failed to allocate graph staging buffer ("
+                          << rows << "x" << cols << "x" << channels << ")" << std::endl;
+                return false;
+            }
+            needsCapture = true;
+        }
+    }
+
+    if (shapeChanged && cudaGraphCaptured)
+    {
+        // Pinned dst pointers stay the same across recapture; only the
+        // preprocess kernel's source view (rows/cols/channels/step) changed.
+        destroyCudaGraph();
+    }
+
+    graphInputRows = rows;
+    graphInputCols = cols;
+    graphInputChannels = channels;
+    graphInputStep = graphInputBuffers[0].step();
+
+    return needsCapture;
+}
+
+bool TrtDetector::captureCudaGraph(int slot)
+{
+    if (!useCudaGraph) return false;
+    if (slot < 0 || slot >= numSlots) return false;
+    if (graphInputBuffers[slot].empty()) return false;
+
+    if (cudaGraphExecs[slot])
+    {
+        cudaGraphExecDestroy(cudaGraphExecs[slot]);
+        cudaGraphExecs[slot] = nullptr;
+    }
+    if (cudaGraphs[slot])
+    {
+        cudaGraphDestroy(cudaGraphs[slot]);
+        cudaGraphs[slot] = nullptr;
+    }
+
+    // Warm up the exact preprocess+enqueue chain ONCE outside capture before
+    // recording it. TensorRT performs lazy per-context setup on its first
+    // enqueueV3 — Cask convolution kernel selection plus internal scratch
+    // allocation — and those operations are illegal while a stream is
+    // capturing. Without this warmup the capture aborts with
+    // "Cask ... Error Code 1" + cudaErrorStreamCaptureUnsupported(229) at
+    // EndCapture. After one warm run the captured pass only replays
+    // already-initialized work. The warmup reads this slot's staging buffer
+    // (garbage on the first frame is fine — the result is discarded).
+    {
+        void* warmInput = inputBindings[inputName];
+        if (warmInput)
+        {
+            nvinfer1::Dims wd = context->getTensorShape(inputName.c_str());
+            int warmH = 0;
+            int warmW = 0;
+            if (wd.nbDims >= 4
+                && tryGetPositiveDimInt(wd.d[2], &warmH)
+                && tryGetPositiveDimInt(wd.d[3], &warmW))
+            {
+                launch_resize_bgr_u8_to_chw_rgb_f16(
+                    graphInputBuffers[slot].view(),
+                    reinterpret_cast<__half*>(warmInput),
+                    warmW,
+                    stream
+                );
+            }
+        }
+        context->enqueueV3(stream);
+    }
 
     cudaStreamSynchronize(stream);
 
-    cudaError_t st = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    // ThreadLocal, not Global: other threads run their own GPU work during the
+    // capture window — most importantly the capture-card nvJPEG decode worker,
+    // which issues kernels and a cudaStreamSynchronize every frame on its own
+    // stream. Under cudaStreamCaptureModeGlobal any such cross-thread GPU
+    // operation invalidates this capture (also surfaces as 229). ThreadLocal
+    // scopes capture safety checks to the calling thread only.
+    cudaError_t st = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
     if (st != cudaSuccess) {
-        std::cerr << "[Detector] BeginCapture failed: "
+        std::cerr << "[Detector] BeginCapture(slot=" << slot << ") failed: "
             << cudaGetErrorString(st) << std::endl;
-        return;
+        return false;
     }
 
-    context->enqueueV3(stream);
-    cudaEventRecord(inferenceCompleteEvent, stream);
+    // 1) Fused preprocess: read from this slot's staging buffer (fixed device
+    // address), write half CHW directly into the engine's input binding.
+    void* inputBuffer = inputBindings[inputName];
+    if (inputBuffer)
+    {
+        nvinfer1::Dims dims = context->getTensorShape(inputName.c_str());
+        int sideH = 0;
+        int sideW = 0;
+        if (dims.nbDims >= 4
+            && tryGetPositiveDimInt(dims.d[2], &sideH)
+            && tryGetPositiveDimInt(dims.d[3], &sideW))
+        {
+            launch_resize_bgr_u8_to_chw_rgb_f16(
+                graphInputBuffers[slot].view(),
+                reinterpret_cast<__half*>(inputBuffer),
+                sideW,
+                stream
+            );
+        }
+    }
 
+    // 2) TRT enqueue.
+    context->enqueueV3(stream);
+
+    // 3) Decode + filter + D2H to *this slot's* pinned buffers.
+    auto& pinned = pinnedSlot(slot);
     for (const auto& name : outputNames)
     {
-        if (!pinnedOutputBuffers.count(name)) continue;
+        const auto itPinned = pinned.find(name);
+        if (itPinned == pinned.end() || !itPinned->second) continue;
 
         const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
         if (needsT)
@@ -466,18 +612,20 @@ void TrtDetector::captureCudaGraph()
             int* devCounter = reinterpret_cast<int*>(devBlock);
             float* devCandidates = reinterpret_cast<float*>(devBlock + kDecodeHeaderBytes);
 
+            const SmallTargetDecode st = computeSmallTargetDecode();
             launch_decode_and_filter(
                 outputBindings[name], C, N, numClasses, isHalf,
-                config.confidence_threshold, img_scale,
+                config.confidence_threshold, st.smallConf,
+                static_cast<float>(st.areaThreshPx), img_scale,
                 kMaxCandidates, cnLayout, devCounter, devCandidates, stream
             );
 
-            cudaMemcpyAsync(pinnedOutputBuffers[name], devBlock,
+            cudaMemcpyAsync(itPinned->second, devBlock,
                 transposedSizes[name], cudaMemcpyDeviceToHost, stream);
         }
         else
         {
-            cudaMemcpyAsync(pinnedOutputBuffers[name],
+            cudaMemcpyAsync(itPinned->second,
                 outputBindings[name],
                 outputSizes[name],
                 cudaMemcpyDeviceToHost,
@@ -485,31 +633,40 @@ void TrtDetector::captureCudaGraph()
         }
     }
 
-    st = cudaStreamEndCapture(stream, &cudaGraph);
+    st = cudaStreamEndCapture(stream, &cudaGraphs[slot]);
     if (st != cudaSuccess) {
-        std::cerr << "[Detector] EndCapture failed: "
+        std::cerr << "[Detector] EndCapture(slot=" << slot << ") failed: "
             << cudaGetErrorString(st) << std::endl;
-        return;
+        return false;
     }
 
-    st = cudaGraphInstantiate(&cudaGraphExec, cudaGraph, 0);
+    st = cudaGraphInstantiate(&cudaGraphExecs[slot], cudaGraphs[slot], 0);
     if (st != cudaSuccess) {
-        std::cerr << "[Detector] GraphInstantiate failed: "
+        std::cerr << "[Detector] GraphInstantiate(slot=" << slot << ") failed: "
             << cudaGetErrorString(st) << std::endl;
-        cudaGraphDestroy(cudaGraph);
-        cudaGraph = nullptr;
-        return;
+        cudaGraphDestroy(cudaGraphs[slot]);
+        cudaGraphs[slot] = nullptr;
+        return false;
     }
 
+    // Mark as fully captured only once every active slot is done.
     cudaGraphCaptured = true;
+    for (int s = 0; s < numSlots; ++s)
+    {
+        if (!cudaGraphExecs[s]) { cudaGraphCaptured = false; break; }
+    }
+    return true;
 }
 
-inline void TrtDetector::launchCudaGraph()
+inline void TrtDetector::launchCudaGraph(int slot)
 {
-    auto err = cudaGraphLaunch(cudaGraphExec, stream);
+    if (slot < 0 || slot >= numSlots) return;
+    if (!cudaGraphExecs[slot]) return;
+    auto err = cudaGraphLaunch(cudaGraphExecs[slot], stream);
     if (err != cudaSuccess)
     {
-        std::cerr << "[Detector] GraphLaunch failed: " << cudaGetErrorString(err) << std::endl;
+        std::cerr << "[Detector] GraphLaunch(slot=" << slot << ") failed: "
+            << cudaGetErrorString(err) << std::endl;
     }
 }
 
@@ -626,25 +783,47 @@ bool TrtDetector::initialize(const std::string& model_path)
 
     class_names_.clear();
     {
-        // Best-effort probe of Ultralytics-style JSON metadata prepended to
-        // the engine file. Failures silently yield an empty class name list;
-        // the UI falls back to synthetic "class_<id>" labels.
-        std::string engine_path = model_path;
+        std::string resolved_path = model_path;
         std::filesystem::path maybe(std::filesystem::u8path(model_path));
         if (!maybe.is_absolute())
         {
             std::error_code ec;
             auto abs = std::filesystem::absolute(maybe, ec);
-            if (!ec) engine_path = abs.u8string();
+            if (!ec) resolved_path = abs.u8string();
         }
-        auto blob = detector::read_ultralytics_engine_header(engine_path);
-        if (!blob.empty())
-            class_names_ = detector::parse_json_names(blob);
 
+        // ONNX-source models carry their class names in the ONNX "names"
+        // custom metadata. An engine we build ourselves from .onnx has NO
+        // Ultralytics JSON header, so read_ultralytics_engine_header() returns
+        // nothing and numClasses falls back to (channels - 4). That fallback
+        // is wrong for end2end / NMS outputs shaped [1, N, 6], where
+        // channels-4 == 2 regardless of the real class count — the reason a
+        // freshly built YOLOv10-style engine only ever produced classes 0 and
+        // 1. Read the ONNX metadata here so TRT matches the DML path.
+        std::string ext = std::filesystem::u8path(model_path).extension().u8string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".onnx" || ext == ".oliver")
+        {
+            detector::ModelMetadata md = detector::inspect_onnx_model(model_path, config.verbose);
+            if (!md.class_names.empty())
+                class_names_ = std::move(md.class_names);
+        }
+
+        // Real .engine files exported by Ultralytics carry a 4-byte length +
+        // JSON metadata header; fall back to it for engine-source models.
+        if (class_names_.empty())
+        {
+            auto blob = detector::read_ultralytics_engine_header(resolved_path);
+            if (!blob.empty())
+                class_names_ = detector::parse_json_names(blob);
+        }
+
+        // Last resort: "<stem>.json" / "<stem>.names" sidecar next to the model.
         if (class_names_.empty())
         {
             detector::ClassNamesSource src = detector::ClassNamesSource::None;
-            auto sidecar = detector::read_sidecar_class_names(engine_path, &src);
+            auto sidecar = detector::read_sidecar_class_names(resolved_path, &src);
             if (!sidecar.empty())
                 class_names_ = std::move(sidecar);
         }
@@ -779,6 +958,17 @@ bool TrtDetector::initialize(const std::string& model_path)
                 return false;
             }
         }
+
+        // NMS-decoded engines (EfficientNMS plugin etc.) emit [batch, K, 6]
+        // where 6 = x1,y1,x2,y2,score,classId — the channel count tells us
+        // nothing about the actual class count of the underlying model. Same
+        // is true for any "cols==6" layout: subtracting 4 gives a misleading
+        // 2 regardless of how many classes the model was trained on. When the
+        // engine ships richer names metadata, trust that instead.
+        if (!class_names_.empty() && static_cast<int>(class_names_.size()) > classes)
+        {
+            classes = static_cast<int>(class_names_.size());
+        }
         numClasses = classes;
 
         if (config.verbose)
@@ -906,15 +1096,12 @@ bool TrtDetector::initialize(const std::string& model_path)
         }
     }
 
-    // Double-buffer and CUDA Graph are mutually exclusive in this pass: graph
-    // capture assumes a single fixed binding set per stream submit, while
-    // double-buffer swaps pinned destinations. Prefer double-buffer if both
-    // are requested 鈥?it's the bigger throughput win.
+    // CUDA Graph + double_buffer now coexist: we capture one graph per slot,
+    // each writing to its own pinned dst. The two are no longer mutually
+    // exclusive — pipelining (CPU post-process on prev slot while GPU runs
+    // curr slot's graph) stacks on top of the launch-overhead savings from
+    // collapsing N kernel launches into one cudaGraphLaunch.
     numSlots = (config.use_double_buffer ? 2 : 1);
-    if (numSlots > 1 && config.use_cuda_graph)
-    {
-        std::cout << "[Detector] use_double_buffer=true overrides use_cuda_graph" << std::endl;
-    }
 
     for (int s = 0; s < 2; ++s)
     {
@@ -934,26 +1121,26 @@ bool TrtDetector::initialize(const std::string& model_path)
     for (const auto& n : outputNames)
         context->setTensorAddress(n.c_str(), outputBindings[n]);
 
-    if (preprocessStartEvent) cudaEventDestroy(preprocessStartEvent);
-    if (inferenceStartEvent) cudaEventDestroy(inferenceStartEvent);
-    if (inferenceCompleteEvent) cudaEventDestroy(inferenceCompleteEvent);
-    if (copyCompleteEvent) cudaEventDestroy(copyCompleteEvent);
-
-    preprocessStartEvent = nullptr;
-    inferenceStartEvent = nullptr;
-    inferenceCompleteEvent = nullptr;
-    copyCompleteEvent = nullptr;
-
-    cudaEventCreate(&preprocessStartEvent);
-    cudaEventCreate(&inferenceStartEvent);
-    cudaEventCreate(&inferenceCompleteEvent);
-    cudaEventCreate(&copyCompleteEvent);
-
-    useCudaGraph = (numSlots == 1) && config.use_cuda_graph;
-    if (useCudaGraph)
+    for (int s = 0; s < 2; ++s)
     {
-        captureCudaGraph();
+        if (preprocessStartEvent[s]) cudaEventDestroy(preprocessStartEvent[s]);
+        if (inferenceStartEvent[s]) cudaEventDestroy(inferenceStartEvent[s]);
+        if (inferenceCompleteEvent[s]) cudaEventDestroy(inferenceCompleteEvent[s]);
+        if (copyCompleteEvent[s]) cudaEventDestroy(copyCompleteEvent[s]);
+        preprocessStartEvent[s] = nullptr;
+        inferenceStartEvent[s] = nullptr;
+        inferenceCompleteEvent[s] = nullptr;
+        copyCompleteEvent[s] = nullptr;
+        cudaEventCreate(&preprocessStartEvent[s]);
+        cudaEventCreate(&inferenceStartEvent[s]);
+        cudaEventCreate(&inferenceCompleteEvent[s]);
+        cudaEventCreate(&copyCompleteEvent[s]);
     }
+
+    useCudaGraph = config.use_cuda_graph;
+    // Graph capture itself is deferred to the first frame: we need that
+    // frame's rows/cols/channels to size the per-slot staging buffer that the
+    // captured preprocess kernel will read from.
 
     if (config.verbose)
     {
@@ -1234,6 +1421,12 @@ void TrtDetector::inferenceThread()
     int curr_slot = 0;
     int prev_slot = -1;
 
+    // Latches true if CUDA graph capture fails this session. Without it a
+    // failing capture is retried every frame (each retry costs a full stream
+    // sync + begin/end capture), which silently caps throughput. Once set we
+    // run the direct enqueue path instead; cleared only on a model reload.
+    bool graphCaptureGivenUp = false;
+
     while (!shouldExit)
     {
         if (detector_model_changed.load())
@@ -1265,6 +1458,7 @@ void TrtDetector::inferenceThread()
             detector_model_changed.store(false);
             curr_slot = 0;
             prev_slot = -1;
+            graphCaptureGivenUp = false;
         }
 
         if (useCudaGraph != config.use_cuda_graph)
@@ -1274,10 +1468,10 @@ void TrtDetector::inferenceThread()
             {
                 destroyCudaGraph();
             }
-            else if (context)
-            {
-                captureCudaGraph();
-            }
+            // Re-capture is deferred to the next frame via the
+            // ensureGraphStaging path — that lets capture see the actual
+            // rows/cols/channels of the next inbound frame so the graph's
+            // baked-in preprocess kernel parameters match.
         }
 
         cv::Mat frame;
@@ -1336,23 +1530,109 @@ void TrtDetector::inferenceThread()
 
             try
             {
-                cudaEventRecord(preprocessStartEvent, stream);
+                // The capture thread decodes on its own stream and hands us a
+                // completion event instead of CPU-syncing. Make our stream wait
+                // for it so the D2D copy / preprocess below never reads a buffer
+                // whose decode is still in flight. No-op when no event is set.
                 if (hasGpuFrame)
-                    preProcess(frameGpu);
-                else
-                    preProcess(frame);
-                cudaEventRecord(inferenceStartEvent, stream);
-                bool usedGraph = useCudaGraph && cudaGraphCaptured;
-                if (usedGraph)
                 {
-                    launchCudaGraph();
-                    cudaEventRecord(copyCompleteEvent, stream);
-                    cudaEventSynchronize(copyCompleteEvent);
+                    cudaEvent_t frameReadyEvent = frameGpu.readyEvent();
+                    if (frameReadyEvent)
+                        cudaStreamWaitEvent(stream, frameReadyEvent, 0);
                 }
-                else
+
+                cudaEventRecord(preprocessStartEvent[curr_slot], stream);
+
+                // Try the CUDA Graph fast path first when enabled. Capture is
+                // lazy on the first frame (or whenever input shape changes) so
+                // the baked-in preprocess kernel sees the correct rows/cols/
+                // channels. Each slot has its own graph + pinned dst, so this
+                // stacks cleanly on top of double_buffer pipelining.
+                bool usedGraph = false;
+                if (useCudaGraph && !graphCaptureGivenUp)
                 {
+                    int frameRows = 0;
+                    int frameCols = 0;
+                    int frameChannels = 0;
+                    if (hasGpuFrame)
+                    {
+                        frameRows = frameGpu.rows();
+                        frameCols = frameGpu.cols();
+                        frameChannels = frameGpu.channels();
+                    }
+                    else
+                    {
+                        frameRows = frame.rows;
+                        frameCols = frame.cols;
+                        frameChannels = frame.channels();
+                    }
+
+                    if (frameRows > 0 && frameCols > 0 && frameChannels > 0)
+                    {
+                        bool needsCapture = ensureGraphStaging(frameRows, frameCols, frameChannels);
+                        if (needsCapture)
+                        {
+                            bool captureOk = true;
+                            for (int s = 0; s < numSlots; ++s)
+                            {
+                                if (!captureCudaGraph(s)) { captureOk = false; break; }
+                            }
+                            if (!captureOk)
+                            {
+                                // Give up for this session instead of retrying
+                                // every frame; fall through to direct enqueue.
+                                std::cerr << "[Detector] CUDA graph capture failed; "
+                                             "falling back to direct enqueue for this session."
+                                          << std::endl;
+                                destroyCudaGraph();
+                                graphCaptureGivenUp = true;
+                            }
+                        }
+                    }
+
+                    if (cudaGraphCaptured)
+                    {
+                        auto& staging = graphInputBuffers[curr_slot];
+                        if (hasGpuFrame)
+                        {
+                            const size_t widthBytes =
+                                static_cast<size_t>(frameCols) * static_cast<size_t>(frameChannels);
+                            cudaMemcpy2DAsync(
+                                staging.data(), staging.step(),
+                                frameGpu.data(), frameGpu.step(),
+                                widthBytes, static_cast<size_t>(frameRows),
+                                cudaMemcpyDeviceToDevice, stream
+                            );
+                        }
+                        else
+                        {
+                            staging.upload(frame.data, frameRows, frameCols, frameChannels,
+                                           frame.step, stream);
+                        }
+
+                        cudaEventRecord(inferenceStartEvent[curr_slot], stream);
+                        launchCudaGraph(curr_slot);
+                        cudaEventRecord(inferenceCompleteEvent[curr_slot], stream);
+                        cudaEventRecord(copyCompleteEvent[curr_slot], stream);
+                        cudaEventRecord(slotDoneEvent[curr_slot], stream);
+                        usedGraph = true;
+
+                        if (numSlots == 1)
+                        {
+                            cudaEventSynchronize(copyCompleteEvent[curr_slot]);
+                        }
+                    }
+                }
+
+                if (!usedGraph)
+                {
+                    if (hasGpuFrame)
+                        preProcess(frameGpu);
+                    else
+                        preProcess(frame);
+                    cudaEventRecord(inferenceStartEvent[curr_slot], stream);
                     context->enqueueV3(stream);
-                    cudaEventRecord(inferenceCompleteEvent, stream);
+                    cudaEventRecord(inferenceCompleteEvent[curr_slot], stream);
 
                     auto& curPinned = pinnedSlot(curr_slot);
                     for (const auto& name : outputNames)
@@ -1372,9 +1652,11 @@ void TrtDetector::inferenceThread()
                             int* devCounter = reinterpret_cast<int*>(devBlock);
                             float* devCandidates = reinterpret_cast<float*>(devBlock + kDecodeHeaderBytes);
 
+                            const SmallTargetDecode st = computeSmallTargetDecode();
                             launch_decode_and_filter(
                                 outputBindings[name], C, N, numClasses, isHalf,
-                                config.confidence_threshold, img_scale,
+                                config.confidence_threshold, st.smallConf,
+                                static_cast<float>(st.areaThreshPx), img_scale,
                                 kMaxCandidates, cnLayout, devCounter, devCandidates, stream
                             );
 
@@ -1392,13 +1674,13 @@ void TrtDetector::inferenceThread()
                         }
                     }
 
-                    cudaEventRecord(copyCompleteEvent, stream);
+                    cudaEventRecord(copyCompleteEvent[curr_slot], stream);
                     cudaEventRecord(slotDoneEvent[curr_slot], stream);
 
                     if (numSlots == 1)
                     {
                         // Single-slot: block here as before.
-                        cudaEventSynchronize(copyCompleteEvent);
+                        cudaEventSynchronize(copyCompleteEvent[curr_slot]);
                     }
                 }
 
@@ -1440,24 +1722,31 @@ void TrtDetector::inferenceThread()
                             const float* cands = reinterpret_cast<const float*>(block + kDecodeHeaderBytes);
 
                             std::vector<int64_t> shape{ 1, kept, 6 };
+                            const SmallTargetDecode st = computeSmallTargetDecode();
+                            // GPU 内核已做面积自适应过滤,这里只让候选通过 conf 门槛并跑 NMS,
+                            // 不再重复 CPU 面积过滤(传 -1 关闭)。
                             std::vector<Detection> detections = postProcessYolo(
                                 cands, shape, numClasses,
-                                config.confidence_threshold,
+                                st.decodeFloor,
                                 config.nms_threshold,
-                                &lastNmsTimeValue
+                                &lastNmsTimeValue,
+                                -1.0f, 0.0
                             );
                             filterDetectionsByDepthMask(detections);
+                            capDetectionsToMax(detections, config.max_detections);
 
                             {
                                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
                                 detectionBuffer.boxes.clear();
                                 detectionBuffer.classes.clear();
+                                detectionBuffer.confidences.clear();
                                 for (const auto& det : detections)
                                 {
                                     detectionBuffer.boxes.push_back(det.box);
                                     detectionBuffer.classes.push_back(det.classId);
+                                    detectionBuffer.confidences.push_back(det.confidence);
                                 }
-                                detectionBuffer.version++;
+                                detectionBuffer.bumpVersionLocked();
                                 detectionBuffer.cv.notify_all();
                             }
                             continue;
@@ -1498,9 +1787,16 @@ void TrtDetector::inferenceThread()
                 float inferenceMs = 0.0f;
                 float copyMs = 0.0f;
 
-                cudaEventElapsedTime(&preprocessMs, preprocessStartEvent, inferenceStartEvent);
-                cudaEventElapsedTime(&inferenceMs, inferenceStartEvent, inferenceCompleteEvent);
-                cudaEventElapsedTime(&copyMs, inferenceCompleteEvent, copyCompleteEvent);
+                // 读"已完成那帧(post_slot)"的 GPU 计时:单缓冲下 post_slot=本帧且
+                // 已 sync;双缓冲下 post_slot=上一帧且已等过其 slotDoneEvent。这样即便
+                // CUDA Graph 把工作异步打包,也能拿到真实的推理/拷贝耗时,而不是读到
+                // 尚未完成的 event(值恒为 0)。post_slot<0 仅出现在双缓冲第一帧。
+                if (post_slot >= 0)
+                {
+                    cudaEventElapsedTime(&preprocessMs, preprocessStartEvent[post_slot], inferenceStartEvent[post_slot]);
+                    cudaEventElapsedTime(&inferenceMs, inferenceStartEvent[post_slot], inferenceCompleteEvent[post_slot]);
+                    cudaEventElapsedTime(&copyMs, inferenceCompleteEvent[post_slot], copyCompleteEvent[post_slot]);
+                }
 
                 lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(preprocessMs);
                 lastInferenceTimeValue = std::chrono::duration<double, std::milli>(inferenceMs);
@@ -1588,28 +1884,33 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
     if (itT != outputNeedsTranspose.end() && itT->second && shape.size() == 3)
         std::swap(shape[1], shape[2]);
 
+    const SmallTargetDecode st = computeSmallTargetDecode();
     detections = postProcessYolo(
         output,
         shape,
         numClasses,
-        config.confidence_threshold,
+        st.decodeFloor,
         config.nms_threshold,
-        nmsTime
+        nmsTime,
+        st.baseConf, st.areaThreshPx
     );
     filterDetectionsByDepthMask(detections);
+    capDetectionsToMax(detections, config.max_detections);
 
     {
         std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
         detectionBuffer.boxes.clear();
         detectionBuffer.classes.clear();
+        detectionBuffer.confidences.clear();
 
         for (const auto& det : detections)
         {
             detectionBuffer.boxes.push_back(det.box);
             detectionBuffer.classes.push_back(det.classId);
+            detectionBuffer.confidences.push_back(det.confidence);
         }
 
-        detectionBuffer.version++;
+        detectionBuffer.bumpVersionLocked();
         detectionBuffer.cv.notify_all();
     }
 }

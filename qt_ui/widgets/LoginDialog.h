@@ -13,10 +13,14 @@ class LoginDialog : public QDialog {
 public:
     explicit LoginDialog(QWidget* parent = nullptr);
 
+    static bool tryAutoLogin();
+
 private:
     void setMode(bool registerMode);
     void onPrimary();
     void showError(const QString& msg);
+    void showSuccess(const QString& msg);
+    void setUiBusy(bool busy);
 
     bool m_registerMode = false;
 
@@ -26,6 +30,8 @@ private:
     QLineEdit* m_pass{};
     QLineEdit* m_confirm{};
     QWidget* m_confirmRow{};
+    QLineEdit* m_invite{};
+    QWidget* m_inviteRow{};
     QPushButton* m_primaryBtn{};
     QPushButton* m_toggleBtn{};
     QLabel* m_status{};

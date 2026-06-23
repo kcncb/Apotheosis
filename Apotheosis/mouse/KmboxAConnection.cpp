@@ -108,6 +108,30 @@ void KmboxAConnection::middleUp()
     KM_middle(0);
 }
 
+void KmboxAConnection::side1Down()
+{
+    if (!is_open_) return;
+    KM_side1(1);
+}
+
+void KmboxAConnection::side1Up()
+{
+    if (!is_open_) return;
+    KM_side1(0);
+}
+
+void KmboxAConnection::side2Down()
+{
+    if (!is_open_) return;
+    KM_side2(1);
+}
+
+void KmboxAConnection::side2Up()
+{
+    if (!is_open_) return;
+    KM_side2(0);
+}
+
 void KmboxAConnection::wheel(int delta)
 {
     if (!is_open_) return;

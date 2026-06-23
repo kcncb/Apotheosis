@@ -1,0 +1,23 @@
+适用于 .NET Framework MSBuild 版本 18.5.4+cb4e32d21
+
+  Checking File Globs
+  lua_static.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\lua_static.lib
+  serial_embedded.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\serial_embedded.lib
+  capture.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(2,9): warning C4005: “NOMINMAX”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(2,9):
+      之前在命令行上声明的“NOMINMAX”
+  
+  eth_capture.cpp
+  draw_capture.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_capture.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_capture.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  正在生成代码...
+    正在创建库 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.lib 和对象 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.exp
+  ai.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\Apotheosis.exe

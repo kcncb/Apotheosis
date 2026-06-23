@@ -198,6 +198,7 @@ void Config::writeDefaultsInPlace()
     HotkeyProfile hk;
     apply_default_hotkey(hk);
     hotkeys.push_back(std::move(hk));
+    active_hotkey_group = u8"\xe9\xbb\x98\xe8\xae\xa4";
 
     macro_enabled = false;
     macro_script_path.clear();
@@ -302,7 +303,6 @@ bool Config::loadConfig(const std::string& filename)
     kmbox_a_pidvid = get_string("", "kmbox_a_pidvid", "");
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
-
     // ---------- AI ----------
     backend = get_string("", "backend", "TRT");
     dml_device_id = get_long("", "dml_device_id", 0);
@@ -378,6 +378,22 @@ bool Config::loadConfig(const std::string& filename)
         static_cast<float>(get_double("", "replay_playback_speed", 0.25)),
         0.05f, 2.0f);
 
+    // ── Auto capture (data collection) ──
+    auto_capture_enabled    = get_bool("",   "auto_capture_enabled",    false);
+    auto_capture_use_high   = get_bool("",   "auto_capture_use_high",   true);
+    auto_capture_high_conf  = std::clamp(
+        static_cast<float>(get_double("", "auto_capture_high_conf", 0.85)), 0.0f, 1.0f);
+    auto_capture_use_low    = get_bool("",   "auto_capture_use_low",    false);
+    auto_capture_low_conf   = std::clamp(
+        static_cast<float>(get_double("", "auto_capture_low_conf", 0.30)), 0.0f, 1.0f);
+    auto_capture_cooldown_ms = std::max(0,
+        static_cast<int>(get_long("", "auto_capture_cooldown_ms", 200)));
+    auto_capture_force_keys = splitString(
+        get_string("", "auto_capture_force_keys", "X2MouseButton"));
+    auto_capture_output_dir = get_string("", "auto_capture_output_dir",
+                                         "screenshots/auto");
+    auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
+
     // ---------- Crosshair color detector (palette + rect + area) ----------
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
@@ -396,6 +412,25 @@ bool Config::loadConfig(const std::string& filename)
     laser_target_center_y      = std::clamp(get_long("", "laser_target_center_y", 160), 0, 8192);
     laser_target_rect_w        = std::clamp(get_long("", "laser_target_rect_w",    60), 4, 4096);
     laser_target_rect_h        = std::clamp(get_long("", "laser_target_rect_h",    60), 4, 4096);
+
+    // ---- Flashlight halo detector ----
+    flashlight_show_preview         = get_bool("",   "flashlight_show_preview", false);
+    flashlight_brightness_threshold = std::clamp(get_long("", "flashlight_brightness_threshold", 220), 0, 255);
+    flashlight_min_radius           = std::clamp(get_long("", "flashlight_min_radius", 5),   1, 4096);
+    flashlight_max_radius           = std::clamp(get_long("", "flashlight_max_radius", 100), 1, 4096);
+    if (flashlight_max_radius < flashlight_min_radius)
+        flashlight_max_radius = flashlight_min_radius;
+    flashlight_min_circularity      = std::clamp(static_cast<float>(get_double("", "flashlight_min_circularity", 0.60)), 0.0f, 1.0f);
+    flashlight_open_radius          = std::clamp(get_long("", "flashlight_open_radius", 1), 0, 9);
+    flashlight_min_local_contrast   = std::clamp(get_long("", "flashlight_min_local_contrast", 30), 0, 255);
+    flashlight_target_class_id      = static_cast<int>(get_long("", "flashlight_target_class_id", -1));
+
+    // ---- Glass filter ----
+    glass_filter_show_preview  = get_bool("",   "glass_filter_show_preview", false);
+    glass_edge_ring_frac       = std::clamp(static_cast<float>(get_double("", "glass_edge_ring_frac",      0.15)), 0.05f, 0.45f);
+    glass_coverage_threshold   = std::clamp(static_cast<float>(get_double("", "glass_coverage_threshold",  0.45)), 0.05f, 0.95f);
+    glass_min_box_short_side   = std::clamp(get_long("", "glass_min_box_short_side", 20), 4, 4096);
+
     crosshair_colors.clear();
     {
         // Each [crosshair_color.N] section = one HSV band in the palette.
@@ -489,6 +524,58 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
+    glass_colors.clear();
+    {
+        // Each [glass_color.N] section = one HSV band in the glass-film
+        // palette (独立于 crosshair / laser palette)。
+        CSimpleIniA::TNamesDepend sections;
+        ini.GetAllSections(sections);
+        std::vector<std::pair<int, std::string>> gc_sections;
+        const std::string prefix = "glass_color.";
+        for (const auto& s : sections)
+        {
+            std::string sname = s.pItem;
+            if (sname.rfind(prefix, 0) != 0) continue;
+            int idx = 0;
+            try { idx = std::stoi(sname.substr(prefix.size())); }
+            catch (...) { continue; }
+            gc_sections.emplace_back(idx, std::move(sname));
+        }
+        std::sort(gc_sections.begin(), gc_sections.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& entry : gc_sections)
+        {
+            const char* sec = entry.second.c_str();
+            CrosshairColorProfileConfig c;
+            c.name    = get_string(sec, "name", "Glass");
+            c.enabled = get_bool(sec, "enabled", true);
+            c.h_low   = std::clamp(get_long(sec, "h_low",   90),  0, 179);
+            c.h_high  = std::clamp(get_long(sec, "h_high",  115), 0, 179);
+            c.s_min   = std::clamp(get_long(sec, "s_min",   5),   0, 255);
+            c.s_max   = std::clamp(get_long(sec, "s_max",   90),  0, 255);
+            c.v_min   = std::clamp(get_long(sec, "v_min",   170), 0, 255);
+            c.v_max   = std::clamp(get_long(sec, "v_max",   255), 0, 255);
+            glass_colors.push_back(std::move(c));
+        }
+        if (glass_colors.empty())
+        {
+            // 默认双带:浅蓝 + 浅绿薄膜。低 S 高 V 是玻璃膜区别于人物 /
+            // 背景物体的关键特征。
+            CrosshairColorProfileConfig blue;
+            blue.name = "Glass-Blue";
+            blue.h_low = 90; blue.h_high = 115;
+            blue.s_min = 5;  blue.s_max  = 90;
+            blue.v_min = 170;blue.v_max  = 255;
+            CrosshairColorProfileConfig green;
+            green.name = "Glass-Green";
+            green.h_low = 55; green.h_high = 85;
+            green.s_min = 5;  green.s_max  = 90;
+            green.v_min = 170;green.v_max  = 255;
+            glass_colors.push_back(std::move(blue));
+            glass_colors.push_back(std::move(green));
+        }
+    }
+
     // ---------- Macro (Lua / G HUB-compatible) ----------
     macro_enabled = get_bool("", "macro_enabled", false);
     macro_script_path = get_string("", "macro_script_path", "");
@@ -554,63 +641,121 @@ bool Config::loadConfig(const std::string& filename)
 
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
-            // 经典 PID,X / Y 轴各一套 P / I / D。向后兼容:旧 config 只有单套
-            // pid_p/pid_i/pid_d,先用它作为两轴的种子,再被新的 pid_x_*/pid_y_* 覆盖
-            // (若存在)。旧的 pid_track_* / flick_track_* / aim_lock_strength 读到也忽略。
-            const double legacy_p = get_double(sec, "pid_p", hk.pid_x_p);
-            const double legacy_i = get_double(sec, "pid_i", hk.pid_x_i);
-            const double legacy_d = get_double(sec, "pid_d", hk.pid_x_d);
-            hk.pid_x_p = static_cast<float>(get_double(sec, "pid_x_p", legacy_p));
-            hk.pid_x_i = static_cast<float>(get_double(sec, "pid_x_i", legacy_i));
-            hk.pid_x_d = static_cast<float>(get_double(sec, "pid_x_d", legacy_d));
-            hk.pid_y_p = static_cast<float>(get_double(sec, "pid_y_p", legacy_p));
-            hk.pid_y_i = static_cast<float>(get_double(sec, "pid_y_i", legacy_i));
-            hk.pid_y_d = static_cast<float>(get_double(sec, "pid_y_d", legacy_d));
 
-            hk.predictionInterval = static_cast<float>(get_double(sec, "predictionInterval", hk.predictionInterval));
-            hk.prediction_futurePositions = get_long(sec, "prediction_futurePositions", hk.prediction_futurePositions);
-            hk.draw_futurePositions = get_bool(sec, "draw_futurePositions", hk.draw_futurePositions);
+            // ART 瞄准参数
+            hk.speed_x         = static_cast<float>(get_double(sec, "speed_x",         hk.speed_x));
+            hk.speed_y         = static_cast<float>(get_double(sec, "speed_y",         hk.speed_y));
+            hk.dead_zone_px    = static_cast<float>(get_double(sec, "dead_zone_px",    hk.dead_zone_px));
+            hk.mover_kind      = static_cast<int>(get_long(sec, "mover_kind",          hk.mover_kind));
 
-            // 卡尔曼:精简为 启用 / 平滑度 / 预测提前量(旧的 α/β/阻尼/最大速度/预热/
-            // 补偿/额外预测/重置超时 已移除,内部固定)。
-            hk.kalman_enabled    = get_bool(sec, "kalman_enabled", hk.kalman_enabled);
-            hk.kalman_smoothness = static_cast<float>(get_double(sec, "kalman_smoothness", hk.kalman_smoothness));
-            hk.kalman_lead       = static_cast<float>(get_double(sec, "kalman_lead",       hk.kalman_lead));
+            // 疾风 (Predictive)。旧 ini 里的 predictive_pred_weight_x 自动迁移成 pred_weight。
+            hk.predictive_kp_x        = static_cast<float>(get_double(sec, "predictive_kp_x",        hk.predictive_kp_x));
+            hk.predictive_kp_y        = static_cast<float>(get_double(sec, "predictive_kp_y",        hk.predictive_kp_y));
+            hk.predictive_kd          = static_cast<float>(get_double(sec, "predictive_kd",          hk.predictive_kd));
+            hk.predictive_pred_weight = static_cast<float>(
+                get_double(sec, "predictive_pred_weight",
+                           get_double(sec, "predictive_pred_weight_x", hk.predictive_pred_weight)));
 
-            hk.crosshair_detect_enabled = get_bool(sec, "crosshair_detect_enabled", false);
-            hk.laser_detect_enabled     = get_bool(sec, "laser_detect_enabled", false);
+            hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
+            hk.laser_detect_enabled      = get_bool(sec, "laser_detect_enabled", false);
+            hk.flashlight_detect_enabled = get_bool(sec, "flashlight_detect_enabled", false);
+            hk.glass_filter_enabled      = get_bool(sec, "glass_filter_enabled",      false);
 
-            hk.lock_switch_score_margin = static_cast<float>(
-                get_double(sec, "lock_switch_score_margin", hk.lock_switch_score_margin));
-            hk.lock_switch_min_frames = get_long(sec, "lock_switch_min_frames", hk.lock_switch_min_frames);
-            hk.lock_hold_min_frames   = get_long(sec, "lock_hold_min_frames",   hk.lock_hold_min_frames);
+            // 锁定灵活度:优先读新字段;退化路径从旧 lock_stickiness / kill_detect_sensitivity
+            // / lock_switch_score_margin 任一字段反推算。
+            {
+                const float legacy_margin = static_cast<float>(
+                    get_double(sec, "lock_switch_score_margin", 0.40 * (1.0 - hk.lock_aggression)));
+                const float agg_from_margin = std::clamp(1.0f - legacy_margin / 0.40f, 0.0f, 1.0f);
+                const float legacy_sticky = static_cast<float>(
+                    get_double(sec, "lock_stickiness", 1.0 - hk.lock_aggression));
+                const float agg_from_sticky = std::clamp(1.0f - legacy_sticky, 0.0f, 1.0f);
+                const float legacy_sens = static_cast<float>(
+                    get_double(sec, "kill_detect_sensitivity", hk.lock_aggression));
+                // 取这三个旧字段反推算的中值作为兼容默认(用户调过任意一个都不会被忽略)。
+                float legacy_agg = 0.333f * (agg_from_margin + agg_from_sticky + legacy_sens);
+                legacy_agg = std::clamp(legacy_agg, 0.0f, 1.0f);
+                hk.lock_aggression = static_cast<float>(
+                    get_double(sec, "lock_aggression", legacy_agg));
+            }
             hk.y_offset_size_decay_enabled = get_bool(sec, "y_offset_size_decay_enabled",
                                                        hk.y_offset_size_decay_enabled);
-            hk.y_offset_size_decay_low_frac = static_cast<float>(
-                get_double(sec, "y_offset_size_decay_low_frac", hk.y_offset_size_decay_low_frac));
-            hk.y_offset_size_decay_high_frac = static_cast<float>(
-                get_double(sec, "y_offset_size_decay_high_frac", hk.y_offset_size_decay_high_frac));
 
-            hk.smart_trigger_enabled      = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
-            hk.smart_trigger_hit_scale_x  = static_cast<float>(get_double(sec, "smart_trigger_hit_scale_x", hk.smart_trigger_hit_scale_x));
-            hk.smart_trigger_hit_scale_y  = static_cast<float>(get_double(sec, "smart_trigger_hit_scale_y", hk.smart_trigger_hit_scale_y));
-            hk.smart_trigger_reaction_ms  = get_long(sec, "smart_trigger_reaction_ms", hk.smart_trigger_reaction_ms);
-            hk.smart_trigger_hold_ms      = get_long(sec, "smart_trigger_hold_ms", hk.smart_trigger_hold_ms);
-            hk.smart_trigger_cooldown_ms  = get_long(sec, "smart_trigger_cooldown_ms", hk.smart_trigger_cooldown_ms);
+            // 智能扳机:优先读新字段;否则从旧 reaction_ms 反推算 aggression。
+            // hold_ms / cooldown_ms 现在是用户直接控制的字段(不再由 aggression
+            // 反算),缺省退化路径:旧 ini 没写就按 30+30*agg / 100-90*agg 反算。
+            {
+                const int legacy_react = static_cast<int>(
+                    get_long(sec, "smart_trigger_reaction_ms",
+                             static_cast<int>(std::lround(80.0 - 80.0 * hk.smart_trigger_aggression))));
+                const float legacy_agg = std::clamp((80.0f - legacy_react) / 80.0f, 0.0f, 1.0f);
+                const double legacy_scale_x = get_double(sec, "smart_trigger_hit_scale_x", hk.smart_trigger_hit_scale);
+                const double legacy_scale_y = get_double(sec, "smart_trigger_hit_scale_y", legacy_scale_x);
+                const double legacy_scale   = 0.5 * (legacy_scale_x + legacy_scale_y);
+                hk.smart_trigger_enabled    = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
+                hk.smart_trigger_hit_scale  = static_cast<float>(
+                    get_double(sec, "smart_trigger_hit_scale", legacy_scale));
+                hk.smart_trigger_aggression = static_cast<float>(
+                    get_double(sec, "smart_trigger_aggression", legacy_agg));
+
+                const int legacy_hold = static_cast<int>(std::lround(
+                    30.0 + 30.0 * hk.smart_trigger_aggression));
+                const int legacy_cool = static_cast<int>(std::lround(
+                    100.0 - 90.0 * hk.smart_trigger_aggression));
+                hk.smart_trigger_hold_ms = static_cast<int>(
+                    get_long(sec, "smart_trigger_hold_ms", legacy_hold));
+                hk.smart_trigger_cooldown_ms = static_cast<int>(
+                    get_long(sec, "smart_trigger_cooldown_ms", legacy_cool));
+            }
 
             hk.threat_priority_enabled  = get_bool(sec, "threat_priority_enabled", hk.threat_priority_enabled);
             hk.threat_weight            = static_cast<float>(get_double(sec, "threat_weight", hk.threat_weight));
             hk.threat_head_class_id     = get_long(sec, "threat_head_class_id", hk.threat_head_class_id);
-            hk.threat_depth_head_ratio  = static_cast<float>(get_double(sec, "threat_depth_head_ratio", hk.threat_depth_head_ratio));
 
-            hk.dynamic_fov_enabled         = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
-            hk.dynamic_fov_margin_frac     = static_cast<float>(get_double(sec, "dynamic_fov_margin_frac",     hk.dynamic_fov_margin_frac));
-            hk.dynamic_fov_min_radius_frac = static_cast<float>(get_double(sec, "dynamic_fov_min_radius_frac", hk.dynamic_fov_min_radius_frac));
+            // 动态 FOV:优先读 strength;否则从旧 margin_frac 反推算。
+            {
+                hk.dynamic_fov_enabled = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
+                const float legacy_margin = static_cast<float>(
+                    get_double(sec, "dynamic_fov_margin_frac", 2.0 - hk.dynamic_fov_strength));
+                const float legacy_strength = std::clamp(2.0f - legacy_margin, 0.0f, 1.0f);
+                hk.dynamic_fov_strength = static_cast<float>(
+                    get_double(sec, "dynamic_fov_strength", legacy_strength));
+            }
 
             hk.close_range_head_aim_enabled    = get_bool(sec, "close_range_head_aim_enabled", hk.close_range_head_aim_enabled);
             hk.close_range_head_class_id       = get_long(sec, "close_range_head_class_id",    hk.close_range_head_class_id);
-            hk.close_range_trigger_height_frac = static_cast<float>(
-                get_double(sec, "close_range_trigger_height_frac", hk.close_range_trigger_height_frac));
+
+            // 瞄准轨迹曲线
+            hk.aim_path_mode        = get_long(sec, "aim_path_mode", hk.aim_path_mode);
+            hk.aim_path_bezier_cx1  = static_cast<float>(get_double(sec, "aim_path_bezier_cx1", hk.aim_path_bezier_cx1));
+            hk.aim_path_bezier_cy1  = static_cast<float>(get_double(sec, "aim_path_bezier_cy1", hk.aim_path_bezier_cy1));
+            hk.aim_path_bezier_cx2  = static_cast<float>(get_double(sec, "aim_path_bezier_cx2", hk.aim_path_bezier_cx2));
+            hk.aim_path_bezier_cy2  = static_cast<float>(get_double(sec, "aim_path_bezier_cy2", hk.aim_path_bezier_cy2));
+            {
+                const std::string raw = get_string(sec, "aim_path_custom_samples", "");
+                hk.aim_path_custom_samples.clear();
+                if (!raw.empty())
+                {
+                    for (const auto& tok : splitString(raw, ','))
+                    {
+                        try {
+                            float v = std::stof(tok);
+                            v = std::clamp(v, -1.0f, 1.0f);
+                            hk.aim_path_custom_samples.push_back(v);
+                        } catch (...) { /* ignore malformed sample */ }
+                    }
+                    // Endpoints are pinned to zero so the path actually
+                    // ends ON the target — load-time enforcement guards
+                    // against hand-edited ini files.
+                    if (!hk.aim_path_custom_samples.empty())
+                    {
+                        hk.aim_path_custom_samples.front() = 0.0f;
+                        hk.aim_path_custom_samples.back()  = 0.0f;
+                    }
+                }
+            }
+
+            // (kill_detect 已并入 lock_aggression,旧字段已在上方迁移)
 
             hotkeys.push_back(std::move(hk));
         }
@@ -623,45 +768,46 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
-    // Clamp PID / kalman params to safe ranges on every hotkey.
-    auto clamp_kalman_fields = [](HotkeyProfile& hk) {
-        hk.kalman_smoothness = std::clamp(hk.kalman_smoothness, 0.0f, 1.0f);
-        hk.kalman_lead       = std::clamp(hk.kalman_lead,       0.0f, 2.0f);
-        hk.pid_x_p = std::max(hk.pid_x_p, 0.0f);
-        hk.pid_x_i = std::max(hk.pid_x_i, 0.0f);
-        hk.pid_x_d = std::max(hk.pid_x_d, 0.0f);
-        hk.pid_y_p = std::max(hk.pid_y_p, 0.0f);
-        hk.pid_y_i = std::max(hk.pid_y_i, 0.0f);
-        hk.pid_y_d = std::max(hk.pid_y_d, 0.0f);
+    active_hotkey_group = get_string("", "active_hotkey_group", u8"\xe9\xbb\x98\xe8\xae\xa4");
 
-        hk.lock_switch_score_margin = std::clamp(hk.lock_switch_score_margin, 0.0f, 200.0f);
-        hk.lock_switch_min_frames   = std::clamp(hk.lock_switch_min_frames, 1, 6000);
-        hk.lock_hold_min_frames     = std::clamp(hk.lock_hold_min_frames, 0, 2400);
-        hk.y_offset_size_decay_low_frac  = std::clamp(hk.y_offset_size_decay_low_frac,  0.0f, 1.0f);
-        hk.y_offset_size_decay_high_frac = std::clamp(hk.y_offset_size_decay_high_frac, 0.0f, 1.0f);
-        if (hk.y_offset_size_decay_high_frac <= hk.y_offset_size_decay_low_frac)
-            hk.y_offset_size_decay_high_frac = std::min(1.0f, hk.y_offset_size_decay_low_frac + 0.01f);
+    // Guard against double-encoded UTF-8 group names: if the loaded
+    // active_hotkey_group doesn't match any hotkey's group, fall back
+    // to the group of the first hotkey (or the default).
+    {
+        bool matched = false;
+        for (const auto& hk : hotkeys)
+            if (hk.group == active_hotkey_group) { matched = true; break; }
+        if (!matched && !hotkeys.empty())
+            active_hotkey_group = hotkeys[0].group;
+    }
 
-        hk.smart_trigger_hit_scale_x = std::clamp(hk.smart_trigger_hit_scale_x, 0.05f, 1.0f);
-        hk.smart_trigger_hit_scale_y = std::clamp(hk.smart_trigger_hit_scale_y, 0.05f, 1.0f);
-        hk.smart_trigger_reaction_ms = std::clamp(hk.smart_trigger_reaction_ms, 0, 1000);
-        hk.smart_trigger_hold_ms     = std::clamp(hk.smart_trigger_hold_ms,     5, 5000);
-        hk.smart_trigger_cooldown_ms = std::clamp(hk.smart_trigger_cooldown_ms, 0, 5000);
+    auto clamp_aim_fields = [](HotkeyProfile& hk) {
+        hk.speed_x        = std::clamp(hk.speed_x,        0.0f, 2.0f);
+        hk.speed_y        = std::clamp(hk.speed_y,        0.0f, 2.0f);
+        hk.dead_zone_px   = std::clamp(hk.dead_zone_px,   0.0f, 20.0f);
+        hk.mover_kind     = std::clamp(hk.mover_kind,     0, 1);
+
+        // 疾风 clamp
+        hk.predictive_kp_x        = std::clamp(hk.predictive_kp_x,        0.0f, 10.0f);
+        hk.predictive_kp_y        = std::clamp(hk.predictive_kp_y,        0.0f, 10.0f);
+        hk.predictive_kd          = std::clamp(hk.predictive_kd,          0.0f, 5.0f);
+        hk.predictive_pred_weight = std::clamp(hk.predictive_pred_weight, 0.0f, 3.0f);
+
+        hk.lock_aggression            = std::clamp(hk.lock_aggression,            0.0f, 1.0f);
+        hk.smart_trigger_hit_scale    = std::clamp(hk.smart_trigger_hit_scale,    0.05f, 1.0f);
+        hk.smart_trigger_aggression   = std::clamp(hk.smart_trigger_aggression,   0.0f, 1.0f);
+        hk.smart_trigger_hold_ms      = std::clamp(hk.smart_trigger_hold_ms,      5, 5000);
+        hk.smart_trigger_cooldown_ms  = std::clamp(hk.smart_trigger_cooldown_ms,  0, 5000);
+        hk.dynamic_fov_strength       = std::clamp(hk.dynamic_fov_strength,       0.0f, 1.0f);
 
         hk.threat_weight = std::clamp(hk.threat_weight, 0.0f, 1.0f);
-        hk.threat_depth_head_ratio = std::clamp(hk.threat_depth_head_ratio, 0.0f, 1.0f);
         if (hk.threat_head_class_id < -1)
             hk.threat_head_class_id = -1;
-
-        hk.close_range_trigger_height_frac = std::clamp(hk.close_range_trigger_height_frac, 0.05f, 1.0f);
         if (hk.close_range_head_class_id < -1)
             hk.close_range_head_class_id = -1;
-
-        hk.dynamic_fov_margin_frac     = std::clamp(hk.dynamic_fov_margin_frac,     1.0f, 3.0f);
-        hk.dynamic_fov_min_radius_frac = std::clamp(hk.dynamic_fov_min_radius_frac, 0.05f, 1.0f);
     };
     for (auto& hk : hotkeys)
-        clamp_kalman_fields(hk);
+        clamp_aim_fields(hk);
 
     // Aim hotkey triggers are restricted to the four mouse buttons. Anything
     // else (old keyboard bindings, typos) is rewritten to "None" so the UI
@@ -825,7 +971,19 @@ bool Config::saveConfig(const std::string& filename)
         << "laser_target_center_x = "     << laser_target_center_x     << "\n"
         << "laser_target_center_y = "     << laser_target_center_y     << "\n"
         << "laser_target_rect_w = "       << laser_target_rect_w       << "\n"
-        << "laser_target_rect_h = "       << laser_target_rect_h       << "\n\n";
+        << "laser_target_rect_h = "       << laser_target_rect_h       << "\n"
+        << "flashlight_show_preview = "         << to_bool_str(flashlight_show_preview)         << "\n"
+        << "flashlight_brightness_threshold = " << flashlight_brightness_threshold              << "\n"
+        << "flashlight_min_radius = "           << flashlight_min_radius                        << "\n"
+        << "flashlight_max_radius = "           << flashlight_max_radius                        << "\n"
+        << "flashlight_min_circularity = "      << flashlight_min_circularity                   << "\n"
+        << "flashlight_open_radius = "          << flashlight_open_radius                       << "\n"
+        << "flashlight_min_local_contrast = "   << flashlight_min_local_contrast                << "\n"
+        << "flashlight_target_class_id = "      << flashlight_target_class_id                   << "\n"
+        << "glass_filter_show_preview = "       << to_bool_str(glass_filter_show_preview)       << "\n"
+        << "glass_edge_ring_frac = "            << glass_edge_ring_frac                         << "\n"
+        << "glass_coverage_threshold = "        << glass_coverage_threshold                     << "\n"
+        << "glass_min_box_short_side = "        << glass_min_box_short_side                     << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -833,6 +991,17 @@ bool Config::saveConfig(const std::string& filename)
         << "screenshot_button = " << joinStrings(screenshot_button) << "\n"
         << "screenshot_delay = " << screenshot_delay << "\n"
         << "verbose = " << to_bool_str(verbose) << "\n\n";
+
+    file << "# Auto capture (data collection harness)\n"
+        << "auto_capture_enabled = "    << to_bool_str(auto_capture_enabled) << "\n"
+        << "auto_capture_use_high = "   << to_bool_str(auto_capture_use_high) << "\n"
+        << "auto_capture_high_conf = "  << auto_capture_high_conf << "\n"
+        << "auto_capture_use_low = "    << to_bool_str(auto_capture_use_low) << "\n"
+        << "auto_capture_low_conf = "   << auto_capture_low_conf << "\n"
+        << "auto_capture_cooldown_ms = " << auto_capture_cooldown_ms << "\n"
+        << "auto_capture_force_keys = " << joinStrings(auto_capture_force_keys) << "\n"
+        << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
+        << "auto_capture_save_label = " << to_bool_str(auto_capture_save_label) << "\n\n";
 
     file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
             "# macro_script_path; runtime loads it on startup when macro_enabled\n"
@@ -855,6 +1024,8 @@ bool Config::saveConfig(const std::string& filename)
     }
     file << "\n";
 
+    file << "active_hotkey_group = " << active_hotkey_group << "\n\n";
+
     // Hotkey profiles.
     for (size_t i = 0; i < hotkeys.size(); ++i)
     {
@@ -867,38 +1038,25 @@ bool Config::saveConfig(const std::string& filename)
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
         file << std::fixed << std::setprecision(4)
-             << "pid_x_p = " << hk.pid_x_p << "\n"
-             << "pid_x_i = " << hk.pid_x_i << "\n"
-             << "pid_x_d = " << hk.pid_x_d << "\n"
-             << "pid_y_p = " << hk.pid_y_p << "\n"
-             << "pid_y_i = " << hk.pid_y_i << "\n"
-             << "pid_y_d = " << hk.pid_y_d << "\n";
-        file << std::fixed << std::setprecision(2)
-             << "predictionInterval = " << hk.predictionInterval << "\n"
-             << std::setprecision(0)
-             << "prediction_futurePositions = " << hk.prediction_futurePositions << "\n"
-             << "draw_futurePositions = " << to_bool_str(hk.draw_futurePositions) << "\n"
-             << "kalman_enabled = " << to_bool_str(hk.kalman_enabled) << "\n"
+             << "speed_x = "         << hk.speed_x         << "\n"
+             << "speed_y = "         << hk.speed_y         << "\n"
+             << "dead_zone_px = "    << hk.dead_zone_px    << "\n"
+             << "mover_kind = "      << hk.mover_kind      << "\n"
+             << "predictive_kp_x = "        << hk.predictive_kp_x        << "\n"
+             << "predictive_kp_y = "        << hk.predictive_kp_y        << "\n"
+             << "predictive_kd = "          << hk.predictive_kd          << "\n"
+             << "predictive_pred_weight = " << hk.predictive_pred_weight << "\n"
+             << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
+             << "laser_detect_enabled = "      << to_bool_str(hk.laser_detect_enabled)      << "\n"
+             << "flashlight_detect_enabled = " << to_bool_str(hk.flashlight_detect_enabled) << "\n"
+             << "glass_filter_enabled = "      << to_bool_str(hk.glass_filter_enabled)      << "\n"
              << std::fixed << std::setprecision(4)
-             << "kalman_smoothness = " << hk.kalman_smoothness << "\n"
-             << "kalman_lead = "       << hk.kalman_lead       << "\n"
-             << "crosshair_detect_enabled = " << to_bool_str(hk.crosshair_detect_enabled) << "\n"
-             << "laser_detect_enabled = " << to_bool_str(hk.laser_detect_enabled) << "\n"
-             << std::fixed << std::setprecision(4)
-             << "lock_switch_score_margin = " << hk.lock_switch_score_margin << "\n"
-             << std::setprecision(0)
-             << "lock_switch_min_frames = "   << hk.lock_switch_min_frames << "\n"
-             << "lock_hold_min_frames = "     << hk.lock_hold_min_frames << "\n"
+             << "lock_aggression = " << hk.lock_aggression << "\n"
              << "y_offset_size_decay_enabled = " << to_bool_str(hk.y_offset_size_decay_enabled) << "\n"
-             << std::fixed << std::setprecision(3)
-             << "y_offset_size_decay_low_frac = "  << hk.y_offset_size_decay_low_frac  << "\n"
-             << "y_offset_size_decay_high_frac = " << hk.y_offset_size_decay_high_frac << "\n"
-             << "smart_trigger_enabled = " << to_bool_str(hk.smart_trigger_enabled) << "\n"
-             << std::fixed << std::setprecision(3)
-             << "smart_trigger_hit_scale_x = " << hk.smart_trigger_hit_scale_x << "\n"
-             << "smart_trigger_hit_scale_y = " << hk.smart_trigger_hit_scale_y << "\n"
+             << "smart_trigger_enabled = "   << to_bool_str(hk.smart_trigger_enabled) << "\n"
+             << "smart_trigger_hit_scale = " << hk.smart_trigger_hit_scale << "\n"
+             << "smart_trigger_aggression = " << hk.smart_trigger_aggression << "\n"
              << std::setprecision(0)
-             << "smart_trigger_reaction_ms = " << hk.smart_trigger_reaction_ms << "\n"
              << "smart_trigger_hold_ms = " << hk.smart_trigger_hold_ms << "\n"
              << "smart_trigger_cooldown_ms = " << hk.smart_trigger_cooldown_ms << "\n"
              << "threat_priority_enabled = " << to_bool_str(hk.threat_priority_enabled) << "\n"
@@ -906,18 +1064,28 @@ bool Config::saveConfig(const std::string& filename)
              << "threat_weight = " << hk.threat_weight << "\n"
              << std::setprecision(0)
              << "threat_head_class_id = " << hk.threat_head_class_id << "\n"
-             << std::fixed << std::setprecision(3)
-             << "threat_depth_head_ratio = " << hk.threat_depth_head_ratio << "\n"
-             << std::setprecision(0)
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
-             << "dynamic_fov_margin_frac = "     << hk.dynamic_fov_margin_frac << "\n"
-             << "dynamic_fov_min_radius_frac = " << hk.dynamic_fov_min_radius_frac << "\n"
+             << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
              << "close_range_head_aim_enabled = " << to_bool_str(hk.close_range_head_aim_enabled) << "\n"
              << std::setprecision(0)
              << "close_range_head_class_id = " << hk.close_range_head_class_id << "\n"
-             << std::fixed << std::setprecision(3)
-             << "close_range_trigger_height_frac = " << hk.close_range_trigger_height_frac << "\n";
+             << "aim_path_mode = " << hk.aim_path_mode << "\n"
+             << std::fixed << std::setprecision(4)
+             << "aim_path_bezier_cx1 = " << hk.aim_path_bezier_cx1 << "\n"
+             << "aim_path_bezier_cy1 = " << hk.aim_path_bezier_cy1 << "\n"
+             << "aim_path_bezier_cx2 = " << hk.aim_path_bezier_cx2 << "\n"
+             << "aim_path_bezier_cy2 = " << hk.aim_path_bezier_cy2 << "\n";
+        if (!hk.aim_path_custom_samples.empty())
+        {
+            file << "aim_path_custom_samples = ";
+            for (size_t si = 0; si < hk.aim_path_custom_samples.size(); ++si)
+            {
+                if (si > 0) file << ',';
+                file << hk.aim_path_custom_samples[si];
+            }
+            file << "\n";
+        }
 
         file << "\n";
     }
@@ -943,6 +1111,21 @@ bool Config::saveConfig(const std::string& filename)
     {
         const auto& c = laser_colors[i];
         file << "[laser_color." << i << "]\n"
+             << "name = "    << c.name    << "\n"
+             << "enabled = " << to_bool_str(c.enabled) << "\n"
+             << "h_low = "   << c.h_low   << "\n"
+             << "h_high = "  << c.h_high  << "\n"
+             << "s_min = "   << c.s_min   << "\n"
+             << "s_max = "   << c.s_max   << "\n"
+             << "v_min = "   << c.v_min   << "\n"
+             << "v_max = "   << c.v_max   << "\n\n";
+    }
+
+    // Glass-film color palette: 独立调色板,用于玻璃过滤的边缘环命中判定。
+    for (size_t i = 0; i < glass_colors.size(); ++i)
+    {
+        const auto& c = glass_colors[i];
+        file << "[glass_color." << i << "]\n"
              << "name = "    << c.name    << "\n"
              << "enabled = " << to_bool_str(c.enabled) << "\n"
              << "h_low = "   << c.h_low   << "\n"

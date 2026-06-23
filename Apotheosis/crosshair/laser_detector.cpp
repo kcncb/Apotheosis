@@ -257,6 +257,35 @@ LaserResult LaserDetector::detectLine(
     // Direction from the stable PCA axis (muzzle→tip), not the flickering tip.
     cv::Point2f d = best.axis;
     const float dlen = std::hypot(d.x, d.y);
+
+    // ── Crosshair-hint snap ───────────────────────────────────────────────
+    // If the caller passed a crosshair-colour hit and the fitted line passes
+    // through it, lock the tip to that exact point. This is the precise
+    // reticle location when both colour detectors are on, beats the
+    // target-box projection (which is geometric, not visual). When the
+    // hint is off-line we fall through to the existing projection path.
+    if (settings.use_crosshair_hint && dlen > 1e-3f)
+    {
+        const cv::Point2f nd(d.x / dlen, d.y / dlen);
+        const cv::Point2f hint(settings.crosshair_hint_x, settings.crosshair_hint_y);
+        const cv::Point2f rel(hint.x - muzzle_g.x, hint.y - muzzle_g.y);
+        const float t_par = rel.x * nd.x + rel.y * nd.y;           // along axis
+        const float t_perp = std::abs(rel.x * nd.y - rel.y * nd.x); // perpendicular
+        const float tol = std::max(1.0f, settings.crosshair_hint_tol_px);
+        if (t_par > 0.0f && t_perp <= tol)
+        {
+            tip_g = cv::Point2f(
+                std::clamp(hint.x, 0.0f, static_cast<float>(bgrFrame.cols - 1)),
+                std::clamp(hint.y, 0.0f, static_cast<float>(bgrFrame.rows - 1)));
+            LaserResult outSnap;
+            outSnap.found = true;
+            outSnap.muzzle = muzzle_g;
+            outSnap.visible_tip = vtip_g;
+            outSnap.tip = tip_g;
+            return outSnap;
+        }
+    }
+
     if (dlen > 1e-3f)
     {
         d.x /= dlen;

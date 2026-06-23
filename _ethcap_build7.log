@@ -1,0 +1,8 @@
+适用于 .NET Framework MSBuild 版本 18.5.4+cb4e32d21
+
+  Checking File Globs
+  serial_embedded.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\serial_embedded.lib
+  lua_static.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\lua_static.lib
+  eth_capture.cpp
+    正在创建库 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.lib 和对象 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.exp
+  ai.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\Apotheosis.exe

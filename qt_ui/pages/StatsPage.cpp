@@ -158,10 +158,14 @@ StatsPage::StatsPage(QWidget* parent)
         return cell;
     };
 
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("推理 FPS"), m_fpsValue),        0, 0);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("采集延迟"), m_captureLatency),   0, 1);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("推理延迟"), m_inferenceLatency), 1, 0);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("总延迟"),   m_totalLatency),     1, 1);
+    // "采集 FPS" = 消费循环每秒迭代数(captureFps);"产帧 FPS" = receive 线程
+    // 每秒真正解码+入队的帧数(captureSourceFps,wire+NVDEC 的真实速度)。两个
+    // 数字分开看能立刻判断瓶颈在采集线程还是产帧侧。
+    metricGrid->addWidget(makeMetricCell(QStringLiteral("采集 FPS"), m_fpsValue),         0, 0);
+    metricGrid->addWidget(makeMetricCell(QStringLiteral("产帧 FPS"), m_sourceFpsValue),   0, 1);
+    metricGrid->addWidget(makeMetricCell(QStringLiteral("采集延迟"), m_captureLatency),   1, 0);
+    metricGrid->addWidget(makeMetricCell(QStringLiteral("推理延迟"), m_inferenceLatency), 1, 1);
+    metricGrid->addWidget(makeMetricCell(QStringLiteral("总延迟"),   m_totalLatency),     2, 0);
     metricGrid->setColumnStretch(0, 1);
     metricGrid->setColumnStretch(1, 1);
 
@@ -174,7 +178,36 @@ StatsPage::StatsPage(QWidget* parent)
     graphCard->contentLayout()->addWidget(m_graph);
     layout->addWidget(graphCard);
 
-    // ── Card 3: 系统资源 (collapsible) ──
+    // ── Card 3: 接收诊断 (collapsible) ──
+    // 把"产帧 FPS 为什么上不去"拆成五项互不重叠的桶,直接定位损失发生在哪一层:
+    //   发包速率 — sender 真实发出的帧数(理论 = sender FPS,接收端通过 frameId
+    //              跨度反推。低于 sender 设定 = sender 自己没发够)。
+    //   网络丢帧 — sender 发了但一个 fragment 都没到的帧(senderSpan - started)。
+    //              基本就是 wire/pcap kernel ring 满前 drop 整组包,以及网线/
+    //              交换机抖动。
+    //   重组失败 — 收到 fragment 但凑不齐整帧(started - decoded)。某个分片晚
+    //              到/丢了,无法拼。
+    //   pcap内核丢 — pcap_stats 的 ps_drop:内核 ring buffer 满后 drop。如果这
+    //              个非 0,说明缓冲不够或 receive thread 抢不到 CPU。
+    //   NIC驱动丢 — pcap_stats 的 ps_ifdrop:NIC/驱动层 drop,通常意味着 RX 描
+    //              述符不足/中断处理慢,要去网卡设置里调 RSS / 增大 Rx buffer。
+    auto* rxCard = new CardWidget(QStringLiteral("接收诊断 (eth_capture, 每秒)"), QStringLiteral("activity"));
+    rxCard->setCollapsible(true);
+
+    auto addRxRow = [rxCard](const QString& caption, QLabel*& outLabel) {
+        outLabel = new QLabel(QStringLiteral("--"));
+        outLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        rxCard->contentLayout()->addWidget(FormKit::fieldRow(caption, outLabel));
+    };
+    addRxRow(QStringLiteral("发包速率"),    m_rxSenderSpan);
+    addRxRow(QStringLiteral("网络丢帧"),    m_rxWireLost);
+    addRxRow(QStringLiteral("重组失败"),    m_rxPartialLost);
+    addRxRow(QStringLiteral("pcap 内核丢"), m_rxPcapKernelDrop);
+    addRxRow(QStringLiteral("NIC 驱动丢"),  m_rxPcapIfDrop);
+
+    layout->addWidget(rxCard);
+
+    // ── Card 4: 系统资源 (collapsible) ──
     auto* sysCard = new CardWidget(QStringLiteral("系统资源"), QStringLiteral("cpu"));
     sysCard->setCollapsible(true);
 
@@ -195,6 +228,14 @@ void StatsPage::setFps(double fps) {
     m_graph->addDataPoint(fps);
 }
 
+void StatsPage::setSourceFps(double fps) {
+    if (!m_sourceFpsValue) return;
+    if (fps > 0.5)
+        m_sourceFpsValue->setText(QString::number(fps, 'f', 1));
+    else
+        m_sourceFpsValue->setText(QStringLiteral("--"));
+}
+
 void StatsPage::setCaptureLatency(double ms) {
     m_captureLatency->setText(QStringLiteral("%1 ms").arg(ms, 0, 'f', 1));
 }
@@ -213,4 +254,19 @@ void StatsPage::setGpuMemory(const QString& text) {
 
 void StatsPage::setCpuCores(const QString& text) {
     m_cpuCores->setText(text);
+}
+
+void StatsPage::setReceiverDiagnostics(int senderSpanFps,
+                                       int wireLostFps,
+                                       int partialLostFps,
+                                       int pcapKernelDroppedFps,
+                                       int pcapIfDroppedFps) {
+    auto fmt = [](int v) {
+        return (v > 0) ? QString::number(v) : QStringLiteral("0");
+    };
+    if (m_rxSenderSpan)     m_rxSenderSpan->setText(fmt(senderSpanFps));
+    if (m_rxWireLost)       m_rxWireLost->setText(fmt(wireLostFps));
+    if (m_rxPartialLost)    m_rxPartialLost->setText(fmt(partialLostFps));
+    if (m_rxPcapKernelDrop) m_rxPcapKernelDrop->setText(fmt(pcapKernelDroppedFps));
+    if (m_rxPcapIfDrop)     m_rxPcapIfDrop->setText(fmt(pcapIfDroppedFps));
 }

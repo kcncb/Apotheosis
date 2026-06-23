@@ -61,6 +61,19 @@ struct LaserDetectorSettings
     int target_rect_w = 60;
     int target_center_y = 160;
     int target_rect_h = 60;
+
+    // Optional crosshair-colour hint (DETECTION-IMAGE / global px). When the
+    // user enables BOTH crosshair-colour AND laser detection on the same
+    // hotkey, the runtime feeds the crosshair-colour pivot here. If the
+    // fitted laser line passes through this hint (perpendicular distance
+    // ≤ `crosshair_hint_tol_px`) AND the hint sits on the tip side of the
+    // muzzle (so we don't snap backwards through the gun), the reported
+    // `tip` snaps to the hint. Otherwise the existing target-box
+    // projection is used.
+    bool  use_crosshair_hint = false;
+    float crosshair_hint_x = 0.0f;
+    float crosshair_hint_y = 0.0f;
+    float crosshair_hint_tol_px = 8.0f;
 };
 
 // Full result of a laser fit, in detection-image coordinates. When `found`

@@ -4,7 +4,9 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include "AimbotTarget.h"
@@ -60,70 +62,62 @@ PivotResult geometric_pivot(const cv::Rect2f& box, float y_offset)
     };
 }
 
-// Pivot derived from the distribution of "visible" pixels (mask == 0) inside
-// the bbox. Falls back to the geometric pivot when the mask is unusable or
-// visibility is too sparse to be trusted. This exists so that a target with
-// half its bbox occluded by a wall still has a pivot over the exposed half
-// instead of on the wall.
-PivotResult visibility_weighted_pivot(const cv::Rect2f& box,
-                                      float y_offset,
-                                      const cv::Mat& mask)
+// 模块C:body→head pivot 吸附。当 body 框够大(近距离)且其内部上半区存在一个面积
+// 明显更小的 head 框时,把 pivot 移到该 head;否则保持原 pivot 不变。head 框集合由调用
+// 方预先从本帧检测里收集(可不在 aim 类列表内)。
+void maybe_snap_pivot_to_head(PivotResult& pivot,
+                              const cv::Rect2f& bodyBox,
+                              int bodyClassId,
+                              float headInnerOffset,
+                              const TrackerUpdate& in,
+                              const std::vector<cv::Rect2f>& headBoxes)
 {
-    const PivotResult fallback = geometric_pivot(box, y_offset);
+    if (!in.close_range_head_aim_enabled || in.close_range_head_class_id < 0)
+        return;
+    if (bodyClassId == in.close_range_head_class_id) // 本身就是 head,无需吸附
+        return;
+    if (in.screen_height <= 0 || headBoxes.empty())
+        return;
+    if (bodyBox.height < in.close_range_trigger_height_frac * static_cast<float>(in.screen_height))
+        return;
 
-    if (mask.empty() || mask.type() != CV_8UC1)
-        return fallback;
+    const float bodyArea = bodyBox.width * bodyBox.height;
+    if (bodyArea <= 0.0f)
+        return;
 
-    const cv::Rect img_rect(0, 0, mask.cols, mask.rows);
-    const cv::Rect box_int(
-        static_cast<int>(std::floor(box.x)),
-        static_cast<int>(std::floor(box.y)),
-        std::max(1, static_cast<int>(std::ceil(box.width))),
-        std::max(1, static_cast<int>(std::ceil(box.height)))
-    );
-    const cv::Rect roi = box_int & img_rect;
-    if (roi.area() <= 0)
-        return fallback;
+    // 期望头部位置:body 框水平中心、靠上 12% 处。选离它最近的合规 head。
+    const float expectX = bodyBox.x + bodyBox.width * 0.5f;
+    const float expectY = bodyBox.y + bodyBox.height * 0.12f;
 
-    const cv::Mat sub = mask(roi);
-
-    long long sum_x = 0;
-    int visible_count = 0;
-    int min_y = roi.height;
-    int max_y = -1;
-    for (int y = 0; y < sub.rows; ++y)
+    const cv::Rect2f* best = nullptr;
+    float bestD2 = std::numeric_limits<float>::max();
+    for (const auto& hb : headBoxes)
     {
-        const uint8_t* row = sub.ptr<uint8_t>(y);
-        for (int x = 0; x < sub.cols; ++x)
+        const float hcx = hb.x + hb.width * 0.5f;
+        const float hcy = hb.y + hb.height * 0.5f;
+        // head 中心须落在 body 框水平范围内、上 55% 区域
+        if (hcx < bodyBox.x || hcx > bodyBox.x + bodyBox.width)
+            continue;
+        if (hcy < bodyBox.y || hcy > bodyBox.y + bodyBox.height * 0.55f)
+            continue;
+        // head 面积须明显小于 body(滤掉重叠的另一个大框 / 同类大框)
+        const float ha = hb.width * hb.height;
+        if (ha <= 0.0f || ha > bodyArea * 0.6f)
+            continue;
+        const float dx = hcx - expectX;
+        const float dy = hcy - expectY;
+        const float dd = dx * dx + dy * dy;
+        if (dd < bestD2)
         {
-            if (row[x] == 0)
-            {
-                sum_x += x;
-                ++visible_count;
-                if (y < min_y) min_y = y;
-                if (y > max_y) max_y = y;
-            }
+            bestD2 = dd;
+            best = &hb;
         }
     }
+    if (!best)
+        return;
 
-    // Require a non-trivial chunk of visible pixels before trusting the
-    // centroid. If the bbox is essentially all suppressed (false positive on
-    // wall) or essentially all visible (no occlusion → geometric is fine
-    // anyway), keep the geometric pivot.
-    const int min_visible = std::max(16, roi.area() / 20); // ~5%
-    const int max_visible = roi.area() - (roi.area() / 20);
-    if (visible_count < min_visible || visible_count > max_visible)
-        return fallback;
-
-    const double mean_x_in_roi = static_cast<double>(sum_x) / visible_count;
-    const double visible_top = static_cast<double>(roi.y + min_y);
-    const double visible_bottom = static_cast<double>(roi.y + max_y);
-    const double visible_height = visible_bottom - visible_top;
-
-    return {
-        static_cast<double>(roi.x) + mean_x_in_roi,
-        visible_top + visible_height * static_cast<double>(y_offset)
-    };
+    pivot.x = static_cast<double>(best->x) + static_cast<double>(best->width) * 0.5;
+    pivot.y = static_cast<double>(best->y) + static_cast<double>(best->height) * static_cast<double>(headInnerOffset);
 }
 } // namespace
 
@@ -171,49 +165,64 @@ void MultiTargetTracker::pruneDeadTracks()
 
 namespace
 {
-// Production heuristic threat estimator. Returns a value in [0,1]; 1 = "this
-// target is likely about to shoot you, drop them first". Combines explicit
-// user-selected class tiers (head > body > other), motion direction toward the
-// crosshair, and hit-frame count.
+// Sample a 5x5 window of normalized depth around (cx, cy) and return the
+// median, normalized to [0,1] where 1 = closest. Returns -1.0f when the
+// depth Mat is empty / wrong type or the sample window collapses to nothing.
+float sample_depth_at(const cv::Mat& depth, double cx, double cy)
+{
+    if (depth.empty() || depth.type() != CV_8UC1)
+        return -1.0f;
+    const int x = static_cast<int>(std::lround(cx));
+    const int y = static_cast<int>(std::lround(cy));
+    const int x0 = std::clamp(x - 2, 0, depth.cols - 1);
+    const int x1 = std::clamp(x + 2, 0, depth.cols - 1);
+    const int y0 = std::clamp(y - 2, 0, depth.rows - 1);
+    const int y1 = std::clamp(y + 2, 0, depth.rows - 1);
+    if (x1 < x0 || y1 < y0)
+        return -1.0f;
+
+    std::array<uint8_t, 25> samples{};
+    int n = 0;
+    for (int yy = y0; yy <= y1 && n < static_cast<int>(samples.size()); ++yy)
+    {
+        const uint8_t* row = depth.ptr<uint8_t>(yy);
+        for (int xx = x0; xx <= x1 && n < static_cast<int>(samples.size()); ++xx)
+            samples[n++] = row[xx];
+    }
+    if (n == 0)
+        return -1.0f;
+    std::nth_element(samples.begin(), samples.begin() + n / 2, samples.begin() + n);
+    return static_cast<float>(samples[n / 2]) / 255.0f;
+}
+
+// Threat score in [0,1] blended from two signals:
+//   * depth_score — normalized depth at the track pivot (closer = higher)
+//   * head_score  — head-class detection confidence (only when classId
+//                   matches the user-selected head class)
+// `ratio` linearly mixes the two: 0 = full depth, 1 = full head-conf.
+// Falls back to neutral 0.5 for any unavailable signal so the threat term
+// can't actively penalise a track when its inputs are missing.
 template <typename TrackT>
 float compute_threat_score(const TrackT& track,
-                            int   head_class_id,
-                            int   body_class_id,
-                            double crosshair_x,
-                            double crosshair_y)
+                           int head_class_id,
+                           float ratio,
+                           const cv::Mat& depth_normalized)
 {
-    // Class hint. Unselected ids (-1) do not participate in matching.
-    float class_score = 0.30f;
-    if (track.classId == head_class_id && head_class_id >= 0)
-        class_score = 1.00f;
-    else if (track.classId == body_class_id && body_class_id >= 0)
-        class_score = 0.60f;
+    float depth_score = 0.5f;
+    const float d = sample_depth_at(depth_normalized, track.pivotX, track.pivotY);
+    if (d >= 0.0f)
+        depth_score = std::clamp(d, 0.0f, 1.0f);
 
-    // Motion-toward-crosshair score in [0,1]. Dot product of (crosshair -
-    // pivot) with velocity, normalised. Stationary targets contribute 0.5
-    // (neutral) — they're neither closing nor fleeing.
-    const double dx = crosshair_x - track.pivotX;
-    const double dy = crosshair_y - track.pivotY;
-    const double pivot_dist = std::hypot(dx, dy);
-    const double speed = std::hypot(static_cast<double>(track.velocity.x),
-                                    static_cast<double>(track.velocity.y));
-    float motion_score = 0.50f;
-    if (pivot_dist > 1.0 && speed > 1.0)
-    {
-        const double dot = (dx * track.velocity.x + dy * track.velocity.y)
-            / (pivot_dist * speed);
-        motion_score = static_cast<float>(0.5 + 0.5 * std::clamp(dot, -1.0, 1.0));
-    }
+    float head_score = 0.5f;
+    if (head_class_id >= 0)
+        head_score = (track.classId == head_class_id)
+                     ? std::clamp(track.confidence, 0.0f, 1.0f)
+                     : 0.0f;
 
-    // Confidence: hits saturate quickly so we don't penalise newly-acquired
-    // but obviously-real tracks too hard.
-    const float confidence = std::min(1.0f, static_cast<float>(track.hits) / 10.0f);
-
-    // Weighted blend. Class is the strongest single signal because the user
-    // explicitly told us which classes matter; motion is next; confidence
-    // just gates the others.
-    const float blended = (0.55f * class_score + 0.35f * motion_score + 0.10f * 1.0f) * (0.4f + 0.6f * confidence);
-    return std::clamp(blended, 0.0f, 1.0f);
+    const float r  = std::clamp(ratio, 0.0f, 1.0f);
+    const float wd = 1.0f - r;
+    const float wh = r;
+    return std::clamp(wd * depth_score + wh * head_score, 0.0f, 1.0f);
 }
 } // namespace
 
@@ -224,7 +233,7 @@ bool MultiTargetTracker::evaluateTrack(int trackIndex,
                                       bool threat_enabled,
                                       float threat_weight,
                                       int   threat_head_class_id,
-                                      int   threat_body_class_id,
+                                      float threat_depth_head_ratio,
                                       int& outRank,
                                       double& outScore,
                                       float& outThreat,
@@ -250,8 +259,11 @@ bool MultiTargetTracker::evaluateTrack(int trackIndex,
     if (rankFound < 0)
         return false;
 
-    const double cx = screenWidth * 0.5;
-    const double cy = screenHeight * 0.5;
+    // Distance reference is the aim origin: the crosshair-colour pivot when
+    // that feature is live (where the reticle actually sits after recoil),
+    // otherwise the detection-image centre (sentinel < 0 from the loop).
+    const double cx = (lastAimOriginX_ >= 0.0) ? lastAimOriginX_ : screenWidth * 0.5;
+    const double cy = (lastAimOriginY_ >= 0.0) ? lastAimOriginY_ : screenHeight * 0.5;
     const double dx = t.pivotX - cx;
     const double dy = t.pivotY - cy;
 
@@ -269,41 +281,33 @@ bool MultiTargetTracker::evaluateTrack(int trackIndex,
             return false;
     }
 
-    const double dist = std::hypot(dx, dy);
-    const double hitBonus = std::min(5, t.hits) * 4.0;
-    const double missPenalty = t.missed * 50.0;
-
-    double score = dist + missPenalty - hitBonus;
-
-    if (threat_enabled)
-    {
-        const float threat = compute_threat_score(t, threat_head_class_id, threat_body_class_id, cx, cy);
-        outThreat = threat;
-
-        // Map threat in [0,1] to a multiplicative score adjustment in
-        // [1 - weight, 1 + weight]. threat=1 → score *= (1 - weight) (best);
-        // threat=0 → score *= (1 + weight) (worst); threat=0.5 → no change.
-        const double w = std::clamp(static_cast<double>(threat_weight), 0.0, 1.0);
-        const double mul = 1.0 - w * (static_cast<double>(threat) - 0.5) * 2.0;
-        score *= std::max(0.05, mul);
-    }
+    // Selection score = pure distance from the aim origin to the target pivot.
+    // Within a priority tier the nearest target to the crosshair always wins;
+    // switch stickiness is handled separately by the lock hysteresis, and
+    // coasting phantoms are kept out of contention by the observed-this-frame
+    // guards in update(). (Threat / hit / miss terms intentionally dropped.)
+    (void)threat_enabled;
+    (void)threat_weight;
+    (void)threat_head_class_id;
+    (void)threat_depth_head_ratio;
 
     outRank = rankFound;
-    outScore = score;
+    outScore = std::hypot(dx, dy);
     return true;
 }
 
 int MultiTargetTracker::chooseBestTrack(const std::vector<int>& priority,
                                         int screenWidth,
-                                        int screenHeight) const
+                                        int screenHeight,
+                                        bool observedOnly) const
 {
     // Threat scoring is opt-in; chooseBestTrack itself is on the path used
     // both with and without an active aim hotkey. Read the cached threat
     // params we stashed in update().
-    const bool threat_enabled = lastThreatEnabled_;
-    const float threat_weight = lastThreatWeight_;
-    const int   threat_head = lastThreatHeadClassId_;
-    const int   threat_body = lastThreatBodyClassId_;
+    const bool  threat_enabled = lastThreatEnabled_;
+    const float threat_weight  = lastThreatWeight_;
+    const int   threat_head    = lastThreatHeadClassId_;
+    const float threat_ratio   = lastThreatDepthHeadRatio_;
 
     if (tracks_.empty() || priority.empty())
         return -1;
@@ -314,12 +318,15 @@ int MultiTargetTracker::chooseBestTrack(const std::vector<int>& priority,
 
     for (size_t i = 0; i < tracks_.size(); ++i)
     {
+        if (observedOnly && !tracks_[i].observedThisFrame)
+            continue;
+
         int rank = 0;
         double score = 0.0;
         float threat = 0.0f;
         if (!evaluateTrack(static_cast<int>(i), priority,
                            screenWidth, screenHeight,
-                           threat_enabled, threat_weight, threat_head, threat_body,
+                           threat_enabled, threat_weight, threat_head, threat_ratio,
                            rank, score, threat))
             continue;
 
@@ -342,6 +349,8 @@ void MultiTargetTracker::reset()
     challengerTrackId_ = -1;
     challengerStreak_ = 0;
     lockHoldRemaining_ = 0;
+    killSuspectedTrackId_ = -1;
+    killGraceRemaining_ = 0;
 }
 
 void MultiTargetTracker::update(const TrackerUpdate& in)
@@ -350,12 +359,20 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
 
     // Stash threat + dynamic-FOV gate so chooseBestTrack (also called from
     // elsewhere) applies the same filtering / weighting between updates.
+    // The depth Mat is held as a refcounted shallow copy so chooseBestTrack
+    // can sample it inside / between update() calls without dangling.
     lastThreatEnabled_ = in.threat_priority_enabled;
     lastThreatWeight_ = in.threat_weight;
     lastThreatHeadClassId_ = in.threat_head_class_id;
-    lastThreatBodyClassId_ = in.threat_body_class_id;
+    lastThreatDepthHeadRatio_ = in.threat_depth_head_ratio;
+    if (in.depth_normalized && !in.depth_normalized->empty())
+        lastDepthNormalized_ = *in.depth_normalized;
+    else
+        lastDepthNormalized_.release();
     lastFovRadiusXpx_ = in.fov_radius_x_px;
     lastFovRadiusYpx_ = in.fov_radius_y_px;
+    lastAimOriginX_ = in.aim_origin_x;
+    lastAimOriginY_ = in.aim_origin_y;
 
     for (auto& t : tracks_)
         t.observedThisFrame = false;
@@ -366,8 +383,20 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         return;
     }
 
-    const cv::Mat empty_mask;
-    const cv::Mat& mask_ref = (in.visibility_mask != nullptr) ? *in.visibility_mask : empty_mask;
+    // 模块C:先收集本帧所有 head 框(body→head pivot 吸附用)。head 类不必是 aim 类,
+    // 所以从原始检测里收集,不经 aim_class_ids 过滤。
+    std::vector<cv::Rect2f> headBoxes;
+    if (in.close_range_head_aim_enabled && in.close_range_head_class_id >= 0)
+    {
+        for (size_t i = 0; i < in.boxes->size(); ++i)
+        {
+            if ((*in.classes)[i] != in.close_range_head_class_id)
+                continue;
+            const cv::Rect& b = (*in.boxes)[i];
+            headBoxes.emplace_back(static_cast<float>(b.x), static_cast<float>(b.y),
+                                   static_cast<float>(b.width), static_cast<float>(b.height));
+        }
+    }
 
     std::vector<DetectionCandidate> dets;
     dets.reserve(in.boxes->size());
@@ -382,6 +411,9 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         d.box = cv::Rect2f(static_cast<float>(b.x), static_cast<float>(b.y),
                            static_cast<float>(b.width), static_cast<float>(b.height));
         d.classId = cls;
+        d.confidence = (in.confidences && i < in.confidences->size())
+                           ? std::clamp((*in.confidences)[i], 0.0f, 1.0f)
+                           : 0.0f;
         auto it = in.y_offsets.find(cls);
         const float user_offset = (it != in.y_offsets.end())
             ? std::clamp(it->second, 0.0f, 1.0f)
@@ -391,7 +423,12 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
             in.y_offset_size_decay_enabled,
             in.y_offset_size_decay_low_frac,
             in.y_offset_size_decay_high_frac);
-        const PivotResult pivot = visibility_weighted_pivot(d.box, offset, mask_ref);
+        PivotResult pivot = geometric_pivot(d.box, offset);
+
+        // 模块C:近距离大 body 框 → 把瞄点吸附到框内上半区的 head 框(用原始 user_offset
+        // 在 head 框内取点,避免 size_decay 把它拉向中心)。
+        maybe_snap_pivot_to_head(pivot, d.box, cls, user_offset, in, headBoxes);
+
         d.pivotX = pivot.x;
         d.pivotY = pivot.y;
         dets.push_back(d);
@@ -630,10 +667,20 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
                 t.pivotY = d.pivotY;
             }
             t.classId = d.classId;
+            t.confidence = d.confidence;
             t.hits += 1;
             t.missed = 0;
             t.observedThisFrame = true;
             t.lastUpdate = now;
+
+            // 击杀检测：维护"上次观测时 bbox 面积 / 当前面积"比例。塌缩到阈值以下且
+            // 紧接着失观，就是击杀征兆。
+            const float newArea = d.box.width * d.box.height;
+            if (t.lastObservedArea > 1.0f)
+                t.lastAreaRatio = newArea / t.lastObservedArea;
+            else
+                t.lastAreaRatio = 1.0f;
+            t.lastObservedArea = newArea;
         }
         else
         {
@@ -663,6 +710,7 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         t.id = nextId_++;
         t.box = d.box;
         t.classId = d.classId;
+        t.confidence = d.confidence;
         t.hits = 1;
         t.missed = 0;
         t.observedThisFrame = true;
@@ -715,6 +763,75 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         return;
     }
 
+    // -------------------------------------------------------------------
+    // 击杀检测 / 多人锁切。
+    //
+    //   触发条件 (AND)：
+    //     1) kill_detect_enabled = true（HotkeyProfile / TrackerUpdate 配置）
+    //     2) trigger 在最近 kill_trigger_fresh_ms 内击发过（ms_since_last_fire 由调用方维护）
+    //     3) 锁定目标失观 ≥ kill_suspicion_missed_frames 帧
+    //     4) bbox 在最后一次观测时面积已塌缩到 ≤ kill_suspicion_bbox_shrink（或塌缩判定关闭）
+    //
+    //   命中击杀时：清空 lock_hold 计时、强制切到本帧可见的最优次目标，并为后续 N 帧
+    //   开启"次目标快速接管" grace（killGraceRemaining_ > 0 时 same-rank hysteresis 被绕过）。
+    //
+    //   killGraceRemaining_ 每帧递减一次，确保仅在击杀瞬间打开"零阻力切换"窗口。
+    if (killGraceRemaining_ > 0)
+        --killGraceRemaining_;
+
+    if (in.kill_detect_enabled)
+    {
+        const int li = findTrackIndexById(lockedTrackId_);
+        if (li >= 0 && !tracks_[li].observedThisFrame
+            && tracks_[li].missed >= std::max(1, in.kill_suspicion_missed_frames)
+            && in.ms_since_last_fire <= std::max(0, in.kill_trigger_fresh_ms))
+        {
+            const bool shrinkOK = (in.kill_suspicion_bbox_shrink <= 0.0f)
+                || (tracks_[li].lastAreaRatio <= in.kill_suspicion_bbox_shrink);
+            if (shrinkOK)
+            {
+                const int obsBest = chooseBestTrack(in.priority_class_ids,
+                                                    in.screen_width, in.screen_height,
+                                                    /*observedOnly=*/true);
+                if (obsBest >= 0 && tracks_[obsBest].id != lockedTrackId_)
+                {
+                    killSuspectedTrackId_ = lockedTrackId_;
+                    killGraceRemaining_ = std::max(0, in.kill_followup_grace_frames);
+                    setLockedTrack(tracks_[obsBest].id);
+                    lockHoldRemaining_ = 0;  // 击杀场景下不让 lock_hold 拦腰拦下
+                    clearChallenger();
+                    return;
+                }
+            }
+        }
+    }
+
+    // Coasting-lock fast handoff. If the locked target wasn't observed this
+    // frame (it dropped out) and has now coasted past a short grace, hand the
+    // lock to the best target that is genuinely on screen RIGHT NOW. Without
+    // this, a departed target keeps the lock for its full missed-frame
+    // allowance (and behind the minimum-hold gate below) while a replacement
+    // is already visible — the "hesitates instead of switching to the next
+    // target" symptom. The grace preserves single-/double-frame recoil
+    // dropout survival, where abandoning the lock would be wrong.
+    {
+        const int coastGrace = std::max(1, in.coast_grace_frames);
+        const int li = findTrackIndexById(lockedTrackId_);
+        if (li >= 0 && !tracks_[li].observedThisFrame
+            && tracks_[li].missed > coastGrace)
+        {
+            const int obsBest = chooseBestTrack(in.priority_class_ids,
+                                                in.screen_width, in.screen_height,
+                                                /*observedOnly=*/true);
+            if (obsBest >= 0 && tracks_[obsBest].id != lockedTrackId_)
+            {
+                setLockedTrack(tracks_[obsBest].id);
+                clearChallenger();
+                return;
+            }
+        }
+    }
+
     // Minimum-hold gate. If the user-configured lock_hold_min_frames says
     // "stay locked for N frames after acquisition", honour that here before
     // any switch logic runs. The counter ticks down once per update cycle
@@ -745,13 +862,28 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         return;
     }
 
+    // Never hand a live (observed-this-frame) lock over to a coasting phantom.
+    // A just-departed target lingers as a velocity-extrapolated candidate for
+    // several frames; if it scores better than the freshly-acquired, on-screen
+    // lock it would repeatedly challenge it and make the pivot jitter until the
+    // phantom is pruned — the "wobbles for a moment after acquiring the next
+    // target, but only with multiple targets" symptom. Keep the observed lock.
+    if (lockedIdx >= 0
+        && tracks_[lockedIdx].observedThisFrame
+        && !tracks_[bestIdx].observedThisFrame)
+    {
+        clearChallenger();
+        return;
+    }
+
     int lockedRank = 0;
     double lockedScore = 0.0;
     float lockedThreat = 0.0f;
     const bool lockedEligible = evaluateTrack(
         lockedIdx, in.priority_class_ids,
         in.screen_width, in.screen_height,
-        in.threat_priority_enabled, in.threat_weight, in.threat_head_class_id, in.threat_body_class_id,
+        in.threat_priority_enabled, in.threat_weight,
+        in.threat_head_class_id, in.threat_depth_head_ratio,
         lockedRank, lockedScore, lockedThreat,
         /*is_locked=*/true);
 
@@ -760,7 +892,8 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
     float bestThreat = 0.0f;
     if (!evaluateTrack(bestIdx, in.priority_class_ids,
                        in.screen_width, in.screen_height,
-                       in.threat_priority_enabled, in.threat_weight, in.threat_head_class_id, in.threat_body_class_id,
+                       in.threat_priority_enabled, in.threat_weight,
+                       in.threat_head_class_id, in.threat_depth_head_ratio,
                        bestRank, bestScore, bestThreat))
     {
         // Shouldn't happen — chooseBestTrack already filtered — but stay safe.
@@ -785,7 +918,21 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
         return;
     }
 
-    // Same or lower rank — apply switch hysteresis. A challenger track must
+    // Locked track outranks the best in-FOV challenger. This is reachable
+    // only when the lock sits momentarily outside the dynamic-FOV ellipse
+    // (chooseBestTrack honours the gate; the locked-track evaluation above
+    // bypasses it via is_locked=true), so chooseBestTrack returns a
+    // lower-priority candidate. Priority must dominate symmetrically: never
+    // hand a higher-priority lock to a lower-priority challenger on score
+    // alone. If the locked target is genuinely gone it becomes ineligible
+    // (handled above) or gets pruned, and the lock re-acquires then.
+    if (bestRank > lockedRank)
+    {
+        clearChallenger();
+        return;
+    }
+
+    // Same rank — apply switch hysteresis. A challenger track must
     // beat the locked track's score by at least `lock_switch_score_margin`
     // (fraction of half-diagonal) for at least `lock_switch_min_frames`
     // consecutive frames before the lock transfers. Higher values = stickier
@@ -806,6 +953,14 @@ void MultiTargetTracker::update(const TrackerUpdate& in)
     if (normalisedAdvantage <= static_cast<double>(marginPct))
     {
         // Challenger isn't decisively better — drop any in-flight streak.
+        clearChallenger();
+        return;
+    }
+
+    // 击杀 grace：刚连杀完，新挑战者立即夺锁，不必等 hysteresis 累计帧数。
+    if (killGraceRemaining_ > 0)
+    {
+        setLockedTrack(tracks_[bestIdx].id);
         clearChallenger();
         return;
     }
@@ -876,6 +1031,12 @@ std::vector<TrackDebugInfo> MultiTargetTracker::getDebugTracks() const
         d.observedThisFrame = t.observedThisFrame;
         d.missedFrames = t.missed;
         d.isLocked = (t.id == lockedTrackId_);
+        d.confidence = t.confidence;
+        d.depth_at_pivot = sample_depth_at(lastDepthNormalized_, t.pivotX, t.pivotY);
+        d.threat = compute_threat_score(t,
+                                        lastThreatHeadClassId_,
+                                        lastThreatDepthHeadRatio_,
+                                        lastDepthNormalized_);
         out.push_back(d);
     }
 

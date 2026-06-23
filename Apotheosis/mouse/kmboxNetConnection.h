@@ -24,6 +24,14 @@ public:
     void rightUp();
     void middleDown();
     void middleUp();
+    // Side buttons. The kmboxNet protocol expresses them through the
+    // button bitmask of the full report (cmd_mouse_all), so the wrapper
+    // mirrors a tracked mask and submits the whole report each time.
+    // 0x08 = X1 (back / mouse4), 0x10 = X2 (forward / mouse5).
+    void side1Down();
+    void side1Up();
+    void side2Down();
+    void side2Up();
     void wheel(int wheel);
     void mouseAll(int button, int x, int y, int wheel);
 
@@ -69,4 +77,10 @@ private:
     std::thread monitor_thread_;
     std::atomic<bool> monitor_running_{ true };
     std::string ip_, port_, uuid_;
+
+    // Mirror of the kmbox firmware's pressed-button bitmap, kept in sync
+    // by every button helper above. Required by the side1/side2 path so
+    // the cmd_mouse_all call we issue for X1/X2 doesn't clobber the
+    // currently-held left/right/middle state. Guarded by io_mutex_.
+    int button_mask_ = 0;
 };

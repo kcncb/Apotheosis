@@ -123,6 +123,8 @@ static __global__ void decode_and_filter_kernel(
     const SrcT* __restrict__ src,
     int C, int N, int nc,
     float confThreshold,
+    float smallConf,
+    float areaThreshPx,
     float imgScale,
     int maxCandidates,
     bool cnLayout,
@@ -142,11 +144,25 @@ static __global__ void decode_and_filter_kernel(
         if (s > bestScore) { bestScore = s; bestClass = c; }
     }
 
-    if (bestScore <= confThreshold) return;
+    // Area-adaptive confidence threshold (small-target recall). Only when the
+    // feature is ENABLED do we pay for the early ow/oh reads needed to compute
+    // box area. When disabled we fall straight through to the original fast
+    // path that reads NO geometry for the ~99% of anchors that fail the
+    // threshold — keeping this kernel byte-for-byte as cheap as before.
+    float thr = confThreshold;
+    if (smallConf >= 0.0f && areaThreshPx > 0.0f)
+    {
+        const float owEarly = read_cn<SrcT>(src, 2, n, C, N, cnLayout);
+        const float ohEarly = read_cn<SrcT>(src, 3, n, C, N, cnLayout);
+        const float areaDet = owEarly * ohEarly * imgScale * imgScale;
+        if (areaDet < areaThreshPx)
+            thr = smallConf;
+    }
 
-    // Keep coords in model-space; the CPU cols==6 decode path applies
-    // img_scale consistently for both this and the EfficientNMS plugin path.
-    (void)imgScale;
+    if (bestScore <= thr) return;
+
+    // Past the threshold: now read box geometry and emit. Coords stay in
+    // model-space; the CPU cols==6 decode path applies img_scale consistently.
     const float cx = read_cn<SrcT>(src, 0, n, C, N, cnLayout);
     const float cy = read_cn<SrcT>(src, 1, n, C, N, cnLayout);
     const float ow = read_cn<SrcT>(src, 2, n, C, N, cnLayout);
@@ -171,6 +187,8 @@ void launch_decode_and_filter(
     int C, int N, int numClasses,
     bool isHalf,
     float confThreshold,
+    float smallConf,
+    float areaThreshPx,
     float imgScale,
     int maxCandidates,
     bool cnLayout,
@@ -188,7 +206,7 @@ void launch_decode_and_filter(
     {
         decode_and_filter_kernel<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(srcCN),
-            C, N, numClasses, confThreshold, imgScale,
+            C, N, numClasses, confThreshold, smallConf, areaThreshPx, imgScale,
             maxCandidates, cnLayout, dstCounter, dstCandidates
         );
     }
@@ -196,7 +214,7 @@ void launch_decode_and_filter(
     {
         decode_and_filter_kernel<float><<<grid, block, 0, stream>>>(
             reinterpret_cast<const float*>(srcCN),
-            C, N, numClasses, confThreshold, imgScale,
+            C, N, numClasses, confThreshold, smallConf, areaThreshPx, imgScale,
             maxCandidates, cnLayout, dstCounter, dstCandidates
         );
     }

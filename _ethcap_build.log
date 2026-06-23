@@ -1,0 +1,339 @@
+适用于 .NET Framework MSBuild 版本 18.5.4+cb4e32d21
+
+  Checking File Globs
+  lua_static.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\lua_static.lib
+  serial_embedded.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\serial_embedded.lib
+  Compiling CUDA source file ..\..\Apotheosis\detector\cuda_preprocess.cu...
+  Compiling CUDA source file ..\..\Apotheosis\capture\gpu_color_ops.cu...
+  
+  C:\Users\Administrator\Desktop\Apotheosis\build\cuda>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe"  --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50.35717\bin\HostX64\x64" -x cu   -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\config -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\crosshair -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\imgui -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mem -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\imgui-1.91.2" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\imgui-1.91.2\backends" -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\makcu\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\serial\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\stb -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\npcap-sdk\Include" -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\opencv\prebuilt\opencv\build\include -IC:\Users\Administrator\Desktop\Apotheosis\packages\Microsoft.ML.OnnxRuntime.DirectML.1.22.0\build\native\include -I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\cppwinrt" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\TensorRT-10.15.1.29\include" -I"C:\Program Files\NVIDIA\CUDNN\v9.17\include\12.9" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\lua-5.1.5\src" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include"     --keep-dir ai\x64\Release  -maxrregcount=0    --machine 64 --compile -cudart static --allow-unsupported-compiler -std=c++17 --generate-code=arch=compute_70,code=[sm_70] --generate-code=arch=compute_75,code=[sm_75] --generate-code=arch=compute_80,code=[sm_80] --generate-code=arch=compute_86,code=[sm_86] --generate-code=arch=compute_89,code=[sm_89] --generate-code=arch=compute_90,code=[sm_90] --generate-code=arch=compute_100,code=[sm_100] --generate-code=arch=compute_120,code=[sm_120] -Xcompiler="/EHsc -Ob2"   -D_WINDOWS -DNDEBUG -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DUSE_CUDA -D"CMAKE_INTDIR=\"Release\"" -D_UNICODE -DUNICODE -DWIN32 -D_WINDOWS -DNDEBUG -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DUSE_CUDA -D"CMAKE_INTDIR=\"Release\"" -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MT " -Xcompiler "/Fdai.dir\Release\vc145.pdb" -o ai.dir\Release\cuda_preprocess.obj "C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu" 
+  
+  C:\Users\Administrator\Desktop\Apotheosis\build\cuda>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe"  --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50.35717\bin\HostX64\x64" -x cu   -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\config -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\crosshair -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\imgui -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mem -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\imgui-1.91.2" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\imgui-1.91.2\backends" -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\makcu\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\serial\include -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\stb -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\npcap-sdk\Include" -IC:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\opencv\prebuilt\opencv\build\include -IC:\Users\Administrator\Desktop\Apotheosis\packages\Microsoft.ML.OnnxRuntime.DirectML.1.22.0\build\native\include -I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\cppwinrt" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\TensorRT-10.15.1.29\include" -I"C:\Program Files\NVIDIA\CUDNN\v9.17\include\12.9" -I"C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\lua-5.1.5\src" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include"     --keep-dir ai\x64\Release  -maxrregcount=0    --machine 64 --compile -cudart static --allow-unsupported-compiler -std=c++17 --generate-code=arch=compute_70,code=[sm_70] --generate-code=arch=compute_75,code=[sm_75] --generate-code=arch=compute_80,code=[sm_80] --generate-code=arch=compute_86,code=[sm_86] --generate-code=arch=compute_89,code=[sm_89] --generate-code=arch=compute_90,code=[sm_90] --generate-code=arch=compute_100,code=[sm_100] --generate-code=arch=compute_120,code=[sm_120] -Xcompiler="/EHsc -Ob2"   -D_WINDOWS -DNDEBUG -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DUSE_CUDA -D"CMAKE_INTDIR=\"Release\"" -D_UNICODE -DUNICODE -DWIN32 -D_WINDOWS -DNDEBUG -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DUSE_CUDA -D"CMAKE_INTDIR=\"Release\"" -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MT " -Xcompiler "/Fdai.dir\Release\vc145.pdb" -o ai.dir\Release\gpu_color_ops.obj "C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\gpu_color_ops.cu" 
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+CUDACOMPILE : nvcc warning : Support for offline compilation for architectures prior to '<compute/sm/lto>_75' will be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning). [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  gpu_color_ops.cu
+  tmpxft_000012e8_00000000-7_gpu_color_ops.compute_120.cudafe1.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.cu(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\cuda_preprocess.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\../mem/gpu_image.h(1): warning C4819: 该文件包含不能在当前代码页(936)中表示的字符。请将该文件保存为 Unicode 格式以防止数据丢失 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+CUDACOMPILE : nvcc warning : Support for offline compilation for architectures prior to '<compute/sm/lto>_75' will be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning). [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  cuda_preprocess.cu
+  tmpxft_00002844_00000000-7_cuda_preprocess.compute_120.cudafe1.cpp
+  Apotheosis.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\Apotheosis.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\Apotheosis.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  capture.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(2,9): warning C4005: “NOMINMAX”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\capture.cpp(2,9):
+      之前在命令行上声明的“NOMINMAX”
+  
+  capture_utils.cpp
+  gpu_jpeg_decoder.cpp
+  eth_capture.cpp
+  mf_capture.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\mf_capture.cpp(3,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\capture\mf_capture.cpp(3,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  opencv_capture.cpp
+  tcp_capture.cpp
+  udp_capture.cpp
+  config.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\config\config.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\config\config.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  crosshair_detector.cpp
+  crosshair_runtime.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  (编译源文件“../../Apotheosis/crosshair/crosshair_runtime.cpp”)
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  depth_anything_trt.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth\depth_anything_trt.cpp(367,57): warning C4244: “=”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth\depth_anything_trt.cpp(368,57): warning C4244: “=”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth\depth_anything_trt.cpp(927,53): warning C4244: “=”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\depth\depth_anything_trt.cpp(928,53): warning C4244: “=”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  depth_mask.cpp
+  depth_utils.cpp
+  detection_buffer.cpp
+  dml_detector.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\dml_detector.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\dml_detector.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  model_inspector.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\model_inspector.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\model_inspector.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  postProcess.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  (编译源文件“../../Apotheosis/detector/postProcess.cpp”)
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  trt_detector.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\trt_detector.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\detector\trt_detector.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  正在生成代码...
+  正在编译...
+  imgui.cpp
+  imgui_draw.cpp
+  imgui_impl_dx11.cpp
+  imgui_impl_win32.cpp
+  imgui_tables.cpp
+  imgui_widgets.cpp
+  keycodes.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard\keycodes.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard\keycodes.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  keyboard_listener.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard\keyboard_listener.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\keyboard\keyboard_listener.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  macro_keymap.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\macro_keymap.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\macro_keymap.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  macro_input.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\macro_input.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\macro_input.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  lua_runtime.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\lua_runtime.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\lua_runtime.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  ghub_api.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\ghub_api.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\macro\ghub_api.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  cpu_affinity_manager.cpp
+  gpu_image.cpp
+  gpu_resource_manager.cpp
+  model_crypto.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\model_crypto\model_crypto.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\model_crypto\model_crypto.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  auth_client.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth\auth_client.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth\auth_client.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  auth_state.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth\auth_state.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\auth\auth_state.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  serialport.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\makcu\src\serialport.cpp(346,42): warning C4101: “e”: 未引用的局部变量 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  AimbotTarget.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\AimbotTarget.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\AimbotTarget.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  正在生成代码...
+  正在编译...
+  Arduino.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\Arduino.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\Arduino.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  ghub.cpp
+  KmboxAConnection.cpp
+  kmboxA.cpp
+  kmboxNetConnection.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\kmbox_net\kmboxNet.h(3,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  (编译源文件“../../Apotheosis/mouse/kmboxNetConnection.cpp”)
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\kmbox_net\kmboxNet.h(3,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  kmboxNet.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\kmbox_net\kmboxNet.h(3,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  (编译源文件“../../Apotheosis/mouse/kmbox_net/kmboxNet.cpp”)
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\kmbox_net\kmboxNet.h(3,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  mouse.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  app_log.cpp
+  config_dirty.cpp
+  draw_auth.cpp
+  draw_ai.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_ai.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_ai.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_capture.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_capture.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_capture.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_crosshair.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_crosshair.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_crosshair.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_debug.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_debug.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_debug.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_debug.cpp(441,48): warning C4244: “参数”: 从“double”转换到“float”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_debug.cpp(440,48): warning C4244: “参数”: 从“double”转换到“float”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  draw_depth.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_depth.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_depth.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_detection_preview.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_detection_preview.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_detection_preview.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_hardware.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_hardware.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_hardware.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_hotkeys.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_hotkeys.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_hotkeys.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_log.cpp
+  draw_macro.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_macro.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_macro.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  正在生成代码...
+  正在编译...
+  draw_model_tools.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_model_tools.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_model_tools.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_overlay.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_overlay.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_overlay.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_session.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_session.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_session.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_stats.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_stats.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_stats.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  draw_target.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_target.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\draw_target.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  preview_window.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\preview_window.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\preview_window.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  overlay.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\overlay.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\overlay.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  overlay_image.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\overlay_image.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\overlay\overlay_image.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  active_hotkey.cpp
+  aim_telemetry.cpp
+  cuda_availability.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime\cuda_availability.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime\cuda_availability.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  inference_session.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime\inference_session.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\runtime\inference_session.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  mouse_thread_loop.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  (编译源文件“../../Apotheosis/runtime/mouse_thread_loop.cpp”)
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\mouse.h(4,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  file_picker.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr\file_picker.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr\file_picker.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  other_tools.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr\other_tools.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\scr\other_tools.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+  nvinf.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt\nvinf.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt\nvinf.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt\nvinf.cpp(154,11): warning C4244: “初始化”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\tensorrt\nvinf.cpp(155,11): warning C4244: “初始化”: 从“int64_t”转换到“int”，可能丢失数据 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  正在生成代码...
+  makcu.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\modules\makcu\src\makcu.cpp(612,43): warning C4101: “e”: 未引用的局部变量 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+  hid.c
+  Makcu.cpp
+C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\Makcu.cpp(1,9): warning C4005: “WIN32_LEAN_AND_MEAN”: 宏重定义 [C:\Users\Administrator\Desktop\Apotheosis\build\cuda\ai.vcxproj]
+      C:\Users\Administrator\Desktop\Apotheosis\Apotheosis\mouse\Makcu.cpp(1,9):
+      之前在命令行上声明的“WIN32_LEAN_AND_MEAN”
+  
+    正在创建库 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.lib 和对象 C:/Users/Administrator/Desktop/Apotheosis/build/cuda/Release/Apotheosis.exp
+  ai.vcxproj -> C:\Users\Administrator\Desktop\Apotheosis\build\cuda\Release\Apotheosis.exe

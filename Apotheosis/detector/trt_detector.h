@@ -65,12 +65,33 @@ private:
     cudaStream_t stream;
 
     bool useCudaGraph;
+    // True once *every* active slot has a captured + instantiated graph. When
+    // numSlots==2 we capture one graph per slot, each writing to its own pinned
+    // dst. Per-slot graphs lets graph capture coexist with double_buffer
+    // pipelining instead of being mutually exclusive.
     bool cudaGraphCaptured;
-    cudaGraph_t cudaGraph;
-    cudaGraphExec_t cudaGraphExec;
-    void captureCudaGraph();
-    void launchCudaGraph();
+    std::array<cudaGraph_t, 2> cudaGraphs{ nullptr, nullptr };
+    std::array<cudaGraphExec_t, 2> cudaGraphExecs{ nullptr, nullptr };
+    // Per-slot staging buffer for the preprocess kernel input. Each captured
+    // graph reads from a fixed device pointer, so we copy the per-frame source
+    // image (GpuImage from capture, or uploaded cv::Mat) into the slot's
+    // staging buffer right before launching that slot's graph. The graph
+    // itself then runs preprocess -> enqueue -> decode -> D2H without any
+    // host-visible launch overhead.
+    std::array<GpuImage, 2> graphInputBuffers;
+    // Shape that the currently captured graphs are bound to. When the next
+    // frame's shape doesn't match we destroy + recapture both graphs.
+    int graphInputRows = 0;
+    int graphInputCols = 0;
+    int graphInputChannels = 0;
+    size_t graphInputStep = 0;
+    bool captureCudaGraph(int slot);
+    void launchCudaGraph(int slot);
     void destroyCudaGraph();
+    // Ensure each slot's staging buffer is allocated for (rows, cols, ch) and
+    // matches what the currently captured graph expects. Returns true if the
+    // graph needs to be rebuilt (shape changed or first-time alloc).
+    bool ensureGraphStaging(int rows, int cols, int channels);
 
     // Primary pinned output buffers (slot 0). When double_buffer is enabled a
     // second slot is also allocated below and the inference thread pipelines:
@@ -155,10 +176,14 @@ private:
     void freeTransposedBuffers();
 
     // CUDA Events
-    cudaEvent_t preprocessStartEvent = nullptr;
-    cudaEvent_t inferenceStartEvent = nullptr;
-    cudaEvent_t inferenceCompleteEvent = nullptr;
-    cudaEvent_t copyCompleteEvent = nullptr;
+    // 每 slot 一组计时 event。提交某 slot 的 GPU 工作时在该 slot 的 event 上打点,
+    // 等下一帧(或单缓冲下本帧 sync 后)该 slot 完成再读 elapsedTime——否则在 CUDA
+    // Graph + double_buffer 下,提交后立刻读会拿到尚未完成的 event(NotReady),值恒
+    // 为 0,这正是"开 graph 后推理/拷贝耗时显示 0"的根因。
+    std::array<cudaEvent_t, 2> preprocessStartEvent{ nullptr, nullptr };
+    std::array<cudaEvent_t, 2> inferenceStartEvent{ nullptr, nullptr };
+    std::array<cudaEvent_t, 2> inferenceCompleteEvent{ nullptr, nullptr };
+    std::array<cudaEvent_t, 2> copyCompleteEvent{ nullptr, nullptr };
     bool asyncInferenceInProgress = false;
 };
 

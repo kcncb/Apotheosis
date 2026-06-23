@@ -5,8 +5,8 @@
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
-class QLineEdit;
 class QListWidget;
+class QPushButton;
 class QScrollArea;
 class QSlider;
 class QSpinBox;
@@ -14,6 +14,11 @@ class QVBoxLayout;
 
 class BezierEditor;
 class CardWidget;
+class FreehandCurveEditor;
+class QButtonGroup;
+class QRadioButton;
+class QStackedWidget;
+class TargetPage;
 class ToggleSwitch;
 
 class HotkeyPage : public QWidget {
@@ -22,47 +27,65 @@ class HotkeyPage : public QWidget {
 public:
     explicit HotkeyPage(QWidget* parent = nullptr);
 
+    void setTargetPage(TargetPage* tp);
+
+protected:
+    void showEvent(QShowEvent* event) override;
+
+public slots:
+    void reloadFromRuntime();
+
 private slots:
+    void onGroupChanged(int index);
     void onProfileSelected(int row);
     void onAddProfile();
     void onDeleteProfile();
     void onCopyProfile();
+    void onAddGroup();
+    void onDeleteGroup();
     void onContextMenu(const QPoint& pos);
     void onRenameProfile();
-    void onTrajectoryModeChanged(int index);
-    void onBezierPreset(int presetIndex);
-    void addKeyBindingRow(const QString& key = "None");
-    void removeKeyBindingRow();
+    void onAimClassFiltersChanged();
 
 private:
     void buildLeftPanel(QWidget* parent);
     void buildRightPanel(QWidget* parent);
-    void buildKeyBindingCard();
+    void buildKeyBindCard();
     void buildFovCard();
-    void buildAimCard();
-    void buildTrajectoryCard();
-    void buildKalmanCard();
+    void buildCrosshairCard();
+    void buildBossAimCard();
+    void buildSmartTriggerCard();
+    void buildAimPathCard();
+    void buildAimClassCard();
     void buildAdvancedCard();
 
-    void addProfileItem(const QString& name, const QString& keyPreview);
+    void rebuildGroupCombo();
+    void repopulateProfileList();
+    void addProfileItem(int runtimeIndex);
     void restyleProfileItems();
-    void updateProfileListItem(int row);
-    void loadProfileToUi(int index);
-    void saveUiToProfile(int index);
-    void clearKeyBindings();
-    void setBezierWidgetsVisible(bool visible);
+    void loadProfileToUi(int runtimeIndex);
+    void saveUiToCurrentProfile();
+
+    void rebuildAimClassList();
+    void rebuildAddClassCombo();
+
+    int currentRuntimeIndex() const;
+    std::vector<int> collectAimBucketClassIds();
+
+    TargetPage* m_targetPage{};
 
     // Left panel
+    QComboBox* m_groupCombo{};
     QListWidget* m_profileList{};
+    QLabel* m_leftTitle{};
 
     // Right panel scroll content
     QVBoxLayout* m_rightLayout{};
 
-    // Card 1: Key bindings
-    QLineEdit* m_profileName{};
-    QVBoxLayout* m_keyBindingsLayout{};
+    // Card: 触发按键 (single-key dropdown)
+    QComboBox* m_keyCombo{};
 
-    // Card 2: FOV
+    // Card: FOV
     QSlider* m_fovXSlider{};
     QSpinBox* m_fovXSpin{};
     QSlider* m_fovYSlider{};
@@ -72,43 +95,49 @@ private:
     QDoubleSpinBox* m_dynamicFovMinRadius{};
     QWidget* m_dynamicFovContainer{};
 
-    // Card 3: Aim
-    QDoubleSpinBox* m_speedX{};
-    QDoubleSpinBox* m_speedY{};
-    QDoubleSpinBox* m_lockStrength{};
-    QDoubleSpinBox* m_lockRadius{};
-    // Smart trigger
-    ToggleSwitch* m_smartTriggerEnable{};
-    QDoubleSpinBox* m_smartTriggerHitRadius{};
-    QDoubleSpinBox* m_smartTriggerVariance{};
-    QSpinBox* m_smartTriggerWindow{};
-    QSpinBox* m_smartTriggerDuration{};
-    QWidget* m_smartTriggerContainer{};
+    // Card 3: Crosshair / Laser / Flashlight detect + Glass filter
+    ToggleSwitch* m_crosshairDetect{};
+    ToggleSwitch* m_laserDetect{};
+    ToggleSwitch* m_flashlightDetect{};
+    ToggleSwitch* m_glassFilter{};
 
-    // Card 4: Trajectory
-    QComboBox* m_trajectoryMode{};
-    QWidget* m_bezierContainer{};
-    BezierEditor* m_bezierEditor{};
-    QDoubleSpinBox* m_followFactor{};
-    QDoubleSpinBox* m_reanchorThreshold{};
+    // Card 4: Mover (kind dropdown + stacked per-mover params)
+    QComboBox*      m_moverKindCombo{};
+    QStackedWidget* m_moverParamStack{};
+    // 微澜 (Smooth) — ART 原 3 参数
+    QDoubleSpinBox* m_speedXSpin{};
+    QDoubleSpinBox* m_speedYSpin{};
+    QDoubleSpinBox* m_deadZoneSpin{};
+    // 疾风 (Predictive) — 4 项
+    QDoubleSpinBox* m_predKpXSpin{};
+    QDoubleSpinBox* m_predKpYSpin{};
+    QDoubleSpinBox* m_predKdSpin{};
+    QDoubleSpinBox* m_predPwSpin{};
 
-    // Card 5: Kalman
-    ToggleSwitch* m_kalmanEnable{};
-    QDoubleSpinBox* m_kalmanPosNoise{};
-    QDoubleSpinBox* m_kalmanVelNoise{};
-    QDoubleSpinBox* m_kalmanMeasNoise{};
-    QDoubleSpinBox* m_kalmanVelDecay{};
-    QDoubleSpinBox* m_kalmanMaxVel{};
-    QSpinBox* m_kalmanWarmup{};
-    ToggleSwitch* m_kalmanCompensateDelay{};
+    // Card 5: Aim class selection
+    CardWidget* m_aimClassCard{};
+    QVBoxLayout* m_aimClassListLayout{};
+    QComboBox* m_addClassCombo{};
+    QPushButton* m_addClassBtn{};
+
+    // Card: Smart Trigger
+    ToggleSwitch* m_smartTrigger{};
+    QDoubleSpinBox* m_smartTriggerHitScale{};
+    QDoubleSpinBox* m_smartTriggerAggression{};
+    QSpinBox* m_smartTriggerHoldMs{};
+    QSpinBox* m_smartTriggerCooldownMs{};
 
     // Card 6: Advanced
-    ToggleSwitch* m_crosshairDetect{};
-    QDoubleSpinBox* m_lockSwitchMargin{};
-    QSpinBox* m_lockSwitchMinFrames{};
-    QSpinBox* m_lockHoldMinFrames{};
-    QDoubleSpinBox* m_yOffsetDecayRate{};
-    QSpinBox* m_yOffsetDecayDelay{};
-    QDoubleSpinBox* m_threatPriorityWeight{};
-    QDoubleSpinBox* m_threatDistanceWeight{};
+    QDoubleSpinBox* m_lockAggression{};
+
+    // Card 7: Aim trajectory
+    QButtonGroup*       m_aimPathModeGroup{};
+    QRadioButton*       m_aimPathModeLinear{};
+    QRadioButton*       m_aimPathModeBezier{};
+    QRadioButton*       m_aimPathModeCustom{};
+    QStackedWidget*     m_aimPathEditorStack{};
+    BezierEditor*       m_aimPathBezier{};
+    FreehandCurveEditor* m_aimPathFreehand{};
+
+    bool m_loading{false};
 };

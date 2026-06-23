@@ -193,6 +193,15 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
     cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
     cfg->clearFlag(nvinfer1::BuilderFlag::kTF32);
 
+    // Builder optimization level controls how exhaustively TRT searches kernel
+    // tactics. Default is 3; level 5 spends more build time probing tactics and
+    // usually yields a measurably faster engine — a one-time cost since the
+    // engine is cached on disk. Requires TRT 8.6+.
+#if NV_TENSORRT_MAJOR > 8 || (NV_TENSORRT_MAJOR == 8 && NV_TENSORRT_MINOR >= 6)
+    cfg->setBuilderOptimizationLevel(5);
+    std::cout << "[TensorRT] Builder optimization level: 5" << std::endl;
+#endif
+
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 

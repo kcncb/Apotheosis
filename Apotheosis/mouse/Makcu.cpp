@@ -11,6 +11,8 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
     , aiming_active(false)
     , shooting_active(false)
     , zooming_active(false)
+    , side1_active(false)
+    , side2_active(false)
 {
     try
     {
@@ -149,13 +151,13 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         break;
 
     case makcu::MouseButton::SIDE1:
-        // Mouse4 (side button 1) - not used
+        // Mouse4 (side button 1)
+        side1_active = pressed;
         break;
 
     case makcu::MouseButton::SIDE2:
-        // Mouse5 (side button 2) = aiming
-        aiming_active = pressed;
-        aiming.store(pressed);
+        // Mouse5 (side button 2)
+        side2_active = pressed;
         break;
     }
 }

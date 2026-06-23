@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -12,13 +12,20 @@
 #include <mutex>
 #include <thread>
 
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QPalette>
+#include <QStyleFactory>
+
 #include "capture.h"
+#include "capture/auto_capture.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "keyboard_listener.h"
-#include "overlay.h"
-#include "overlay/app_log.h"
-#include "overlay/preview_window.h"
+#include "app_log.h"
+#include "preview_window.h"
 #include "ghub.h"
 #include "other_tools.h"
 #include "mem/gpu_resource_manager.h"
@@ -31,12 +38,19 @@
 
 #include "depth/depth_anything_trt.h"
 #include "depth/depth_mask.h"
+#include "macro/lua_runtime.h"
 #include "tensorrt/nvinf.h"
+
+#include "MainWindow.h"
+#include "widgets/IconFont.h"
+#include "widgets/LoginDialog.h"
+#include "config/ConfigManager.h"
+#include "config/config_bridge.h"
 
 std::condition_variable frameCV;
 std::atomic<bool> shouldExit(false);
 std::atomic<bool> aiming(false);
-std::atomic<bool> session_stop_requested(true); // starts true: no session running yet
+std::atomic<bool> session_stop_requested(true);
 std::recursive_mutex configMutex;
 
 TrtDetector trt_detector;
@@ -62,6 +76,9 @@ std::atomic<bool> input_method_changed(false);
 
 
 std::string g_iconLastError;
+
+std::atomic<bool> g_replay_playback_active(false);
+std::atomic<int>  g_replay_playback_frame(0);
 
 static int FatalExit(const std::string& message)
 {
@@ -202,8 +219,53 @@ void assignInputDevices()
     }
 }
 
+static void applyLightPalette(QApplication& app)
+{
+    app.setStyle(QStyleFactory::create("Fusion"));
 
-int main()
+    QPalette pal;
+    pal.setColor(QPalette::Window, QColor("#F6F6F8"));
+    pal.setColor(QPalette::WindowText, QColor("#1A1A1F"));
+    pal.setColor(QPalette::Base, QColor("#FFFFFF"));
+    pal.setColor(QPalette::AlternateBase, QColor("#FAFAFB"));
+    pal.setColor(QPalette::Text, QColor("#1A1A1F"));
+    pal.setColor(QPalette::Button, QColor("#FBFBFC"));
+    pal.setColor(QPalette::ButtonText, QColor("#1A1A1F"));
+    pal.setColor(QPalette::ToolTipBase, QColor("#1A1A1F"));
+    pal.setColor(QPalette::ToolTipText, QColor("#FFFFFF"));
+    pal.setColor(QPalette::PlaceholderText, QColor("#A1A1AA"));
+    pal.setColor(QPalette::Highlight, QColor("#5E6AD2"));
+    pal.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
+    pal.setColor(QPalette::Disabled, QPalette::Text, QColor("#C2C2CA"));
+    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#C2C2CA"));
+    app.setPalette(pal);
+
+    QFont appFont("Microsoft YaHei UI");
+    appFont.setPixelSize(13);
+    app.setFont(appFont);
+}
+
+static QString loadStyleSheet()
+{
+    QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates = {
+        appDir + "/style/theme.qss",
+        appDir + "/../style/theme.qss",
+        appDir + "/../../qt_ui/style/theme.qss",
+        "./style/theme.qss",
+        "../qt_ui/style/theme.qss",
+    };
+    for (const auto& path : candidates)
+    {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+            return QString::fromUtf8(file.readAll());
+    }
+    return {};
+}
+
+
+int main(int argc, char* argv[])
 {
     AppLog::InstallStdStreamCapture();
 
@@ -342,8 +404,6 @@ int main()
             }
         }
 
-        // MouseThread is built with generic defaults; the mouse loop will
-        // overwrite params as soon as the first aim hotkey becomes active.
         MouseRuntimeParams mouse_params{};
         mouse_params.detection_resolution = config.detection_resolution;
 
@@ -420,9 +480,6 @@ int main()
                 std::cerr << "[MAIN] Model metadata preload failed: " << preloadError << std::endl;
         }
 
-        // Launcher workflow: construct the session but do NOT start it. The
-        // overlay UI (see draw_session.cpp) owns start/stop via its buttons so
-        // the user can pick backend/model before any capture or inference runs.
         runtime::InferenceSession session(mouseThread);
         g_inference_session = &session;
 
@@ -433,21 +490,74 @@ int main()
             session.start(config.backend, std::string("models/") + config.ai_model);
         }
 
+        macro::runtime_start();
+        macro::runtime_set_enabled(config.macro_enabled);
+        macro::runtime_set_primary_button_events_enabled(config.macro_primary_button_events);
+        if (config.macro_enabled && !config.macro_script_path.empty())
+        {
+            std::string macro_err;
+            if (!macro::runtime_load_script(config.macro_script_path, &macro_err))
+                std::cerr << "[Macro] script load failed: " << macro_err << std::endl;
+        }
+
         std::thread keyThread = StartThreadGuarded("KeyboardListener", [] {
             keyboardListener();
         });
-        std::thread overlayThread = StartThreadGuarded("OverlayThread", [] {
-            OverlayThread();
+
+        std::thread autoCapThread = StartThreadGuarded("AutoCapture", [] {
+            AutoCapture::auto_capture_thread();
         });
 
         PreviewWindow_Start();
 
         welcome_message();
 
+        // --- Qt UI (replaces ImGui overlay) ---
+        QApplication app(argc, argv);
+        app.setApplicationName("Apotheosis");
+        app.setOrganizationName("Apotheosis");
+
+        applyLightPalette(app);
+        IconFont::load();
+
+        if (auto qss = loadStyleSheet(); !qss.isEmpty())
+            app.setStyleSheet(qss);
+
+        ConfigManager::instance().load("config.ini");
+        ConfigBridge::instance().syncFromRuntime();
+
+        if (!LoginDialog::tryAutoLogin()) {
+            LoginDialog login;
+            if (login.exec() != QDialog::Accepted)
+            {
+                shouldExit = true;
+                keyThread.join();
+                if (autoCapThread.joinable()) autoCapThread.join();
+                PreviewWindow_Stop();
+                macro::runtime_stop();
+                session.stop();
+                g_inference_session = nullptr;
+                return 0;
+            }
+        }
+
+        MainWindow window;
+        window.resize(960, 640);
+        window.show();
+
+        QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
+            shouldExit = true;
+        });
+
+        int result = app.exec();
+
+        shouldExit = true;
         keyThread.join();
-        overlayThread.join();
+        if (autoCapThread.joinable()) autoCapThread.join();
 
         PreviewWindow_Stop();
+
+        macro::runtime_stop();
 
         session.stop();
         g_inference_session = nullptr;
@@ -471,7 +581,7 @@ int main()
             kmboxASerial = nullptr;
         }
 
-        return 0;
+        return result;
     }
     catch (const std::exception& e)
     {
@@ -479,6 +589,3 @@ int main()
         return FatalExit(std::string("[MAIN] An error has occurred in the main stream: ") + e.what());
     }
 }
-
-
-

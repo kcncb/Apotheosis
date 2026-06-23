@@ -1,0 +1,29 @@
+-- The C compiler identification is MSVC 19.50.35729.0
+-- The CXX compiler identification is MSVC 19.50.35729.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- The CUDA compiler identification is NVIDIA 12.9.41 with host compiler MSVC 19.50.35729.0
+-- Detecting CUDA compiler ABI info
+-- Detecting CUDA compiler ABI info - done
+-- Check for working CUDA compiler: C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe - skipped
+-- Detecting CUDA compile features
+-- Detecting CUDA compile features - done
+-- Found CUDAToolkit: C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/include (found version "12.9.41")
+-- Apotheosis portable build
+-- OpenCV: C:/Users/Administrator/Desktop/Apotheosis/Apotheosis/modules/opencv/prebuilt/opencv/build/x64/vc16
+-- ONNX Runtime: C:/Users/Administrator/Desktop/Apotheosis/packages/Microsoft.ML.OnnxRuntime.DirectML.1.22.0
+-- DirectML: C:/Users/Administrator/Desktop/Apotheosis/packages/Microsoft.AI.DirectML.1.15.4
+-- TensorRT: C:/Users/Administrator/Desktop/Apotheosis/Apotheosis/modules/TensorRT-10.15.1.29
+-- cuDNN: C:/Program Files/NVIDIA/CUDNN/v9.17
+-- CUDA: C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin
+-- Configuring done (18.1s)
+-- Generating done (0.4s)
+-- Build files have been written to: C:/Users/Administrator/Desktop/Apotheosis/build/cuda

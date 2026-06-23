@@ -34,11 +34,37 @@ std::string trim(std::string s)
     return s;
 }
 
-// Minimal tokenizer for name blobs. Both Python dict repr and JSON objects look
-// similar enough that the same scanner handles both: we walk the blob, collect
-// every quoted string (single- or double-quoted), and assume the ordered
-// sequence of strings matches the class order. Integer keys are ignored.
-// This is intentionally tolerant; upstream metadata is not strictly typed.
+// Read one quoted string starting at blob[i] (which must be `"` or `'`).
+// Advances i past the closing quote. Returns the unescaped string contents.
+std::string read_quoted(const std::string& blob, size_t& i)
+{
+    std::string acc;
+    const size_t n = blob.size();
+    if (i >= n) return acc;
+    const char quote = blob[i++];
+    while (i < n)
+    {
+        const char ch = blob[i];
+        if (ch == '\\' && i + 1 < n)
+        {
+            acc.push_back(blob[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (ch == quote)
+        {
+            ++i;
+            break;
+        }
+        acc.push_back(ch);
+        ++i;
+    }
+    return acc;
+}
+
+// Minimal tokenizer for ARRAY-style name blobs like `["person", "bicycle"]`.
+// Walks the blob and collects every quoted string in order. NOT safe for dict
+// blobs where keys are also quoted (use extract_dict_values for those).
 std::vector<std::string> extract_quoted_strings(const std::string& blob)
 {
     std::vector<std::string> out;
@@ -48,53 +74,101 @@ std::vector<std::string> extract_quoted_strings(const std::string& blob)
     {
         const char c = blob[i];
         if (c == '"' || c == '\'')
-        {
-            const char quote = c;
+            out.push_back(read_quoted(blob, i));
+        else
             ++i;
-            std::string acc;
-            while (i < n)
-            {
-                const char ch = blob[i];
-                if (ch == '\\' && i + 1 < n)
-                {
-                    // skip escape
-                    acc.push_back(blob[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                if (ch == quote)
-                {
-                    ++i;
-                    break;
-                }
-                acc.push_back(ch);
+    }
+    return out;
+}
+
+// Walk a dict body `{key: value, key: value, ...}` and return ONLY the values.
+// Handles both Python dict repr (unquoted int keys, single-quoted string
+// values) and JSON (quoted string keys, double-quoted string values). The
+// caller may pass the dict with or without the wrapping braces — we tolerate
+// either. This exists because Ultralytics' YOLO metadata stores class names
+// as `{0: 'person', ...}` in ONNX custom-metadata (Python repr) and as
+// `{"0": "person", ...}` in TensorRT engine headers (JSON). Using
+// extract_quoted_strings on the latter would scoop up the keys too and
+// double the class count.
+std::vector<std::string> extract_dict_values(const std::string& blob)
+{
+    std::vector<std::string> out;
+    const size_t n = blob.size();
+    size_t i = 0;
+
+    while (i < n && std::isspace(static_cast<unsigned char>(blob[i])))
+        ++i;
+    if (i < n && blob[i] == '{')
+        ++i;
+
+    while (i < n)
+    {
+        while (i < n && (std::isspace(static_cast<unsigned char>(blob[i])) || blob[i] == ','))
+            ++i;
+        if (i >= n || blob[i] == '}') break;
+
+        // Skip the key. It may be quoted (JSON / string keys) or bare
+        // (Python dict repr with int keys).
+        if (blob[i] == '"' || blob[i] == '\'')
+            (void)read_quoted(blob, i);
+        else
+            while (i < n && blob[i] != ':' && blob[i] != ',' && blob[i] != '}'
+                   && !std::isspace(static_cast<unsigned char>(blob[i])))
                 ++i;
-            }
-            out.push_back(std::move(acc));
+
+        while (i < n && (std::isspace(static_cast<unsigned char>(blob[i])) || blob[i] == ':'))
+            ++i;
+        if (i >= n || blob[i] == '}') break;
+
+        // Read the value. Strings are appended; non-string values (nested
+        // dicts, numbers) are skipped — they shouldn't appear in a class
+        // names dict but we handle them defensively.
+        if (blob[i] == '"' || blob[i] == '\'')
+        {
+            out.push_back(read_quoted(blob, i));
         }
         else
         {
-            ++i;
+            int depth = 0;
+            while (i < n && (depth > 0 || (blob[i] != ',' && blob[i] != '}')))
+            {
+                const char c = blob[i];
+                if (c == '{' || c == '[') ++depth;
+                else if (c == '}' || c == ']') --depth;
+                ++i;
+            }
         }
     }
     return out;
+}
+
+// Pick the right tokenizer for a names blob based on whether it looks like a
+// dict (`{...}`) or an array/flat list (`[...]` / loose tokens).
+std::vector<std::string> parse_names_blob(const std::string& blob)
+{
+    size_t i = 0;
+    while (i < blob.size() && std::isspace(static_cast<unsigned char>(blob[i])))
+        ++i;
+    if (i < blob.size() && blob[i] == '{')
+        return extract_dict_values(blob.substr(i));
+    return extract_quoted_strings(blob);
 }
 
 } // namespace
 
 std::vector<std::string> parse_python_dict_names(const std::string& blob)
 {
-    return extract_quoted_strings(blob);
+    return parse_names_blob(blob);
 }
 
 std::vector<std::string> parse_json_names(const std::string& blob)
 {
     // Look for a "names" key and limit extraction to its value scope. If not
-    // found, just take every quoted string.
+    // found, fall back to format-detecting on the whole blob.
     const std::string key = "\"names\"";
     const size_t at = blob.find(key);
     if (at == std::string::npos)
-        return extract_quoted_strings(blob);
+        return parse_names_blob(blob);
 
     size_t i = at + key.size();
     while (i < blob.size() && (std::isspace(static_cast<unsigned char>(blob[i])) || blob[i] == ':'))
@@ -104,7 +178,7 @@ std::vector<std::string> parse_json_names(const std::string& blob)
 
     const char open = blob[i];
     if (open != '{' && open != '[')
-        return extract_quoted_strings(blob.substr(i));
+        return parse_names_blob(blob.substr(i));
 
     const char close = (open == '{') ? '}' : ']';
     int depth = 0;
@@ -123,7 +197,14 @@ std::vector<std::string> parse_json_names(const std::string& blob)
             }
         }
     }
-    return extract_quoted_strings(blob.substr(i, j - i));
+
+    const std::string inner = blob.substr(i, j - i);
+    // Dict (`{"0":"person",...}`) needs the key-aware parser so we don't
+    // scoop up keys as class names. Array (`["person",...]`) is a flat
+    // sequence of quoted values.
+    if (open == '{')
+        return extract_dict_values(inner);
+    return extract_quoted_strings(inner);
 }
 
 std::string read_ultralytics_engine_header(const std::string& engine_path)
@@ -318,6 +399,16 @@ ModelMetadata inspect_onnx_model(const std::string& model_path, bool verbose)
         {
             if (verbose)
                 std::cerr << "[ModelInspector] Reading ONNX metadata failed: " << e.what() << std::endl;
+        }
+
+        // NMS-decoded outputs (cols==6: x1,y1,x2,y2,score,classId) and similar
+        // fixed-width layouts leave channels-4 == 2 regardless of the model's
+        // real class count. When the names metadata is richer than that, it's
+        // authoritative — trust it over the dim-derived count.
+        if (!out.class_names.empty()
+            && static_cast<int>(out.class_names.size()) > out.class_count)
+        {
+            out.class_count = static_cast<int>(out.class_names.size());
         }
     }
     catch (const std::exception& e)

@@ -213,6 +213,7 @@
     <a href="#speed">速度增益（speed_x/y）</a>
     <a href="#kalman">Kalman 兜底 + 类别覆盖</a>
     <a href="#aim-lock">吸附锁死力度</a>
+    <a href="#bezier">Bezier 轨迹模式</a>
     <a href="#yoffset-decay">Y 偏移距离衰减</a>
     <a href="#hysteresis">目标切换迟滞</a>
     <a href="#threat">威胁度优先级</a>
@@ -224,6 +225,11 @@
 
     <div class="toc-group">硬件输入</div>
     <a href="#input">输入设备</a>
+
+    <div class="toc-group">宏脚本</div>
+    <a href="#macro">Lua / G HUB 兼容</a>
+    <a href="#macro-api">实现的 API 表面</a>
+    <a href="#macro-script">脚本骨架与事件</a>
 
     <div class="toc-group">调试与回放</div>
     <a href="#replay">瞄准轨迹回放</a>
@@ -513,6 +519,9 @@ atten  = 1.0  (Path A：新检测帧)
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
         <tr><td>kalman_enabled</td><td>true</td><td>总开关。关掉则丢检测瞬间鼠标立刻停。</td></tr>
+        <tr><td>predictionInterval</td><td>0.01 s</td><td>无条件向前预测的基础窗口（秒）。最终 lookahead = <code>predictionInterval + (检测延迟 if compensate_detection_delay) + additional_prediction_ms</code>。0 = 仅由后两项决定,完全没有"主动超前量"。</td></tr>
+        <tr><td>prediction_futurePositions</td><td>20</td><td>调试叠层里画几个未来点（仅可视化,不进控制器）。</td></tr>
+        <tr><td>draw_futurePositions</td><td>true</td><td>是否画未来点轨迹。</td></tr>
         <tr><td>process_noise_position</td><td>40</td><td>"模型相信目标位置变化的不确定度"。大 → 更信测量、不信预测。</td></tr>
         <tr><td>process_noise_velocity</td><td>1800</td><td>同上但对速度。大 → 允许速度突变（适合无规律行人）。</td></tr>
         <tr><td>measurement_noise</td><td>35</td><td>"模型相信测量本身有多吵"。大 → 平滑但延迟；小 → 灵敏但抖。</td></tr>
@@ -588,6 +597,40 @@ atten = 1.0   Path A (新检测帧)
     </div>
     <div class="tip">
       <b>Path B 自动衰减 0.65×</b>：准星找色 / Kalman 外推这两条路径在控制器里会自动把 lock 系数打 0.65 折，专门用来抑制后座位移被锁死放大成"准星抖"。<b>不需要为 Path B 单独调任何参数</b>，它对 Path A 的标定值是透明的。
+    </div>
+
+    <!-- ============ Bezier 轨迹 ============ -->
+    <h2 id="bezier">Bezier 轨迹模式 (可选)</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">把"准星 → 目标"的直线段重塑成一条三次贝塞尔曲线,把曲线偏置后的等效误差喂给同一份 P 控制器。</div>
+      <div class="k">为什么有</div><div class="v">让鼠标轨迹在视觉上更像人手挥动,而不是机器人式直线。仅改变路径形状,最终目标点仍是原始 target。</div>
+      <div class="k">影响</div><div class="v">速度 / 锁定 / Kalman 全部不受影响,Bezier 只在 <code>driveAimToTarget</code> 入口处替换 err 向量。Direct 模式下后续字段全部静默忽略。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>aim_trajectory_mode</td><td>Direct</td><td><code>Direct</code> = 现有非线性 P 控制器（直线靠近）。<code>Bezier</code> = 启用本节后续字段。</td></tr>
+        <tr><td>bezier_cx1, bezier_cy1</td><td>0.30, 0.25</td><td>第一控制点。<b>归一化坐标</b>:X 沿起→终方向,Y 垂直方向,单位 = 起终段长度。</td></tr>
+        <tr><td>bezier_cx2, bezier_cy2</td><td>0.70, -0.15</td><td>第二控制点。两控制点 Y 异号会形成 S 形轨迹（更"人味"）。</td></tr>
+        <tr><td>bezier_follow_alpha</td><td>0.15</td><td>目标移动平滑系数 [0,1]。0 = 锚定后曲线不再跟目标（横移会脱靶）;1 = 每帧完全跟（退化成直线）;中间值 ≈ 一阶低通。</td></tr>
+        <tr><td>bezier_reanchor_threshold_px</td><td>60.0</td><td>目标瞬移超此值（检测像素）时强制重锚一次新曲线,避免目标 ID 切换造成的伪轨迹。</td></tr>
+      </tbody>
+    </table>
+
+    <h4>调参步骤</h4>
+    <ol class="steps">
+      <li>UI 里有可视化曲线编辑器,<b>直接拖控制点</b>比改数字直观。建议先把两控制点设成对称形状（如 0.3/0.2 与 0.7/-0.2）观察。</li>
+      <li><code>follow_alpha</code> 小（0.05~0.15）→ 曲线稳但慢横移容易脱靶;大（0.3~0.5）→ 跟得紧但曲线退化为直线。从 0.15 起步。</li>
+      <li><code>reanchor_threshold_px</code> 太小会在持续移动的目标上反复重锚出现锯齿;太大让锁定切换后的几帧仍走旧曲线。60 px @ detection_resolution=320 ≈ 屏宽的 1/5,通常够用。</li>
+    </ol>
+
+    <div class="warn">
+      Bezier 模式只影响<b>轨迹形状</b>。"咬死"和"动态锁死"两个特性仍由 <code>lock_strength</code> 控制,Bezier 内部把直线 err 替换成曲线偏置后的等效 err 后再交给同一份 P 控制器累积。
+    </div>
+
+    <div class="pitfall">
+      Bezier 是<b>视觉伪装</b>而非精度提升。某些反作弊关心的是"鼠标曲线是不是过于线性",Bezier 在这点上有帮助;但它会在<b>目标快速横移</b>时引入额外的滞后（曲线形状跟不上目标变化）。如果你追求的是精度,保持 Direct。
     </div>
 
     <!-- ============ Y offset decay ============ -->
@@ -782,6 +825,95 @@ atten = 1.0   Path A (新检测帧)
     </table>
     <div class="note">
       所有"按键"操作（包括智能扳机的左键自动开火）都<b>统一通过当前选中的输入设备</b>派发。换设备无需改任何应用层逻辑。
+    </div>
+
+    <!-- ============ 宏脚本 ============ -->
+    <h2 id="macro">宏脚本 (Lua / G HUB 兼容)</h2>
+    <div class="wwh">
+      <div class="k">是什么</div><div class="v">嵌入 Lua 5.1 解释器,事件 → <code>OnEvent(event, arg)</code> 回调,API 表面与 Logitech G HUB / LGS 一致。</div>
+      <div class="k">为什么有</div><div class="v">G HUB 上写好的压枪 / 连点 / 切枪宏可以<b>直接复制粘贴</b>运行,不绑定特定硬件;同时把脚本能力暴露给所有输入后端,而不只是罗技。</div>
+      <div class="k">影响</div><div class="v">脚本里的鼠标移动 / 按键自动走当前 <code>input_method</code>。WIN32 / GHUB / Arduino / KMBOX_NET / KMBOX_A / MAKCU 全部支持。脚本不感知硬件后端。</div>
+    </div>
+
+    <table class="params">
+      <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>macro_enabled</td><td>false</td><td>启动时载入 <code>macro_script_path</code> 并接事件。</td></tr>
+        <tr><td>macro_script_path</td><td>(空)</td><td>.lua 文件路径。<b>支持 UTF-8 含中文 / Cyrillic / emoji</b>(内部走 <code>_wfopen</code>,绕过 ANSI ACP)。</td></tr>
+        <tr><td>macro_primary_button_events</td><td>false</td><td>等同脚本里 <code>EnablePrimaryMouseButtonEvents(true)</code>。<b>默认关与 G HUB 一致</b> —— 关闭时左键事件不派发到 OnEvent,避免大量压枪脚本在测试时被无意触发。</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="macro-api">实现的 API 表面</h3>
+    <table class="params">
+      <thead><tr><th>分组</th><th>函数</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3">运动</td><td><code>MoveMouseRelative(dx, dy)</code></td><td>相对移动,走当前输入后端。</td></tr>
+        <tr><td><code>MoveMouseTo(x, y)</code></td><td>归一化 0..65535 绝对坐标(走 SetCursorPos)。</td></tr>
+        <tr><td><code>MoveMouseWheel(clicks)</code></td><td>滚轮,正上负下。</td></tr>
+        <tr><td rowspan="3">鼠标按键</td><td><code>PressMouseButton(n)</code> / <code>ReleaseMouseButton(n)</code></td><td>n = 1..5 (LMB/RMB/MMB/X1/X2)。<b>X1/X2 在 KMBOX_NET / KMBOX_A 上走原生 side1/side2 通道</b>,不退回 SendInput。</td></tr>
+        <tr><td><code>PressAndReleaseMouseButton(n)</code></td><td>带 8 ms 内置 dwell。</td></tr>
+        <tr><td><code>IsMouseButtonPressed(n)</code></td><td>实时查物理状态。</td></tr>
+        <tr><td rowspan="3">键盘</td><td><code>PressKey(...)</code> / <code>ReleaseKey(...)</code> / <code>PressAndReleaseKey(...)</code></td><td>变长参数,每个参数可以是字符串(如 <code>"lalt"</code>、<code>"f1"</code>、<code>"a"</code>)或 VK 码整数。</td></tr>
+        <tr><td><code>IsModifierPressed("ctrl"|"shift"|"alt"|...)</code></td><td>含 lctrl/rctrl 等细分。</td></tr>
+        <tr><td><code>IsKeyLockOn("capslock"|"numlock"|"scrolllock")</code></td><td>切换键开关状态。</td></tr>
+        <tr><td>定时</td><td><code>Sleep(ms)</code> / <code>GetRunningTime()</code></td><td>启动时调过 <code>timeBeginPeriod(1)</code>,Sleep(7) 是真 7 ms 而不是 round 到 15.6 ms。Sleep 可被 <b>reload / unload</b> 中断。</td></tr>
+        <tr><td>查询</td><td><code>GetMousePosition()</code> / <code>IsKeyDown(name_or_vk)</code></td><td>返回当前光标坐标 / 任意键状态。</td></tr>
+        <tr><td>日志</td><td><code>OutputLogMessage(fmt, ...)</code> / <code>OutputDebugMessage</code> / <code>ClearLog</code></td><td>printf 风格(走 Lua <code>string.format</code>),输出到"宏脚本"页的日志面板。</td></tr>
+        <tr><td>开关</td><td><code>EnablePrimaryMouseButtonEvents(bool)</code></td><td>动态开/关 LMB 事件派发,优先级高于 config。</td></tr>
+        <tr><td rowspan="2">兼容桩</td><td><code>PlayMacro(name)</code></td><td>查 <code>_G[name]</code>,如果是函数则同步调用(无参无返回)。常见用法 = 脚本顶层定义同名函数当宏。</td></tr>
+        <tr><td><code>AbortMacro</code> / <code>SetBacklightColor</code> / <code>RestoreBacklightColor</code> / <code>SetMKeyState</code> / <code>GetMKeyState</code> / <code>GetDate</code></td><td>原 LGS 硬件 API。我们没 LED / 没 M-keys / 单线程,这些都是 no-op 或最小实现,不会报错。</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="macro-script">事件名 + 脚本骨架</h3>
+    <p>当前实现派发的事件:</p>
+    <table class="params">
+      <thead><tr><th>事件名</th><th>arg</th><th>触发时机</th></tr></thead>
+      <tbody>
+        <tr><td><code>MOUSE_BUTTON_PRESSED</code></td><td>1..5</td><td>poller 检测到鼠标键边沿(2 ms 轮询)。<b>arg=1 受 macro_primary_button_events 节流</b>。</td></tr>
+        <tr><td><code>MOUSE_BUTTON_RELEASED</code></td><td>1..5</td><td>同上,松开。</td></tr>
+        <tr><td><code>PROFILE_ACTIVATED</code></td><td>1</td><td>脚本加载成功后立即触发(reload 也算)。</td></tr>
+        <tr><td><code>PROFILE_DEACTIVATED</code></td><td>1</td><td>主动 unload 时触发。</td></tr>
+      </tbody>
+    </table>
+
+    <p>典型压枪脚本骨架:</p>
+    <pre><code>EnablePrimaryMouseButtonEvents(true)
+
+local recoil_pattern = {
+    {0, 4}, {1, 6}, {-2, 5}, {-1, 7}, {0, 6},
+}
+
+function OnEvent(event, arg)
+    if event == "MOUSE_BUTTON_PRESSED" and arg == 1 then
+        for _, step in ipairs(recoil_pattern) do
+            if not IsMouseButtonPressed(1) then break end
+            MoveMouseRelative(step[1], step[2])
+            Sleep(8)
+        end
+    end
+end</code></pre>
+
+    <h4>线程模型</h4>
+    <ul>
+      <li><b>worker 线程</b>:从事件队列取一个事件,锁住 Lua VM,调 <code>OnEvent</code>,等返回再取下一个。<b>OnEvent 串行执行,新事件排队</b> —— 与 G HUB 行为一致。</li>
+      <li><b>poller 线程</b>:2 ms 轮询五个鼠标键,检测到边沿就投递事件。</li>
+      <li><b>合成抑制</b>:脚本自己 <code>PressMouseButton(1)</code> 不会被 poller 当成物理按下回灌成事件,避免递归。</li>
+      <li><b>取消机制</b>:Lua 计数 hook(每 100 k 指令)+ 可中断 <code>Sleep</code> 双重检查 <code>stop_requested</code> / <code>abort_pending</code>,卡住的脚本能被 <b>reload / unload 强行打断</b>。</li>
+      <li><b>定时器精度</b>:启动时 <code>timeBeginPeriod(1)</code>,关闭时 <code>timeEndPeriod(1)</code>。</li>
+    </ul>
+
+    <div class="tip">
+      左键事件默认不派发到 OnEvent —— 大多数 G HUB 脚本会在文件顶部写 <code>EnablePrimaryMouseButtonEvents(true)</code>。粘贴脚本后没反应先检查这一行,或者勾上 UI 里的"接收左键事件"。
+    </div>
+
+    <div class="warn">
+      不要在脚本里做<b>不可中断的阻塞</b>(网络请求、大文件读取、阻塞 IO):它们绕过我们的 hook 和 cancellable Sleep,reload 会等不到。需要异步行为时,把任务拆成 Sleep 间隔的小步。
+    </div>
+
+    <div class="pitfall">
+      <code>PressAndReleaseMouseButton</code> / <code>PressAndReleaseKey</code> 中间的 8 ms dwell <b>不是可中断 Sleep</b> —— 这是为了避免 abort 时按键卡在按下状态。如果你的脚本依赖这条假设,知道就好。
     </div>
 
     <!-- ============ 回放 ============ -->

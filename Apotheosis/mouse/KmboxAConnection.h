@@ -17,6 +17,10 @@ public:
     void rightUp();
     void middleDown();
     void middleUp();
+    void side1Down();
+    void side1Up();
+    void side2Down();
+    void side2Up();
     void wheel(int delta);
 
 private:

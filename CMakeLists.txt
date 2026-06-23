@@ -17,6 +17,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# Qt6 requires AUTOMOC for Q_OBJECT macro processing
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_PREFIX_PATH "C:/Qt/6.8.3/msvc2022_64" CACHE PATH "Qt6 prefix")
+
 if(NOT CMAKE_CUDA_FLAGS MATCHES "(^| )--allow-unsupported-compiler($| )")
     string(APPEND CMAKE_CUDA_FLAGS " --allow-unsupported-compiler")
 endif()
@@ -87,21 +91,32 @@ require_file("${CPPWINRT_INCLUDE_DIR}/winrt/base.h" "C++/WinRT headers")
 require_file("${MSVC_REDIST_DIR}/vcruntime140.dll" "MSVC runtime redistributables")
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+set(QT_UI_DIR "${CMAKE_SOURCE_DIR}/qt_ui")
 
 set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
+    "${SRC_DIR}/capture/auto_capture.cpp"
     "${SRC_DIR}/capture/capture.cpp"
     "${SRC_DIR}/capture/capture_utils.cpp"
     "${SRC_DIR}/capture/gpu_color_ops.cu"
     "${SRC_DIR}/capture/gpu_jpeg_decoder.cpp"
+    "${SRC_DIR}/capture/gpu_h264_decoder.cpp"
     "${SRC_DIR}/capture/eth_capture.cpp"
     "${SRC_DIR}/capture/mf_capture.cpp"
     "${SRC_DIR}/capture/opencv_capture.cpp"
     "${SRC_DIR}/capture/tcp_capture.cpp"
     "${SRC_DIR}/capture/udp_capture.cpp"
+    "${SRC_DIR}/capture/avermedia/avermedia_sdk.cpp"
+    "${SRC_DIR}/capture/avermedia/avermedia_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/crosshair/crosshair_detector.cpp"
     "${SRC_DIR}/crosshair/laser_detector.cpp"
+    "${SRC_DIR}/crosshair/flashlight_detector.cpp"
+    "${SRC_DIR}/crosshair/flashlight_runtime.cpp"
+    "${SRC_DIR}/crosshair/glass_filter.cpp"
+    "${SRC_DIR}/crosshair/glass_runtime.cpp"
     "${SRC_DIR}/crosshair/crosshair_runtime.cpp"
     "${SRC_DIR}/depth/depth_anything_trt.cpp"
     "${SRC_DIR}/depth/depth_mask.cpp"
@@ -112,12 +127,6 @@ set(APP_SOURCES
     "${SRC_DIR}/detector/model_inspector.cpp"
     "${SRC_DIR}/detector/postProcess.cpp"
     "${SRC_DIR}/detector/trt_detector.cpp"
-    "${SRC_DIR}/imgui/imgui.cpp"
-    "${SRC_DIR}/imgui/imgui_draw.cpp"
-    "${SRC_DIR}/imgui/imgui_impl_dx11.cpp"
-    "${SRC_DIR}/imgui/imgui_impl_win32.cpp"
-    "${SRC_DIR}/imgui/imgui_tables.cpp"
-    "${SRC_DIR}/imgui/imgui_widgets.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/macro/macro_keymap.cpp"
@@ -134,6 +143,8 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
     "${SRC_DIR}/mouse/Arduino.cpp"
+    "${SRC_DIR}/mouse/boss_aim.cpp"
+    "${SRC_DIR}/mouse/movers.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
     "${SRC_DIR}/mouse/KmboxAConnection.cpp"
@@ -143,26 +154,7 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
     "${SRC_DIR}/overlay/app_log.cpp"
-    "${SRC_DIR}/overlay/config_dirty.cpp"
-    "${SRC_DIR}/overlay/draw_auth.cpp"
-    "${SRC_DIR}/overlay/draw_ai.cpp"
-    "${SRC_DIR}/overlay/draw_capture.cpp"
-    "${SRC_DIR}/overlay/draw_crosshair.cpp"
-    "${SRC_DIR}/overlay/draw_debug.cpp"
-    "${SRC_DIR}/overlay/draw_depth.cpp"
-    "${SRC_DIR}/overlay/draw_detection_preview.cpp"
-    "${SRC_DIR}/overlay/draw_hardware.cpp"
-    "${SRC_DIR}/overlay/draw_hotkeys.cpp"
-    "${SRC_DIR}/overlay/draw_log.cpp"
-    "${SRC_DIR}/overlay/draw_macro.cpp"
-    "${SRC_DIR}/overlay/draw_model_tools.cpp"
-    "${SRC_DIR}/overlay/draw_overlay.cpp"
-    "${SRC_DIR}/overlay/draw_session.cpp"
-    "${SRC_DIR}/overlay/draw_stats.cpp"
-    "${SRC_DIR}/overlay/draw_target.cpp"
     "${SRC_DIR}/overlay/preview_window.cpp"
-    "${SRC_DIR}/overlay/overlay.cpp"
-    "${SRC_DIR}/overlay/overlay_image.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
@@ -171,6 +163,61 @@ set(APP_SOURCES
     "${SRC_DIR}/scr/file_picker.cpp"
     "${SRC_DIR}/scr/other_tools.cpp"
     "${SRC_DIR}/tensorrt/nvinf.cpp"
+    # Qt UI sources
+    "${QT_UI_DIR}/MainWindow.cpp"
+    "${QT_UI_DIR}/MainWindow.h"
+    "${QT_UI_DIR}/config/ConfigManager.cpp"
+    "${QT_UI_DIR}/config/ConfigManager.h"
+    "${QT_UI_DIR}/config/config_bridge.cpp"
+    "${QT_UI_DIR}/config/config_bridge.h"
+    "${QT_UI_DIR}/pages/AiModelPage.cpp"
+    "${QT_UI_DIR}/pages/AiModelPage.h"
+    "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
+    "${QT_UI_DIR}/pages/AutoCapturePage.h"
+    "${QT_UI_DIR}/pages/CapturePage.cpp"
+    "${QT_UI_DIR}/pages/CapturePage.h"
+    "${QT_UI_DIR}/pages/CrosshairPage.cpp"
+    "${QT_UI_DIR}/pages/CrosshairPage.h"
+    "${QT_UI_DIR}/pages/DebugPage.cpp"
+    "${QT_UI_DIR}/pages/DebugPage.h"
+    "${QT_UI_DIR}/pages/DepthPage.cpp"
+    "${QT_UI_DIR}/pages/DepthPage.h"
+    "${QT_UI_DIR}/pages/FlashlightPage.cpp"
+    "${QT_UI_DIR}/pages/FlashlightPage.h"
+    "${QT_UI_DIR}/pages/GlassFilterPage.cpp"
+    "${QT_UI_DIR}/pages/GlassFilterPage.h"
+    "${QT_UI_DIR}/pages/HardwarePage.cpp"
+    "${QT_UI_DIR}/pages/HardwarePage.h"
+    "${QT_UI_DIR}/pages/HotkeyPage.cpp"
+    "${QT_UI_DIR}/pages/HotkeyPage.h"
+    "${QT_UI_DIR}/pages/LogPage.cpp"
+    "${QT_UI_DIR}/pages/LogPage.h"
+    "${QT_UI_DIR}/pages/MacroPage.cpp"
+    "${QT_UI_DIR}/pages/MacroPage.h"
+    "${QT_UI_DIR}/pages/ModelToolsPage.cpp"
+    "${QT_UI_DIR}/pages/ModelToolsPage.h"
+    "${QT_UI_DIR}/pages/SessionPage.cpp"
+    "${QT_UI_DIR}/pages/SessionPage.h"
+    "${QT_UI_DIR}/pages/StatsPage.cpp"
+    "${QT_UI_DIR}/pages/StatsPage.h"
+    "${QT_UI_DIR}/pages/TargetPage.cpp"
+    "${QT_UI_DIR}/pages/TargetPage.h"
+    "${QT_UI_DIR}/widgets/BezierEditor.cpp"
+    "${QT_UI_DIR}/widgets/BezierEditor.h"
+    "${QT_UI_DIR}/widgets/FreehandCurveEditor.cpp"
+    "${QT_UI_DIR}/widgets/FreehandCurveEditor.h"
+    "${QT_UI_DIR}/widgets/CardWidget.cpp"
+    "${QT_UI_DIR}/widgets/CardWidget.h"
+    "${QT_UI_DIR}/widgets/FormKit.cpp"
+    "${QT_UI_DIR}/widgets/FormKit.h"
+    "${QT_UI_DIR}/widgets/IconFont.cpp"
+    "${QT_UI_DIR}/widgets/IconFont.h"
+    "${QT_UI_DIR}/widgets/LoginDialog.cpp"
+    "${QT_UI_DIR}/widgets/LoginDialog.h"
+    "${QT_UI_DIR}/widgets/StatusBar.cpp"
+    "${QT_UI_DIR}/widgets/StatusBar.h"
+    "${QT_UI_DIR}/widgets/ToggleSwitch.cpp"
+    "${QT_UI_DIR}/widgets/ToggleSwitch.h"
 )
 
 add_library(serial_embedded STATIC
@@ -209,7 +256,7 @@ set_target_properties(lua_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 if(MSVC)
     set_target_properties(lua_static PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     # Lua 5.1 uses tmpfile/getenv/strcpy/etc. — silence /sdl + secure-CRT
     # warnings for the vendor sources only. Our own code keeps /sdl.
     target_compile_definitions(lua_static PRIVATE
@@ -247,7 +294,7 @@ set_target_properties(ai PROPERTIES
 
 foreach(target serial_embedded ai)
     if(MSVC)
-        set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
 endforeach()
 
@@ -257,6 +304,7 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
         $<$<COMPILE_LANGUAGE:CXX>:/W3>
         $<$<COMPILE_LANGUAGE:CXX>:/sdl>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4996>
         $<$<COMPILE_LANGUAGE:CXX>:/permissive->
         $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
     target_link_libraries(ai PRIVATE delayimp)
@@ -271,7 +319,6 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/crosshair"
     "${SRC_DIR}/depth"
     "${SRC_DIR}/detector"
-    "${SRC_DIR}/imgui"
     "${SRC_DIR}/include"
     "${SRC_DIR}/keyboard"
     "${SRC_DIR}/macro"
@@ -281,12 +328,12 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/runtime"
     "${SRC_DIR}/scr"
     "${SRC_DIR}/tensorrt"
-    "${SRC_DIR}/modules/imgui-1.91.2"
-    "${SRC_DIR}/modules/imgui-1.91.2/backends"
     "${SRC_DIR}/modules/makcu/include"
     "${SRC_DIR}/modules/serial/include"
     "${SRC_DIR}/modules/stb"
     "${SRC_DIR}/modules/npcap-sdk/Include"
+    "${SRC_DIR}/modules/nv-codec-headers"
+    "${QT_UI_DIR}"
     "${OPENCV_INCLUDE_DIR}"
     "${ONNXRUNTIME_DIR}/build/native/include"
     "${CPPWINRT_INCLUDE_DIR}"
@@ -302,6 +349,7 @@ target_link_directories(ai PRIVATE "${TENSORRT_ROOT}/lib")
 target_link_libraries(ai PRIVATE
     serial_embedded
     lua_static
+    Qt6::Widgets
     "${OPENCV_LIB}"
     "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"
     CUDA::cuda_driver
@@ -371,7 +419,26 @@ add_custom_command(TARGET ai POST_BUILD
     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '${CUDNN_ROOT}/bin/12.9/*.dll' -Destination '$<TARGET_FILE_DIR:ai>' -Force"
     VERBATIM)
 
-message(STATUS "Apotheosis portable build")
+# Deploy Qt6 runtime DLLs next to the executable
+add_custom_command(TARGET ai POST_BUILD
+    COMMAND "${CMAKE_PREFIX_PATH}/bin/windeployqt.exe"
+            --no-translations --no-opengl-sw --no-system-d3d-compiler
+            "$<TARGET_FILE:ai>"
+    VERBATIM)
+
+# Copy Qt UI assets (stylesheet, icon font) into build dir
+add_custom_command(TARGET ai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai>/style"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QT_UI_DIR}/style/theme.qss"
+            "$<TARGET_FILE_DIR:ai>/style/theme.qss"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QT_UI_DIR}/assets/tabler-icons.ttf"
+            "$<TARGET_FILE_DIR:ai>/assets/tabler-icons.ttf"
+    VERBATIM)
+
+message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_DIR}")
 message(STATUS "DirectML: ${DIRECTML_DIR}")

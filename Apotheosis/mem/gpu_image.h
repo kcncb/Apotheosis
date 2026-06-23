@@ -78,6 +78,14 @@ public:
         return GpuFrame{ data_, rows_, cols_, channels_, step_ };
     }
 
+    // Non-owning "this frame's GPU writes are complete" marker. The producer
+    // (e.g. capture's decode stream) records it; a consumer on a different
+    // stream waits via cudaStreamWaitEvent instead of a CPU-blocking
+    // cudaStreamSynchronize. The event is owned by the producer's pool, not by
+    // GpuImage — copies share it, matching the buffer's shared_ptr semantics.
+    void setReadyEvent(cudaEvent_t e) noexcept { ready_event_ = e; }
+    cudaEvent_t readyEvent() const noexcept { return ready_event_; }
+
 private:
     struct Storage
     {
@@ -92,4 +100,5 @@ private:
     int cols_ = 0;
     int channels_ = 0;
     size_t step_ = 0;
+    cudaEvent_t ready_event_ = nullptr;
 };

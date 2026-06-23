@@ -23,6 +23,8 @@ public:
     bool aiming_active;
     bool shooting_active;
     bool zooming_active;
+    bool side1_active;
+    bool side2_active;
 
 private:
     void onButtonCallback(makcu::MouseButton button, bool pressed);

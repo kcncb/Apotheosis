@@ -16,19 +16,27 @@ public:
 
 private slots:
     void onBackendChanged(int index);
+    void onDmlDeviceChanged(int value);
     void onToggleInference();
+    void onShowWindowChanged(bool checked);
+    void loadConfig();
 
 private:
+    // Backend card
     QComboBox* m_backendCombo{};
     QSpinBox* m_dmlDeviceId{};
-    QLabel* m_dmlDeviceLabel{};
     QWidget* m_dmlDeviceRow{};
-    QLabel* m_modelFileLabel{};
+    QLabel* m_backendStatusLabel{};
 
+    // Session control card
     QPushButton* m_toggleBtn{};
     QLabel* m_statusLabel{};
     bool m_running = false;
 
+    // Preview card
+    ToggleSwitch* m_showWindow{};
+
+    // CUDA settings card
     ToggleSwitch* m_cudaGraph{};
     ToggleSwitch* m_dualBuffer{};
     ToggleSwitch* m_pinnedMemory{};

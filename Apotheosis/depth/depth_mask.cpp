@@ -12,11 +12,13 @@ namespace depth_anything
     {
         std::lock_guard<std::mutex> lk(state_mutex);
         mask_binary.release();
+        colormap_bgr.release();
+        depth_normalized.release();
         last_error.clear();
         last_model_path.clear();
         initialized = false;
-        last_update = std::chrono::steady_clock::time_point::min();
-        last_attempt = std::chrono::steady_clock::time_point::min();
+        last_update = std::chrono::steady_clock::time_point{};
+        last_attempt = std::chrono::steady_clock::time_point{};
         last_frame_w = 0;
         last_frame_h = 0;
         if (model)
@@ -67,10 +69,46 @@ namespace depth_anything
         return mask_binary.clone();
     }
 
+    cv::Mat DepthMaskGenerator::getColormap() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return colormap_bgr.clone();
+    }
+
+    bool DepthMaskGenerator::hasColormap() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return !colormap_bgr.empty();
+    }
+
+    cv::Mat DepthMaskGenerator::getDepthNormalized() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return depth_normalized.clone();
+    }
+
+    int DepthMaskGenerator::colormapProducedCount() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return colormap_produced_count;
+    }
+
+    int DepthMaskGenerator::updateEnteredCount() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return update_entered_count;
+    }
+
+    int DepthMaskGenerator::depthSucceededCount() const
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        return depth_succeeded_count;
+    }
+
     void DepthMaskGenerator::update(const cv::Mat& frame, const DepthMaskOptions& options,
         const std::string& modelPath, nvinfer1::ILogger& logger)
     {
-        if (!options.enabled)
+        if (!options.enabled && !options.produce_colormap && !options.produce_normalized)
             return;
         const auto now = std::chrono::steady_clock::now();
         if (frame.empty())
@@ -87,6 +125,7 @@ namespace depth_anything
         last_attempt = now;
         last_frame_w = frame.cols;
         last_frame_h = frame.rows;
+        ++update_entered_count;
 
         if (!model)
             model = new DepthAnythingTrt();
@@ -96,6 +135,14 @@ namespace depth_anything
             last_error = "Depth mask model path is empty.";
             return;
         }
+
+        // Push the configured OPT size before init so that if a fresh build
+        // is triggered (modelPath is .onnx with no .engine yet) it gets the
+        // user's tuned profile instead of the kOptInputSize default.
+        model->setOptInputSize(options.opt_input_size);
+        // Push percentile-clip settings every frame so the user can tune
+        // them live without restarting.
+        model->setNormPercentiles(options.norm_low_pct, options.norm_high_pct);
 
         if (!initialized || modelPath != last_model_path || !model->ready())
         {
@@ -125,6 +172,33 @@ namespace depth_anything
                 last_error = "Depth mask inference returned empty output.";
             return;
         }
+        ++depth_succeeded_count;
+        depth_normalized = depth_norm.clone();
+
+        if (options.produce_colormap)
+        {
+            // Gamma 曲线只作用于热力图显示,不动 depth_norm 本身(后面的
+            // 直方图阈值是百分位的,对单调变换不变,但保持显示和遮罩解耦更
+            // 干净)。gamma < 1 把暗端拉亮,gamma > 1 反之。
+            const float gamma = std::clamp(options.heatmap_gamma, 0.1f, 5.0f);
+            cv::Mat depth_for_color;
+            if (std::abs(gamma - 1.0f) < 1e-3f)
+            {
+                depth_for_color = depth_norm;
+            }
+            else
+            {
+                cv::Mat depth_f;
+                depth_norm.convertTo(depth_f, CV_32F, 1.0 / 255.0);
+                cv::pow(depth_f, gamma, depth_f);
+                depth_f.convertTo(depth_for_color, CV_8U, 255.0);
+            }
+            cv::applyColorMap(depth_for_color, colormap_bgr, options.colormap_type);
+            ++colormap_produced_count;
+        }
+
+        if (!options.enabled)
+            return;
 
         int near_percent = std::clamp(options.near_percent, 1, 100);
 

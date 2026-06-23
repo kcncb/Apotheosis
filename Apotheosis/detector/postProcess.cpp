@@ -33,6 +33,63 @@ void applyDeleteBucketFilter(std::vector<Detection>& detections)
         detections.end());
 }
 
+SmallTargetDecode computeSmallTargetDecode()
+{
+    SmallTargetDecode out;
+    const float base = config.confidence_threshold;
+    if (!config.small_target_enabled)
+    {
+        out.decodeFloor = base;
+        out.baseConf = -1.0f;   // disables the CPU area-adaptive filter
+        out.smallConf = -1.0f;  // disables the GPU-side area threshold
+        out.areaThreshPx = 0.0;
+        return out;
+    }
+    const float smallConf = config.small_target_confidence;
+    const double res = static_cast<double>(config.detection_resolution);
+    out.decodeFloor = std::min(base, smallConf);
+    out.baseConf = base;
+    out.smallConf = smallConf;
+    out.areaThreshPx = static_cast<double>(config.small_target_area_frac) * res * res;
+    return out;
+}
+
+// Drop "large" boxes (area >= threshold) whose confidence is below the regular
+// base threshold. Small boxes already cleared the lower decode floor and are
+// kept as-is. No-op when baseConf < 0 (feature disabled).
+static void applySmallTargetConfFilter(std::vector<Detection>& detections,
+                                       float baseConf,
+                                       double areaThreshPx)
+{
+    if (detections.empty() || baseConf < 0.0f)
+        return;
+
+    detections.erase(
+        std::remove_if(detections.begin(), detections.end(),
+            [&](const Detection& d)
+            {
+                const double area = static_cast<double>(d.box.area());
+                return area >= areaThreshPx && d.confidence < baseConf;
+            }),
+        detections.end());
+}
+
+void capDetectionsToMax(std::vector<Detection>& detections, int maxDetections)
+{
+    if (maxDetections <= 0)
+        return;
+    if (detections.size() <= static_cast<size_t>(maxDetections))
+        return;
+    // Partial sort: move the top-K highest-confidence detections to the front,
+    // then drop the tail. O(n) average, cheaper than a full sort.
+    std::nth_element(
+        detections.begin(),
+        detections.begin() + maxDetections,
+        detections.end(),
+        [](const Detection& a, const Detection& b) { return a.confidence > b.confidence; });
+    detections.resize(static_cast<size_t>(maxDetections));
+}
+
 void NMS(std::vector<Detection>& detections, float nmsThreshold, std::chrono::duration<double, std::milli>* nmsTime)
 {
     if (detections.empty()) return;
@@ -109,7 +166,9 @@ std::vector<Detection> postProcessYolo(
     int numClasses,
     float confThreshold,
     float nmsThreshold,
-    std::chrono::duration<double, std::milli>* nmsTime
+    std::chrono::duration<double, std::milli>* nmsTime,
+    float smallTargetBaseConf,
+    double smallTargetAreaThreshPx
 )
 {
     std::vector<Detection> detections;
@@ -237,6 +296,7 @@ std::vector<Detection> postProcessYolo(
         }
     }
 
+    applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);
     NMS(detections, nmsThreshold, nmsTime);
     applyDeleteBucketFilter(detections);
     return detections;
@@ -248,7 +308,9 @@ std::vector<Detection> postProcessYoloDML(
     int numClasses,
     float confThreshold,
     float nmsThreshold,
-    std::chrono::duration<double, std::milli>* nmsTime
+    std::chrono::duration<double, std::milli>* nmsTime,
+    float smallTargetBaseConf,
+    double smallTargetAreaThreshPx
 )
 {
     std::vector<Detection> detections;
@@ -285,6 +347,7 @@ std::vector<Detection> postProcessYoloDML(
                 detections.push_back(Detection{ box, confidence, classId });
             }
         }
+        applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);
         NMS(detections, nmsThreshold, nmsTime);
         applyDeleteBucketFilter(detections);
         return detections;
@@ -311,6 +374,7 @@ std::vector<Detection> postProcessYoloDML(
             detections.push_back(Detection{ box, static_cast<float>(score), class_id_point.y });
         }
     }
+    applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);
     if (!detections.empty())
     {
         NMS(detections, nmsThreshold, nmsTime);

@@ -21,6 +21,16 @@ namespace depth_anything
         cv::Mat predictDepth(const cv::Mat& image);
         void setColormap(int type);
         int colormapType() const;
+        // OPT-profile size used when building .engine from .onnx (kernel autotune
+        // sweet spot). Must be set BEFORE initialize() to take effect, and only
+        // changes anything when an .engine actually gets rebuilt.
+        void setOptInputSize(int size);
+        int optInputSize() const;
+        // Percentile clip for depth normalization. Default 0/100 = pure
+        // MIN-MAX. Lowering high (e.g. 95) clips a too-close outlier so the
+        // mid-range gets stretched into [0, 255] instead of being squashed
+        // near 0.
+        void setNormPercentiles(float lo_pct, float hi_pct);
         bool ready() const;
         const std::string& lastError() const;
         void reset();
@@ -34,6 +44,9 @@ namespace depth_anything
         float mean[3];
         float stddev[3];
         int colormap_type;
+        int opt_input_size;
+        float norm_low_pct = 0.0f;
+        float norm_high_pct = 100.0f;
 
         std::unique_ptr<nvinfer1::IRuntime> runtime;
         std::unique_ptr<nvinfer1::ICudaEngine> engine;

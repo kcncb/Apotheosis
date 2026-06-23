@@ -51,16 +51,48 @@ struct HotkeyProfile
     int fovX = 106;
     int fovY = 74;
 
-    // 经典离散 PID,X / Y 轴各一套独立的 P / I / D(共 6 个参数,每轴恰好 3 个)。
-    // Kp 决定追击力度、Ki 修正常驻偏置(通常 0;Y 轴对抗后坐力时可小量加)、Kd 提供阻尼。
-    // 误差(检测像素)直接喂控制器,输出 lround 后送驱动。鲁棒处理(不完全微分/反算抗饱和/
-    // 积分分离/微分限幅)全部内部自适应,每轴对外仍只有 P/I/D。算法见 mouse/pid_controller.h。
-    float pid_x_p = 0.6f;
-    float pid_x_i = 0.0f;
-    float pid_x_d = 0.05f;
-    float pid_y_p = 0.6f;
-    float pid_y_i = 0.0f;
-    float pid_y_d = 0.05f;
+    // ─────────────────────────────────────────────────────────────────────
+    // ART (Adaptive Reactive Tracker) — modified 1€ Filter
+    //   speed_x/y: 比例驱动灵敏度 (对准静止目标调到一次到位)
+    //   dead_zone_px: 死区半径 (px), 小于此误差不输出移动
+    // ─────────────────────────────────────────────────────────────────────
+    float speed_x = 0.6f;
+    float speed_y = 0.6f;
+    float dead_zone_px = 2.0f;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 移动控制器选择 (mover_kind):
+    //   0 = 微澜 (Smooth)     — 默认,boss::AimEngine 走 ART/path 原路径,
+    //                           speed_x/y/dead_zone_px 直接喂 ART::drive。
+    //   1 = 疾风 (Predictive) — 位置式 PID + 导数估计预测器,参数完全暴露。
+    // 不为 0 时,engine 旁路 AimPathDriver,把 (filtered aim − crosshair) 喂给
+    // PID 直接出 dx/dy(此时 aim_path_mode 被忽略)。
+    // ─────────────────────────────────────────────────────────────────────
+    int mover_kind = 0;
+
+    // 疾风 (Predictive) 4 项可调: 每轴灵敏度(Kp)、阻尼(Kd)、预测权重(双轴共用)。
+    // 渐入 / 输出上限 / 死区都硬编默认值(见 movers.cpp)。
+    float predictive_kp_x       = 0.6f;
+    float predictive_kp_y       = 0.6f;
+    float predictive_kd         = 0.10f;
+    float predictive_pred_weight= 0.5f;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 瞄准轨迹曲线 (aim path).
+    //   0 = Linear:   直接朝目标走 (ART 原行为)
+    //   1 = Bezier:   起点(0,0)→终点(1,0) 的三次贝塞尔, 控制点 cx1/cy1, cx2/cy2
+    //   2 = Custom:   用户在 UI 上自由画的偏离曲线, 32 个 Y 采样均匀分布在 X∈[0,1]
+    // X = 沿 start→goal 主轴的进度, Y = 垂直方向的偏离量(以 path 长度为单位)。
+    // Linear 模式下后续 bezier / custom 参数被忽略, 不必清零。
+    // ─────────────────────────────────────────────────────────────────────
+    int   aim_path_mode = 0;
+    float aim_path_bezier_cx1 = 0.30f;
+    float aim_path_bezier_cy1 = 0.00f;
+    float aim_path_bezier_cx2 = 0.70f;
+    float aim_path_bezier_cy2 = 0.00f;
+    // 32 个采样, Y∈[-1, 1], 端点(index 0 / 31) 固定 = 0。
+    static constexpr int kAimPathSampleCount = 32;
+    std::vector<float> aim_path_custom_samples; // 留空 = 全 0 (= 直线)
 
     // Smart trigger — automatic fire, rewritten as a pure geometric
     // triggerbot decoupled from the aim controller. The crosshair (visible
@@ -77,24 +109,19 @@ struct HotkeyProfile
     // trigger only runs while a hotkey is active). Hotkey release, toggle
     // off, target loss, or session end all force-release the button so it can
     // never get stuck down.
+    // 智能扳机参数:
+    //   smart_trigger_hit_scale:命中容差(占 bbox 半轴,X / Y 共用)
+    //   smart_trigger_aggression [0,1]:仅控制反应延迟 reaction_ms 档位(由
+    //     mouse_thread_loop 反算: 0 → 80ms, 1 → 0ms)。
+    //   smart_trigger_hold_ms / smart_trigger_cooldown_ms:用户直接控制的
+    //     按住时长与两次按住之间的延迟(ms),分别透传给 MouseThread。
     bool  smart_trigger_enabled = false;
-    float smart_trigger_hit_scale_x = 0.60f;  // frac of bbox half-width  (X tolerance)
-    float smart_trigger_hit_scale_y = 0.60f;  // frac of bbox half-height (Y tolerance)
-    int   smart_trigger_reaction_ms = 40;     // dwell-on-target before first press
-    int   smart_trigger_hold_ms = 45;         // left-button hold time per tap
-    int   smart_trigger_cooldown_ms = 55;     // refractory after release before next tap
+    float smart_trigger_hit_scale = 0.60f;
+    float smart_trigger_aggression = 0.50f;
+    int   smart_trigger_hold_ms = 45;
+    int   smart_trigger_cooldown_ms = 55;
 
-    float predictionInterval = 0.01f;
-    int prediction_futurePositions = 20;
-    bool draw_futurePositions = true;
-
-    // 卡尔曼:精简为两个旋钮(详见 aim_kalman.h)。
-    //   smoothness [0,1] — 越大越平滑抗抖,越小越紧跟检测反应快
-    //   lead       [0,2] — 预测提前量,0=不预测,1≈物理正确,>1 主动多领先
-    // 其余(机动自适应、延迟补偿、预热、尺寸缩放…)全部内部自动。
-    bool  kalman_enabled = true;
-    float kalman_smoothness = 0.5f;
-    float kalman_lead = 1.0f;
+    // (legacy prediction fields removed — adaptive aim handles prediction internally)
 
     // Per-hotkey crosshair color detection toggle. Global config still owns
     // the ROI size / color palette / area filters; each hotkey just opts in.
@@ -107,28 +134,38 @@ struct HotkeyProfile
     // owns the laser ROI / palette / params (separate from the crosshair set).
     bool laser_detect_enabled = false;
 
-    // Lock-switch hysteresis. A challenger track must beat the current lock
-    // by `lock_switch_score_margin` (fraction of half-diagonal) for at least
-    // `lock_switch_min_frames` consecutive frames before the lock transfers.
-    // Higher-priority class still preempts immediately. Defaults are gentle
-    // — raise either to make the lock stickier when crowds overlap.
-    float lock_switch_score_margin = 0.15f;
-    int   lock_switch_min_frames = 3;
+    // Per-hotkey flashlight halo detection toggle. INDEPENDENT of crosshair /
+    // laser: all three may be on at once. Detects an enemy flashlight glare
+    // anywhere on screen (hue-agnostic, brightness + circularity) so the user
+    // can flick onto / shoot at the over-exposed halo. Lowest priority of the
+    // three colour sources — only published as the pivot when both
+    // crosshair-colour and laser came up empty. Global config owns the
+    // threshold / radius / circularity gates.
+    bool flashlight_detect_enabled = false;
 
-    // Minimum lock hold duration in frames. After a lock is acquired the
-    // tracker will refuse to switch for this many frames regardless of
-    // priority changes or eligibility flips. Smooths out high-recoil /
-    // muzzle-flash scenarios. 0 disables (legacy behaviour).
-    int   lock_hold_min_frames = 10;
+    // Per-hotkey 玻璃过滤开关。开启后,锁敌之前对每个 detection box 的边
+    // 缘环做玻璃色覆盖率检测,被判玻璃的框直接从候选里剔除(不进
+    // tracker、不出现在 aim 候选)。全局色带 / 环厚度 / 阈值在 Config 上,
+    // 这里只是热键级 opt-in。
+    bool glass_filter_enabled = false;
+
+    // 锁定灵活度 lock_aggression。**一个 knob 同时控制"切换迟滞"与"击杀检测"两套
+    // 逻辑**(原本是两个对立 knob,会互相打架产生切换乒乓,已合并)。
+    //   0 = 死锁:hold/min_frames/coast_grace 全拉满,kill_detect 关闭。锁定后基本
+    //       不可能切换,适合单人对枪。
+    //   1 = 灵活:hold=0、margin=0、min_frames=1、coast_grace=1,kill_detect 满激进。
+    //       任何更好目标立即夺锁,适合团战换人头。
+    // 高优先级类别仍可立即抢锁,不受此值影响。内部反算见 mouse_thread_loop.cpp。
+    float lock_aggression = 0.30f;
 
     // y_offset distance/size decay. When enabled, large bboxes (close
     // targets) blend the per-class y_offset toward 0.5 (geometric centre)
     // because the same fractional offset maps to many more pixels at close
     // range, amplifying jitter. Disabled by default to preserve legacy
     // behaviour for users who tuned y_offset around close-range play.
+    // 大目标(框高占检测高 ≥ 40%)瞄点向中心衰减、小目标(< 10%)保留原 y_offset。
+    // 上下两个边界内部硬编(10% / 40%),只暴露开关。
     bool  y_offset_size_decay_enabled = false;
-    float y_offset_size_decay_low_frac = 0.10f;
-    float y_offset_size_decay_high_frac = 0.40f;
 
     // Dynamic FOV — applied live every frame. `fovX`/`fovY` above become
     // the BASE (max) aim-region diameters in detection pixels around the
@@ -141,9 +178,10 @@ struct HotkeyProfile
     // Floors at `dynamic_fov_min_radius_frac` × base radius so the region
     // never collapses below something the user can recover from. The same
     // region also gates which detections enter the lock candidate pool.
-    bool  dynamic_fov_enabled = false;
-    float dynamic_fov_margin_frac = 1.10f;        // bbox padding factor
-    float dynamic_fov_min_radius_frac = 0.20f;    // floor as frac of base
+    // 动态 FOV 收敛为一个 knob。0 = 不收缩(只用基础 FOV),1 = 紧贴目标 bbox。
+    // 内部反算:margin_frac = 2.0 - strength; min_radius_frac = 0.50 - 0.40 * strength。
+    bool  dynamic_fov_enabled  = false;
+    float dynamic_fov_strength = 0.60f;
 
     // Threat-weighted target priority. The threat score is a [0,1] blend of
     // (a) normalized depth at the track pivot (closer = higher threat) and
@@ -153,10 +191,10 @@ struct HotkeyProfile
     // via `threat_weight` (0 = disable, 1 = full multiplicative effect).
     // `threat_head_class_id` may be -1 when no head class is selected — the
     // head-conf term then falls back to neutral 0.5.
+    // 威胁权重 + 头部类别;depth/head 混合比内部硬编 0.5(各占一半)。
     bool  threat_priority_enabled = false;
-    float threat_weight = 0.50f;             // 0=ignore, 1=full multiply
-    int   threat_head_class_id = -1;         // user-selected head class, -1 = unset
-    float threat_depth_head_ratio = 0.5f;    // 0=full depth, 1=full head-conf
+    float threat_weight           = 0.50f;
+    int   threat_head_class_id    = -1;
 
     // 近距离瞄头(body→head pivot 吸附)。当一个 body(非 head)目标框够大(近距离,
     // 框高 / 检测高 ≥ close_range_trigger_height_frac),且其内部上半区存在一个
@@ -164,9 +202,18 @@ struct HotkeyProfile
     // 大目标优先瞄头 / 上半身。只移动 pivot、不改变锁定的 track 身份,因此不会触发锁切换
     // 或卡尔曼重置。head 类别无需加入瞄准类别列表。与 y_offset_size_decay(把大框拉向
     // 中心)方向相反,建议二选一。默认关闭以保持旧行为。
+    // 近距离瞄头:框高占检测高 ≥ 30%(硬编)触发 body→head pivot 吸附。
     bool  close_range_head_aim_enabled = false;
-    int   close_range_head_class_id = -1;          // 头部类别;-1 = 未选(功能不生效)
-    float close_range_trigger_height_frac = 0.30f; // 框高 / 检测高 ≥ 此值才触发
+    int   close_range_head_class_id    = -1;
+
+    // 多人锁切（kill-detect）。开火期间锁定目标突然消失（失观帧数 ≥
+    // kill_suspicion_missed_frames 且最后一次观测到的 bbox 面积 ≤ kill_suspicion_bbox_shrink）
+    // 视为击杀，绕过 lock_hold_min_frames 立即把锁切到下一个可见目标。
+    // kill_followup_grace_frames：击杀后短时间内允许同 rank 立即夺锁，让连杀更顺滑。
+    // kill_trigger_fresh_ms：trigger 击发"新鲜度"窗口（毫秒），超时不再触发 kill 判定。
+    // 默认 enable，三角洲组队对枪场景受益明显。
+    // (kill_detect 已并入 lock_aggression;此处保留空注释,旧 ini 字段会被读取并
+    //  迁移为 lock_aggression。)
 
 };
 
@@ -319,6 +366,26 @@ public:
     int screenshot_delay = 500;
     bool verbose = false;
 
+    // ─────────────────────────────────────────────────────────────────────
+    // 自动采集 (auto data collection)
+    //   enabled         总开关
+    //   use_high/low    "高置信度采集" / "低置信度采集" 两个独立开关
+    //   high/low_conf   分别的阈值,conf ≥ high 或 conf ≤ low 触发采集
+    //   cooldown_ms     最小存盘间隔,防止一个画面连续写
+    //   force_keys      强制采集按键(通常侧键),按住期间每帧都存
+    //   output_dir      .jpg / .txt 落盘目录
+    //   save_label      true = 同时写 YOLO 格式 .txt 标签
+    // ─────────────────────────────────────────────────────────────────────
+    bool   auto_capture_enabled    = false;
+    bool   auto_capture_use_high   = true;
+    float  auto_capture_high_conf  = 0.85f;
+    bool   auto_capture_use_low    = false;
+    float  auto_capture_low_conf   = 0.30f;
+    int    auto_capture_cooldown_ms = 200;
+    std::vector<std::string> auto_capture_force_keys;
+    std::string auto_capture_output_dir = "screenshots/auto";
+    bool   auto_capture_save_label = true;
+
     // Class filter table (one entry per class_id the user has seen). New
     // classes discovered after a model change start in Delete and the user
     // opts them in from the Target panel.
@@ -376,10 +443,43 @@ public:
     int   laser_target_rect_w = 60;    // target box width  (det px)
     int   laser_target_rect_h = 60;    // target box height (det px)
 
+    // ---- Flashlight halo detector (whole-frame, brightness-based) ----------
+    // 寻光 / 手电筒检测。Hue-agnostic: thresholds on max(B,G,R) so any colour
+    // tinted flashlight glare matches; circularity gate rejects bright UI
+    // bars and elongated sun glints. See crosshair/flashlight_detector.h for
+    // the geometry of the search. Per-hotkey opt-in lives on
+    // HotkeyProfile::flashlight_detect_enabled.
+    bool  flashlight_show_preview = false;     // overlay debug toggle
+    int   flashlight_brightness_threshold = 220; // grey-level on max(B,G,R) [0,255]
+    int   flashlight_min_radius = 5;           // min equiv-area radius (det px)
+    int   flashlight_max_radius = 100;         // max equiv-area radius (det px)
+    float flashlight_min_circularity = 0.60f;  // 4πA/P² floor (1.0 = perfect circle)
+    int   flashlight_open_radius = 1;          // MORPH_OPEN px before CC (0=off)
+    int   flashlight_min_local_contrast = 30;  // sky-rejection: inner_mean − ring_mean floor (0=off)
+    // Class id the synthesized halo "detection" is filed under so the user
+    // can route it via the existing per-hotkey aim_classes (priority, y-offset,
+    // smart-trigger gating, etc.). -1 = unassigned (mouse loop still appends
+    // it but the user must tag a class for any aim hotkey to pick it up).
+    int   flashlight_target_class_id = -1;
+
+    // ---- Glass filter (穿不透玻璃后的人形抑制) ----------------------------
+    // 三角洲里有打不穿的玻璃,模型只看轮廓也会识别出后面的人,锁过去白浪
+    // 费子弹。本模块在 mouse 循环里、tracker 之前,对每个 detection box
+    // 的"边缘环"采样玻璃膜特征色,命中率超过阈值的 box 直接抹掉。所有
+    // 工作在 CPU 完成、对每框 < 0.2 ms,延迟开销可忽略。
+    //
+    // 全局色带 / 环厚 / 命中阈值,启用与否在 HotkeyProfile::glass_filter_enabled。
+    bool  glass_filter_show_preview = false;     // 预览叠图(框边缘画环)
+    float glass_edge_ring_frac      = 0.15f;     // 环厚 ÷ 框短边 [0.05, 0.45]
+    float glass_coverage_threshold  = 0.45f;     // 环内命中率 ≥ 此值 → 判玻璃
+    int   glass_min_box_short_side  = 20;        // 框短边 < 此值不参与过滤
+    std::vector<CrosshairColorProfileConfig> glass_colors; // 默认浅蓝 + 浅绿薄膜双带
+
     // Aim hotkeys. Must contain at least one entry so the UI always has
     // something to show; defaultConfig() populates a single "Aim" hotkey
     // bound to RightMouseButton.
     std::vector<HotkeyProfile> hotkeys;
+    std::string active_hotkey_group;
 
     // Macro layer (G HUB-compatible Lua). When `macro_enabled` is true the
     // runtime loads `macro_script_path` at startup and dispatches mouse-

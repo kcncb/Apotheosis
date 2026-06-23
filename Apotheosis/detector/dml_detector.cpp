@@ -397,6 +397,20 @@ void DirectMLDetector::readModelMetadata(const std::string& model_path)
         }
     }
 
+    // Class names are parsed below; if the metadata is richer than the
+    // channel-derived count, trust it. Handles NMS-decoded outputs ([N, 6]
+    // = x1,y1,x2,y2,score,classId) where channels-4 == 2 regardless of how
+    // many classes the model was trained on. We re-apply this after the
+    // names parse runs so both sources agree before publishing.
+    auto reconcile_class_count = [this]()
+    {
+        if (!class_names_.empty()
+            && static_cast<int>(class_names_.size()) > num_classes_)
+        {
+            num_classes_ = static_cast<int>(class_names_.size());
+        }
+    };
+
     // Pull class names out of the ONNX custom metadata. Ultralytics exports
     // stash a Python dict repr under the "names" key; we tolerate both dict
     // repr and JSON array formats.
@@ -427,6 +441,8 @@ void DirectMLDetector::readModelMetadata(const std::string& model_path)
         if (!sidecar.empty())
             class_names_ = std::move(sidecar);
     }
+
+    reconcile_class_count();
 }
 
 std::vector<Detection> DirectMLDetector::detect(const cv::Mat& input_frame)
@@ -548,7 +564,8 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
     const int num_classes = rows - 4;
 
     std::vector<std::vector<Detection>> batchDetections(batch_size);
-    float conf_thr = config.confidence_threshold;
+    const SmallTargetDecode st = computeSmallTargetDecode();
+    float conf_thr = st.decodeFloor;
     float nms_thr = config.nms_threshold;
 
     auto t4 = std::chrono::steady_clock::now();
@@ -560,7 +577,8 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
         std::vector<Detection> detections;
 
         std::vector<int64_t> shp = { static_cast<int64_t>(rows), static_cast<int64_t>(cols) };
-        detections = postProcessYoloDML(ptr, shp, num_classes, conf_thr, nms_thr, &nmsTimeTmp);
+        detections = postProcessYoloDML(ptr, shp, num_classes, conf_thr, nms_thr, &nmsTimeTmp,
+                                        st.baseConf, st.areaThreshPx);
 
         if (useFixed && (target_w != config.detection_resolution))
         {
@@ -640,15 +658,18 @@ void DirectMLDetector::inferenceThread()
                 const std::vector<Detection>& detections = detectionsBatch.back();
                 std::vector<Detection> filteredDetections = detections;
                 filterDetectionsByDepthMask(filteredDetections);
+                capDetectionsToMax(filteredDetections, config.max_detections);
 
                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
                 detectionBuffer.boxes.clear();
                 detectionBuffer.classes.clear();
+                detectionBuffer.confidences.clear();
                 for (const auto& d : filteredDetections) {
                     detectionBuffer.boxes.push_back(d.box);
                     detectionBuffer.classes.push_back(d.classId);
+                    detectionBuffer.confidences.push_back(d.confidence);
                 }
-                detectionBuffer.version++;
+                detectionBuffer.bumpVersionLocked();
                 detectionBuffer.cv.notify_all();
             }
         }

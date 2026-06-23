@@ -3,22 +3,44 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
-#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "AimbotTarget.h"
 #include "active_hotkey.h"
+#include "boss_aim.h"
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
-#include "depth/depth_mask.h"
+#include "crosshair/flashlight_runtime.h"
+#include "crosshair/glass_filter.h"
+#include "crosshair/glass_runtime.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
 #include "runtime/thread_loops.h"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boss AI aim loop — implementation of boss_aim_algorithm.md.
+//
+// Replaces the old PID + Kalman + MultiTargetTracker + smart-trigger pipeline.
+// The Boss engine (see mouse/boss_aim.h) owns target management and the closed-
+// form P + velocity-feedforward controller. This file is now a thin shim:
+//
+//   1. wait for detection / hotkey change
+//   2. snapshot hotkey + crosshair pivot (crosshair-color / laser if enabled)
+//   3. BossAimEngine.tick()  →  (dx, dy, fire)
+//   4. MouseThread.sendRawMove() + pressLeftButton/releaseLeftButton
+//   5. publish boss tracks to g_trackerDebugTracks for the overlay
+//
+// Everything the doc hard-codes (M_DROP, ALPHA_HYST, MATCH_RATIO,
+// FIRE_RADIUS_RATIO) lives inside the engine. The five aim knobs are
+// in HotkeyProfile::aim_* and passed via EngineInput::aim.
+// ─────────────────────────────────────────────────────────────────────────────
 
 extern std::atomic<bool> shouldExit;
 
@@ -26,69 +48,27 @@ std::mutex g_trackerDebugMutex;
 std::vector<TrackDebugInfo> g_trackerDebugTracks;
 int g_trackerLockedId = -1;
 
+// PID / IMM telemetry atomics that the legacy overlay panels still reference.
+// Defined in mouse.cpp; the boss loop just keeps them at neutral values.
+extern std::atomic<float> g_pid_last_err_px;
+extern std::atomic<bool>  g_pid_mode_track;
+extern std::atomic<bool>  g_threat_depth_required;
+extern std::atomic<float> g_dynamic_fov_radius_x_px;
+extern std::atomic<float> g_dynamic_fov_radius_y_px;
+extern std::atomic<float> g_smart_trigger_hit_prob;
+extern std::atomic<float> g_smart_trigger_recent_variance_px;
+
 void createInputDevices();
 void assignInputDevices();
 
 namespace
 {
 
-// Build mouse runtime parameters from a hotkey. `class_id` is accepted for
-// call-site compatibility but no longer used — per-class Kalman overrides were
-// removed in the simplification (Kalman is now just 启用/平滑度/预测提前量).
-MouseRuntimeParams build_params(const HotkeyProfile* profile, int class_id = -1)
-{
-    MouseRuntimeParams p;
-    p.detection_resolution = config.detection_resolution;
-
-    // When no hotkey is active the exact mouse params do not matter (we
-    // aren't sending moves anyway); we fall back to the HotkeyProfile's
-    // default initializer so PID / Kalman still have sane state.
-    const HotkeyProfile fallback{};
-    const HotkeyProfile& hk = profile ? *profile : fallback;
-
-    p.fovX = hk.fovX;
-    p.fovY = hk.fovY;
-    // PID gains map directly (no scaling). err in detection pixels → raw
-    // controller output → lround → driver counts. X / Y 各一套,每轴仅 P/I/D。
-    p.pid_x.p = static_cast<double>(hk.pid_x_p);
-    p.pid_x.i = static_cast<double>(hk.pid_x_i);
-    p.pid_x.d = static_cast<double>(hk.pid_x_d);
-    p.pid_y.p = static_cast<double>(hk.pid_y_p);
-    p.pid_y.i = static_cast<double>(hk.pid_y_i);
-    p.pid_y.d = static_cast<double>(hk.pid_y_d);
-
-    p.predictionInterval = hk.predictionInterval;
-
-    // Smart trigger wiring.
-    p.smart_trigger_enabled      = hk.smart_trigger_enabled;
-    p.smart_trigger_hit_scale_x  = hk.smart_trigger_hit_scale_x;
-    p.smart_trigger_hit_scale_y  = hk.smart_trigger_hit_scale_y;
-    p.smart_trigger_reaction_ms  = hk.smart_trigger_reaction_ms;
-    p.smart_trigger_hold_ms      = hk.smart_trigger_hold_ms;
-    p.smart_trigger_cooldown_ms  = hk.smart_trigger_cooldown_ms;
-
-    // 卡尔曼:仅 启用 / 平滑度 / 预测提前量。时序相关项固定为合理默认(内部不再暴露)。
-    p.kalman.enabled    = hk.kalman_enabled;
-    p.kalman.smoothness = hk.kalman_smoothness;
-    p.kalman.lead       = hk.kalman_lead;
-    p.kalman_compensate_detection_delay = true;
-    p.kalman_additional_prediction_ms   = 0.0f;
-    p.kalman_reset_timeout_sec          = 0.5f;
-
-    (void)class_id;   // 不再有每类别覆盖
-    return p;
-}
-
-// Resolve the crosshair pivot for THIS tick. If the active hotkey opted into
-// crosshair-color and the capture-thread snapshot is fresh AND a hit was
-// found, use the detected reticle position. Otherwise fall back to the
-// detection-image centre.
 struct PivotResolved
 {
     double x = 0.0;
     double y = 0.0;
     bool   from_color = false;
-    std::chrono::steady_clock::time_point snap_ts{};   // only set when from_color = true
 };
 
 PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
@@ -98,10 +78,12 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     PivotResolved out;
     out.x = centre;
     out.y = centre;
-    // Use the published colour pivot when EITHER crosshair-colour or laser
-    // detection is enabled for this hotkey (the runtime already applies the
-    // crosshair-priority / laser-fallback policy before publishing).
-    if (!profile || !(profile->crosshair_detect_enabled || profile->laser_detect_enabled))
+    // 智能扳机默认接入准星找色:启用 smart_trigger 的热键自动消费 pivot
+    // 快照(crosshair_runtime 那侧已经在 smart_trigger_enabled 时隐式开启
+    // crosshair 通路),无需用户额外勾选 crosshair/laser detect。
+    if (!profile || !(profile->crosshair_detect_enabled
+                      || profile->laser_detect_enabled
+                      || profile->smart_trigger_enabled))
         return out;
 
     const auto snap = crosshair_runtime::read();
@@ -116,7 +98,6 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     out.x = snap.x;
     out.y = snap.y;
     out.from_color = true;
-    out.snap_ts    = snap.ts;
     return out;
 }
 
@@ -124,7 +105,9 @@ struct AimSelection
 {
     std::unordered_set<int> aim_class_ids;
     std::unordered_map<int, float> y_offsets;
-    std::vector<int> priority_class_ids;
+    // class_id -> priority rank; 0 = top of aim_classes list, 1 = second, ...
+    // Same class_id appearing twice keeps the FIRST (highest-priority) rank.
+    std::unordered_map<int, int> class_priority;
 };
 
 AimSelection build_selection(const HotkeyProfile* profile)
@@ -132,14 +115,72 @@ AimSelection build_selection(const HotkeyProfile* profile)
     AimSelection sel;
     if (!profile)
         return sel;
-    sel.priority_class_ids.reserve(profile->aim_classes.size());
+    int rank = 0;
     for (const auto& ac : profile->aim_classes)
     {
         sel.aim_class_ids.insert(ac.class_id);
         sel.y_offsets[ac.class_id] = std::clamp(ac.y_offset, 0.0f, 1.0f);
-        sel.priority_class_ids.push_back(ac.class_id);
+        // first occurrence wins — preserves the head-first ordering even if
+        // the user added the head class twice by mistake.
+        sel.class_priority.emplace(ac.class_id, rank);
+        ++rank;
     }
     return sel;
+}
+
+MouseRuntimeParams build_params(const HotkeyProfile* profile)
+{
+    MouseRuntimeParams p;
+    p.detection_resolution = config.detection_resolution;
+
+    if (!profile)
+        return p;
+
+    // Smart trigger:
+    //   enable + hit_scale (X/Y 共用) 直接拷贝。
+    //   reaction_ms 仍按 aggression [0..1] 反算: 0 → 80 ms, 1 → 0 ms。
+    //   hold_ms / cooldown_ms 直接透传 (用户在 UI 里独立调)。
+    p.smart_trigger_enabled     = profile->smart_trigger_enabled;
+    p.smart_trigger_hit_scale_x = profile->smart_trigger_hit_scale;
+    p.smart_trigger_hit_scale_y = profile->smart_trigger_hit_scale;
+
+    const float a = std::clamp(profile->smart_trigger_aggression, 0.0f, 1.0f);
+    p.smart_trigger_reaction_ms = static_cast<int>(std::lround(80.0f * (1.0f - a)));
+    p.smart_trigger_hold_ms     = profile->smart_trigger_hold_ms;
+    p.smart_trigger_cooldown_ms = profile->smart_trigger_cooldown_ms;
+
+    return p;
+}
+
+void publish_boss_debug(const boss::AimEngine& engine)
+{
+    std::vector<TrackDebugInfo> out;
+    const auto& tracks = engine.tracks();
+    out.reserve(tracks.size());
+    const int locked = engine.lockedTrackId();
+    for (const auto& t : tracks)
+    {
+        TrackDebugInfo d;
+        d.trackId = t.id;
+        d.classId = t.class_id;
+        d.box = cv::Rect(static_cast<int>(std::lround(t.bbox.x)),
+                         static_cast<int>(std::lround(t.bbox.y)),
+                         static_cast<int>(std::lround(t.bbox.width)),
+                         static_cast<int>(std::lround(t.bbox.height)));
+        d.pivotX = t.anchor.x;
+        d.pivotY = t.anchor.y;
+        d.observedThisFrame = t.observed_this_frame;
+        d.missedFrames = t.missed;
+        d.isLocked = (t.id == locked);
+        d.threat = 0.5f;
+        d.confidence = t.confidence;
+        d.depth_at_pivot = -1.0f;
+        out.push_back(std::move(d));
+    }
+
+    std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
+    g_trackerDebugTracks = std::move(out);
+    g_trackerLockedId = locked;
 }
 
 } // namespace
@@ -150,36 +191,34 @@ void mouseThreadFunction(MouseThread& mouseThread)
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
     std::vector<float> confidences;
-    MultiTargetTracker targetTracker;
-    std::optional<AimbotTarget> activeTarget;
-    // Wall-clock of the last frame our LOCKED target was actually observed
-    // (not merely "some detection arrived"). activeTarget staleness keys off
-    // this so a vanished target releases promptly even while other targets
-    // keep producing detections.
-    auto lastAimObserved = std::chrono::steady_clock::time_point::min();
 
-    int last_hotkey_index_seen = -2; // force first-pass update
+    boss::AimEngine engine;
+
+    int last_hotkey_index_seen = -2;
     int last_resolution_seen = -1;
-    int last_kalman_class_id = -1;   // track class id of last Kalman push so
-                                     // we only re-apply on class change
-    int last_locked_track_id = -1;   // id of the track we last aimed at; a
-                                     // change means the lock handed off to a
-                                     // new target and the predictor must be
-                                     // reset so the old target's Kalman
-                                     // position/velocity isn't applied to the
-                                     // new one as a phantom jump
+    // Smart trigger params we last pushed to MouseThread. Compared every
+    // tick so UI edits take effect immediately (build_params is otherwise
+    // only re-called on hotkey switch / resolution change). Updating
+    // MouseRuntimeParams forces a trigger reset, so we GATE the call on
+    // an actual value change to avoid killing an in-flight burst.
+    bool  last_st_enabled   = false;
+    float last_st_hit_scale = -1.0f;
+    float last_st_aggression = -1.0f;
+    int   last_st_hold_ms = -1;
+    int   last_st_cooldown_ms = -1;
 
-    // Track the last crosshair snapshot we acted on. When a new snapshot
-    // arrives between detection events (recoil moved the visible reticle)
-    // we re-push using the stale target — this is what doubles effective
-    // control rate over a 120 Hz capture-card setup.
-    auto last_consumed_pivot_ts = std::chrono::steady_clock::time_point::min();
+    auto last_tick_ts = std::chrono::steady_clock::time_point::min();
+
+    // Legacy telemetry — boss loop leaves these neutral.
+    g_pid_last_err_px.store(0.0f);
+    g_pid_mode_track.store(false);
+    g_threat_depth_required.store(false);
+    g_smart_trigger_hit_prob.store(0.0f);
+    g_smart_trigger_recent_variance_px.store(0.0f);
 
     while (!shouldExit && !session_stop_requested.load())
     {
         bool hasNewDetection = false;
-        bool hasAimObservation = false;
-        bool detectionStale = false;
 
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);
@@ -197,12 +236,114 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 lastVersion = detectionBuffer.version;
                 hasNewDetection = true;
             }
+        }
 
-            // Inference stalled relative to the detector's own cadence: the
-            // cached boxes/lock no longer reflect the live frame. Treat the
-            // lock as "no target" below so we don't keep driving toward a
-            // detection that's already gone.
-            detectionStale = detectionBuffer.staleLocked();
+        // Glass filter — drop boxes whose edge ring is dominated by glass-
+        // film colour (the打不穿玻璃后面识别到的人形)。Runs BEFORE flashlight
+        // injection so the synthesized halo never goes through this gate
+        // (its edges are by definition all white). Per-hotkey opt-in;
+        // colour palette + thresholds are global. Latency: O(perimeter)
+        // per box on CPU, all 20 boxes < 1 ms.
+        if (hasNewDetection && !boxes.empty())
+        {
+            int filter_active_idx = runtime::g_active_hotkey_index.load();
+            bool glass_on = false;
+            crosshair::GlassFilterSettings gs;
+            if (filter_active_idx >= 0)
+            {
+                std::lock_guard<std::recursive_mutex> cfg(configMutex);
+                if (filter_active_idx < static_cast<int>(config.hotkeys.size())
+                    && config.hotkeys[filter_active_idx].glass_filter_enabled)
+                {
+                    glass_on = true;
+                    gs.enabled              = true;
+                    gs.edge_ring_frac       = config.glass_edge_ring_frac;
+                    gs.coverage_threshold   = config.glass_coverage_threshold;
+                    gs.min_box_short_side   = config.glass_min_box_short_side;
+                    gs.colors.reserve(config.glass_colors.size());
+                    for (const auto& c : config.glass_colors)
+                    {
+                        crosshair::CrosshairColorBand b;
+                        b.name = c.name; b.enabled = c.enabled;
+                        b.h_low = c.h_low; b.h_high = c.h_high;
+                        b.s_min = c.s_min; b.s_max = c.s_max;
+                        b.v_min = c.v_min; b.v_max = c.v_max;
+                        gs.colors.push_back(std::move(b));
+                    }
+                }
+            }
+
+            if (glass_on)
+            {
+                cv::Mat frame;
+                {
+                    std::lock_guard<std::mutex> lk(frameMutex);
+                    frame = latestFrame;
+                }
+                if (!frame.empty() && frame.type() == CV_8UC3)
+                {
+                    static crosshair::GlassFilter s_filter;
+                    glass_runtime::Snapshot snap;
+                    snap.judgements.reserve(boxes.size());
+                    std::vector<size_t> kill;
+                    for (size_t i = 0; i < boxes.size(); ++i)
+                    {
+                        const auto r = s_filter.check(frame, boxes[i], gs);
+                        glass_runtime::BoxJudgement bj;
+                        bj.box = boxes[i] & cv::Rect(0, 0, frame.cols, frame.rows);
+                        bj.coverage  = r.coverage;
+                        bj.is_glass  = r.is_behind_glass;
+                        bj.evaluated = r.evaluated;
+                        snap.judgements.push_back(bj);
+                        if (r.is_behind_glass) kill.push_back(i);
+                    }
+                    // Reverse erase 避免索引漂移。
+                    for (auto it = kill.rbegin(); it != kill.rend(); ++it)
+                    {
+                        const size_t i = *it;
+                        boxes.erase(boxes.begin() + i);
+                        classes.erase(classes.begin() + i);
+                        confidences.erase(confidences.begin() + i);
+                    }
+                    snap.ts = std::chrono::steady_clock::now();
+                    glass_runtime::publish(std::move(snap));
+                }
+                else
+                {
+                    glass_runtime::publish(glass_runtime::Snapshot{});
+                }
+            }
+            else
+            {
+                glass_runtime::publish(glass_runtime::Snapshot{});
+            }
+        }
+
+        // Flashlight halo injection. The detector runs on the capture thread
+        // and publishes a separate snapshot; we splice the halo into the
+        // local detection arrays as a virtual class so the existing target
+        // tracker, FOV gates and smart trigger handle it identically to a
+        // real model detection. Per-hotkey opt-in is checked inside the
+        // runtime, so just gate on freshness + a configured class_id here.
+        {
+            const auto fs = flashlight_runtime::read();
+            const auto now = std::chrono::steady_clock::now();
+            const bool fresh =
+                fs.valid && fs.ts.time_since_epoch().count() != 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - fs.ts).count() < flashlight_runtime::kFreshnessMs;
+            int target_cls = -1;
+            {
+                std::lock_guard<std::recursive_mutex> cfg(configMutex);
+                target_cls = config.flashlight_target_class_id;
+            }
+            if (fresh && target_cls >= 0 && fs.box.area() > 0)
+            {
+                boxes.push_back(fs.box);
+                classes.push_back(target_cls);
+                confidences.push_back(std::clamp(fs.confidence, 0.0f, 1.0f));
+                hasNewDetection = true;
+            }
         }
 
         if (input_method_changed.load())
@@ -212,11 +353,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             input_method_changed.store(false);
         }
 
-        // Snapshot the currently-active hotkey under configMutex so the UI
-        // can't mutate config.hotkeys out from under us while we read. Keep
-        // the critical section to just the vector read; the atomic store and
-        // anything that doesn't touch config.* is hoisted out so UI writes
-        // aren't blocked on us.
+        // Snapshot active hotkey.
         HotkeyProfile profile_snapshot;
         const HotkeyProfile* profile_ptr = nullptr;
         int active_idx = runtime::g_active_hotkey_index.load();
@@ -233,366 +370,234 @@ void mouseThreadFunction(MouseThread& mouseThread)
         const bool hotkey_changed = (active_idx != last_hotkey_index_seen);
         const bool resolution_changed = (config.detection_resolution != last_resolution_seen);
 
-        if (hotkey_changed || resolution_changed || detection_resolution_changed.load())
+        bool st_changed = false;
+        if (profile_ptr)
         {
-            // On hotkey/resolution changes, reset Kalman baseline without a
-            // class-specific override �?the loop below will re-push per-class
-            // params as soon as a locked target's class is known.
-            MouseRuntimeParams params = build_params(profile_ptr, -1);
-            mouseThread.updateParams(params);
+            st_changed =
+                (profile_ptr->smart_trigger_enabled     != last_st_enabled) ||
+                (profile_ptr->smart_trigger_hit_scale   != last_st_hit_scale) ||
+                (profile_ptr->smart_trigger_aggression  != last_st_aggression) ||
+                (profile_ptr->smart_trigger_hold_ms     != last_st_hold_ms) ||
+                (profile_ptr->smart_trigger_cooldown_ms != last_st_cooldown_ms);
+        }
+
+        if (hotkey_changed || resolution_changed || st_changed || detection_resolution_changed.load())
+        {
+            mouseThread.updateParams(build_params(profile_ptr));
             last_hotkey_index_seen = active_idx;
             last_resolution_seen = config.detection_resolution;
-            last_kalman_class_id = -1;
             detection_resolution_changed.store(false);
-
-            if (resolution_changed)
-            {
-                last_locked_track_id = -1;
-                targetTracker.reset();
-                {
-                    std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
-                    g_trackerDebugTracks.clear();
-                    g_trackerLockedId = -1;
-                }
-            }
-        }
-
-        AimSelection selection = build_selection(profile_ptr);
-        const bool has_active_profile = profile_ptr != nullptr;
-
-        if (hasNewDetection)
-        {
-            // Snapshot the current depth-suppression mask so pivots can be
-            // biased toward the visible portion of a half-occluded target.
-            // Size must match detection_resolution; otherwise we drop it and
-            // fall back to geometric pivots inside the tracker.
-            cv::Mat visibilityMask = getCurrentDetectionSuppressionMask();
-            if (!visibilityMask.empty()
-                && (visibilityMask.cols != config.detection_resolution
-                    || visibilityMask.rows != config.detection_resolution))
-            {
-                visibilityMask.release();
-            }
-
-            // Snapshot the normalized depth map (CV_8UC1, 255 = closest) for
-            // the threat-scoring "depth" term. Same dim/type validation as the
-            // visibility mask; on mismatch drop and fall back to a neutral
-            // depth score inside compute_threat_score.
-            cv::Mat depthNormalized = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
-            if (!depthNormalized.empty()
-                && (depthNormalized.cols != config.detection_resolution
-                    || depthNormalized.rows != config.detection_resolution
-                    || depthNormalized.type() != CV_8UC1))
-            {
-                depthNormalized.release();
-            }
-
-            TrackerUpdate in;
-            in.boxes = &boxes;
-            in.classes = &classes;
-            in.confidences = &confidences;
-            in.aim_class_ids = std::move(selection.aim_class_ids);
-            in.y_offsets = std::move(selection.y_offsets);
-            in.priority_class_ids = std::move(selection.priority_class_ids);
-            in.screen_width = config.detection_resolution;
-            in.screen_height = config.detection_resolution;
-            in.keep_current_lock = has_active_profile;
-            in.visibility_mask = visibilityMask.empty() ? nullptr : &visibilityMask;
-            in.depth_normalized = depthNormalized.empty() ? nullptr : &depthNormalized;
-            // Dynamic FOV: compute the effective aim region BEFORE
-            // tracker.update() so the candidate gate is in effect this
-            // frame. Uses last frame's locked target (one-frame delay,
-            // acceptable). When no lock yet, falls back to base diameters.
-            float fov_rx = 0.0f;
-            float fov_ry = 0.0f;
-            if (profile_ptr && profile_ptr->dynamic_fov_enabled)
-            {
-                const float base_rx = std::max(1.0f, profile_ptr->fovX * 0.5f);
-                const float base_ry = std::max(1.0f, profile_ptr->fovY * 0.5f);
-                LockedTargetInfo prev;
-                if (targetTracker.getLockedTarget(prev))
-                {
-                    const double cxd = config.detection_resolution * 0.5;
-                    const double cyd = config.detection_resolution * 0.5;
-                    const double err_x = prev.target.pivotX - cxd;
-                    const double err_y = prev.target.pivotY - cyd;
-                    const double err   = std::hypot(err_x, err_y);
-                    const double base_r = std::max(static_cast<double>(base_rx),
-                                                   static_cast<double>(base_ry));
-                    // shrink_alpha: 1 = pivot dead-on crosshair (tightest);
-                    // 0 = pivot at base FOV edge or beyond (full base FOV).
-                    const double shrink_alpha = std::clamp(1.0 - err / base_r, 0.0, 1.0);
-                    const float margin = profile_ptr->dynamic_fov_margin_frac;
-                    const float floor_rx = base_rx * profile_ptr->dynamic_fov_min_radius_frac;
-                    const float floor_ry = base_ry * profile_ptr->dynamic_fov_min_radius_frac;
-                    const float tight_rx = std::clamp(prev.target.w * margin * 0.5f,
-                                                      floor_rx, base_rx);
-                    const float tight_ry = std::clamp(prev.target.h * margin * 0.5f,
-                                                      floor_ry, base_ry);
-                    fov_rx = static_cast<float>(base_rx + (tight_rx - base_rx) * shrink_alpha);
-                    fov_ry = static_cast<float>(base_ry + (tight_ry - base_ry) * shrink_alpha);
-                }
-                else
-                {
-                    fov_rx = base_rx;
-                    fov_ry = base_ry;
-                }
-            }
-            g_dynamic_fov_radius_x_px.store(fov_rx);
-            g_dynamic_fov_radius_y_px.store(fov_ry);
-
-            // Tell the capture thread whether the normalized depth map must be
-            // produced for threat scoring (ratio < 1 => depth term has nonzero
-            // weight), even when no depth display option is enabled. Cleared
-            // when there is no active profile.
-            g_threat_depth_required.store(
-                profile_ptr != nullptr
-                && profile_ptr->threat_priority_enabled
-                && profile_ptr->threat_depth_head_ratio < 1.0f);
-
             if (profile_ptr)
             {
-                in.lock_switch_score_margin       = profile_ptr->lock_switch_score_margin;
-                in.lock_switch_min_frames         = profile_ptr->lock_switch_min_frames;
-                in.lock_hold_min_frames           = profile_ptr->lock_hold_min_frames;
-                in.y_offset_size_decay_enabled    = profile_ptr->y_offset_size_decay_enabled;
-                in.y_offset_size_decay_low_frac   = profile_ptr->y_offset_size_decay_low_frac;
-                in.y_offset_size_decay_high_frac  = profile_ptr->y_offset_size_decay_high_frac;
-                in.threat_priority_enabled        = profile_ptr->threat_priority_enabled;
-                in.threat_weight                  = profile_ptr->threat_weight;
-                in.threat_head_class_id           = profile_ptr->threat_head_class_id;
-                in.threat_depth_head_ratio        = profile_ptr->threat_depth_head_ratio;
-                in.fov_radius_x_px                = fov_rx;
-                in.fov_radius_y_px                = fov_ry;
-                in.close_range_head_aim_enabled    = profile_ptr->close_range_head_aim_enabled;
-                in.close_range_head_class_id       = profile_ptr->close_range_head_class_id;
-                in.close_range_trigger_height_frac = profile_ptr->close_range_trigger_height_frac;
+                last_st_enabled     = profile_ptr->smart_trigger_enabled;
+                last_st_hit_scale   = profile_ptr->smart_trigger_hit_scale;
+                last_st_aggression  = profile_ptr->smart_trigger_aggression;
+                last_st_hold_ms     = profile_ptr->smart_trigger_hold_ms;
+                last_st_cooldown_ms = profile_ptr->smart_trigger_cooldown_ms;
             }
 
-            // Aim origin for target selection: rank candidates by proximity to
-            // the live crosshair-colour pivot (where the reticle actually sits
-            // after recoil), falling back to the detection-image centre when
-            // crosshair-colour isn't active or hasn't hit this frame.
+            if (resolution_changed || hotkey_changed)
             {
-                const auto sel_pivot =
-                    resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
-                in.aim_origin_x = sel_pivot.x;
-                in.aim_origin_y = sel_pivot.y;
-            }
-
-            targetTracker.update(in);
-
-            {
-                std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
-                g_trackerDebugTracks = targetTracker.getDebugTracks();
-                g_trackerLockedId = targetTracker.getLockedTrackId();
-            }
-
-            LockedTargetInfo lockInfo;
-            if (has_active_profile && targetTracker.getLockedTarget(lockInfo) && lockInfo.observedThisFrame)
-            {
-                // Lock handoff. When the lock moves to a different track (the
-                // previous target died/left and a new one was acquired) the
-                // predictor still holds the OLD target's Kalman position and
-                // velocity. Feeding the new target's pivot into that state
-                // looks like a huge instantaneous jump, so the filter spits
-                // out a wild velocity and the aim flings around / circles
-                // while settling. Reset the predictor on the transition so the
-                // new target starts from a clean state. (resetPrediction also
-                // clears queued moves and target_detected_; we re-arm both
-                // below.) Force a per-class param re-push too, since the reset
-                // wiped the Kalman noise config.
-                if (lockInfo.trackId != last_locked_track_id)
-                {
-                    mouseThread.resetPrediction();
-                    last_locked_track_id = lockInfo.trackId;
-                    last_kalman_class_id = -1;
-                }
-
-                // Re-push mouse params when the locked target's class changes
-                // so the per-class Kalman override (e.g. head vs body) takes
-                // effect. updateParams already resets the Kalman state when
-                // the noise params shift, which is desired here �?we don't
-                // want motion learned on one class's dynamics leaking into
-                // another.
-                const int locked_class = lockInfo.target.classId;
-                if (locked_class != last_kalman_class_id)
-                {
-                    MouseRuntimeParams params = build_params(profile_ptr, locked_class);
-                    mouseThread.updateParams(params);
-                    last_kalman_class_id = locked_class;
-                }
-
-                activeTarget = lockInfo.target;
-                hasAimObservation = true;
-                lastAimObserved = std::chrono::steady_clock::now();
-                mouseThread.setLastTargetTime(std::chrono::steady_clock::now());
-                mouseThread.setTargetDetected(true);
-
-                // Kalman measurement-noise scaling keys off the short-side
-                // half-extent (tall-thin player boxes shouldn't claim large,
-                // confident hitboxes for the filter).
-                const double half_extent = std::min(activeTarget->w, activeTarget->h) * 0.5;
-                mouseThread.setLockedTargetBboxHalfExtent(half_extent);
-
-                // Hand the full observed box (aim anchor + per-axis half
-                // extents) to the triggerbot so it can test the live
-                // crosshair against the real, axis-aligned target rectangle.
-                mouseThread.setLockedTargetBox(activeTarget->pivotX,
-                                               activeTarget->pivotY,
-                                               activeTarget->w * 0.5,
-                                               activeTarget->h * 0.5);
-
-
-                auto futurePositions = mouseThread.predictFuturePositions(
-                    activeTarget->pivotX,
-                    activeTarget->pivotY,
-                    profile_snapshot.prediction_futurePositions
-                );
-                mouseThread.storeFuturePositions(futurePositions);
-            }
-            else if (!has_active_profile)
-            {
-                activeTarget.reset();
-                mouseThread.clearFuturePositions();
-                mouseThread.setTargetDetected(false);
-                mouseThread.clearQueuedMoves();
-                mouseThread.setLockedTargetBboxHalfExtent(0.0);
-                mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
-            }
-
-            // Aim-trajectory replay: push a single snapshot per detection
-            // frame. Cheap when the buffer is disabled (early-out inside
-            // push). The snapshot's hotkey_active reflects the live aiming
-            // flag �?what the user actually had pressed when this detection
-            // landed. Mouse dx/dy fields are 0 here; the per-step PID moves
-            // are too high-frequency to mirror in this buffer cleanly. The
-            // replay overlay relies on the pivot trail instead.
-            auto& replay = runtime::ReplayBuffer::instance();
-            replay.setEnabled(config.replay_record_enabled);
-            replay.setRetentionSeconds(config.replay_seconds);
-            if (config.replay_record_enabled)
-            {
-                runtime::ReplayFrame f;
-                f.ts = std::chrono::steady_clock::now();
-                f.boxes = boxes;
-                f.class_ids = classes;
-                f.locked_track_id = targetTracker.getLockedTrackId();
-                f.hotkey_active = aiming.load();
-                if (activeTarget)
-                {
-                    f.pivot_x = activeTarget->pivotX;
-                    f.pivot_y = activeTarget->pivotY;
-                }
-                // Match boxes to track ids by IoU so the replay overlay can
-                // colour the locked detection. The tracker stores a track
-                // box per id; we just need each detection's nearest match.
-                f.track_ids.assign(f.boxes.size(), -1);
-                const auto debugTracks = targetTracker.getDebugTracks();
-                for (size_t bi = 0; bi < f.boxes.size(); ++bi)
-                {
-                    const cv::Rect& b = f.boxes[bi];
-                    int best = -1;
-                    double bestIou = 0.30; // require meaningful overlap
-                    for (const auto& dt : debugTracks)
-                    {
-                        const int x1 = std::max(b.x, dt.box.x);
-                        const int y1 = std::max(b.y, dt.box.y);
-                        const int x2 = std::min(b.x + b.width,  dt.box.x + dt.box.width);
-                        const int y2 = std::min(b.y + b.height, dt.box.y + dt.box.height);
-                        const int iw = std::max(0, x2 - x1);
-                        const int ih = std::max(0, y2 - y1);
-                        const double inter = iw * ih;
-                        const double ua = b.area() + dt.box.area() - inter;
-                        const double iou = (ua > 0.0) ? inter / ua : 0.0;
-                        if (iou > bestIou)
-                        {
-                            bestIou = iou;
-                            best = dt.trackId;
-                        }
-                    }
-                    f.track_ids[bi] = best;
-                }
-                replay.push(f);
+                engine.reset();
+                last_tick_ts = std::chrono::steady_clock::time_point::min();
+                publish_boss_debug(engine);
             }
         }
 
-        // Detection went stale (inference stalled): drop the lock now instead
-        // of waiting out the staleMs window. Without this the crosshair-feedback
-        // re-push keeps oscillating toward the departed target until the next
-        // detection lands — the "circles with nothing on screen" symptom.
-        if (activeTarget && detectionStale)
+        // No active hotkey → idle. Force-release the fire button and clear
+        // any queued moves so the cursor stops drifting after the user lifts
+        // the trigger.
+        if (!profile_ptr)
         {
-            activeTarget.reset();
-            mouseThread.clearFuturePositions();
-            mouseThread.setTargetDetected(false);
+            mouseThread.forceTriggerRelease();
+            mouseThread.clearQueuedMoves();
             mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
+            // Decay engine tracks gradually (still call tick with empty input
+            // so the doc's miss-count purge runs).
+            if (hasNewDetection)
+            {
+                boss::EngineInput in;
+                in.boxes = &boxes;
+                in.classes = &classes;
+                in.confidences = &confidences;
+                static const std::unordered_set<int> kNoClasses;
+                in.eligible_classes = &kNoClasses;
+                in.crosshair_x = config.detection_resolution * 0.5;
+                in.crosshair_y = config.detection_resolution * 0.5;
+                const auto now = std::chrono::steady_clock::now();
+                double dt = 1.0 / 60.0;
+                if (last_tick_ts != std::chrono::steady_clock::time_point::min())
+                    dt = std::chrono::duration<double>(now - last_tick_ts).count();
+                last_tick_ts = now;
+                engine.tick(in, dt);
+                publish_boss_debug(engine);
+            }
+            continue;
         }
 
-        if (activeTarget)
+        // Only step the engine when a fresh detection arrives. Without new
+        // observations there's no Layer A work to do, and Layer B without an
+        // updated anchor would just oscillate around stale data.
+        if (!hasNewDetection)
+            continue;
+
+        const AimSelection selection = build_selection(profile_ptr);
+
+        // Resolve live crosshair pivot (crosshair-color / laser-tip when the
+        // hotkey opted in, otherwise detection-image centre).
+        const auto pivot = resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
+
+        // FOV ellipse radii: half of the user's fovX / fovY. The engine drops
+        // detections outside this ellipse before tracker association.
+        const double fov_rx = std::max(1, profile_ptr->fovX) * 0.5;
+        const double fov_ry = std::max(1, profile_ptr->fovY) * 0.5;
+        g_dynamic_fov_radius_x_px.store(static_cast<float>(fov_rx));
+        g_dynamic_fov_radius_y_px.store(static_cast<float>(fov_ry));
+
+        boss::EngineInput in;
+        in.boxes = &boxes;
+        in.classes = &classes;
+        in.confidences = &confidences;
+        in.eligible_classes = &selection.aim_class_ids;
+        in.y_offsets = &selection.y_offsets;
+        in.class_priority = &selection.class_priority;
+        in.crosshair_x = pivot.x;
+        in.crosshair_y = pivot.y;
+        in.fov_radius_x = fov_rx;
+        in.fov_radius_y = fov_ry;
+        in.aim.speed_x        = static_cast<double>(profile_ptr->speed_x);
+        in.aim.speed_y        = static_cast<double>(profile_ptr->speed_y);
+        in.aim.dead_zone_px   = static_cast<double>(profile_ptr->dead_zone_px);
+
+        // 移动控制器选择 (0=微澜/Smooth, 1=疾风/Predictive)。
+        // 疾风的 PID 参数与 ART 的 speed_x/y/dead_zone 互不影响。
+        in.mover_kind = static_cast<mover::Kind>(
+            std::clamp(profile_ptr->mover_kind, 0, 1));
+
+        in.predictive_params.kp_x        = static_cast<double>(profile_ptr->predictive_kp_x);
+        in.predictive_params.kp_y        = static_cast<double>(profile_ptr->predictive_kp_y);
+        in.predictive_params.kd          = static_cast<double>(profile_ptr->predictive_kd);
+        in.predictive_params.pred_weight = static_cast<double>(profile_ptr->predictive_pred_weight);
+
+        // Trajectory shaper: forward the user's chosen mode + parameters.
+        // Bezier / Custom build on the same speed_x/y/dead_zone knobs but
+        // route through AimPathDriver instead of ART's direct drive.
+        in.path.mode = static_cast<boss::AimPathDriver::Mode>(
+            std::clamp(profile_ptr->aim_path_mode, 0, 2));
+        in.path.speed_x      = static_cast<double>(profile_ptr->speed_x);
+        in.path.speed_y      = static_cast<double>(profile_ptr->speed_y);
+        in.path.dead_zone_px = static_cast<double>(profile_ptr->dead_zone_px);
+        in.path.cx1 = static_cast<double>(profile_ptr->aim_path_bezier_cx1);
+        in.path.cy1 = static_cast<double>(profile_ptr->aim_path_bezier_cy1);
+        in.path.cx2 = static_cast<double>(profile_ptr->aim_path_bezier_cx2);
+        in.path.cy2 = static_cast<double>(profile_ptr->aim_path_bezier_cy2);
         {
-            const int fps = std::max(1, captureFps.load());
-            const int staleMs = std::clamp(2000 / fps, 25, 180);
-            // Key off the locked target's last OBSERVATION, not the last
-            // detection batch. Otherwise, when the first target disappears but
-            // a replacement target keeps detections flowing, this never fires:
-            // activeTarget stays pinned to the dead target's last position and
-            // Path B keeps re-pushing toward that ghost point through the
-            // crosshair-colour feedback loop — the "aim wobbles / circles in
-            // place while hunting the next target" symptom. The short window
-            // still preserves Path B re-push across brief recoil dropouts.
-            if (std::chrono::steady_clock::now() - lastAimObserved > std::chrono::milliseconds(staleMs))
+            const int N = boss::AimPathDriver::kCustomSamples;
+            for (int i = 0; i < N; ++i)
             {
-                activeTarget.reset();
-                mouseThread.clearFuturePositions();
-                mouseThread.setTargetDetected(false);
-                mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
+                in.path.custom_samples[i] =
+                    (i < static_cast<int>(profile_ptr->aim_path_custom_samples.size()))
+                        ? profile_ptr->aim_path_custom_samples[i]
+                        : 0.0f;
             }
         }
 
-        if (has_active_profile)
-        {
-            const auto pivot = resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
-            const bool pivot_event = pivot.from_color && pivot.snap_ts != last_consumed_pivot_ts;
+        // dt = wall-clock since the previous engine tick. Doc §9 §11:
+        // 「dt 必须用真实帧间隔,不要硬编 1/60」。
+        const auto now = std::chrono::steady_clock::now();
+        double dt = 1.0 / 60.0;
+        if (last_tick_ts != std::chrono::steady_clock::time_point::min())
+            dt = std::chrono::duration<double>(now - last_tick_ts).count();
+        last_tick_ts = now;
 
-            if (activeTarget && hasAimObservation)
-            {
-                // Path A — fresh detection: feed Kalman, push controller.
-                mouseThread.moveMouseToObservedTarget(activeTarget->pivotX,
-                                                      activeTarget->pivotY,
-                                                      pivot.x, pivot.y);
-                if (pivot.from_color)
-                    last_consumed_pivot_ts = pivot.snap_ts;
-            }
-            else if (activeTarget && pivot_event)
-            {
-                // Path B — fresh crosshair snapshot, no new detection.
-                // Recoil moved the reticle: re-push using the stale target
-                // (or Kalman extrapolation when enabled) without feeding
-                // Kalman a duplicate observation.
-                if (!mouseThread.moveMouseToPredictedTarget(pivot.x, pivot.y))
-                {
-                    mouseThread.moveMouseUsingLastTarget(activeTarget->pivotX,
-                                                         activeTarget->pivotY,
-                                                         pivot.x, pivot.y);
-                }
-                last_consumed_pivot_ts = pivot.snap_ts;
-            }
-            else if (!activeTarget)
-            {
-                // 目标已丢失:立即停止驱动,不再向卡尔曼最后锁定的位置外推。
-                // 否则准星会滑向那个"幽灵点"(尤其打静止目标:目标消失后准星仍被
-                // 推向它最后所在处,滑动一段距离,且与预测提前量无关 —— 之前的 bug)。
-                // 短暂检测丢帧由上面"目标仍锁定"的 Path B 负责,这里只处理真正丢失。
-                mouseThread.clearQueuedMoves();
-            }
-            // else: have target, no fresh event — sleep until something changes.
+        const boss::EngineOutput out = engine.tick(in, dt);
+
+        publish_boss_debug(engine);
+
+        // ─── Drive mouse ───
+        if (out.have_target)
+        {
+            mouseThread.sendRawMove(out.dx, out.dy);
+
+            // Smart trigger: hand the locked bbox (OBSERVED anchor + half
+            // extents, in detection pixels) to the mouse thread, then run
+            // the dwell/hold/cooldown state machine against the live
+            // crosshair pivot. The trigger writes the LMB itself — there's
+            // no separate boss "fire when close" path any more.
+            mouseThread.setLockedTargetBox(
+                out.anchor.x, out.anchor.y,
+                out.bbox.width  * 0.5, out.bbox.height * 0.5);
+            mouseThread.updateSmartTrigger(pivot.x, pivot.y);
+
+            // Error telemetry for the legacy "real-time" indicator on the
+            // PID/Track panel. Boss has a single control regime so the mode
+            // flag stays at "Track" (always).
+            const float err = static_cast<float>(std::hypot(
+                out.anchor.x - pivot.x, out.anchor.y - pivot.y));
+            g_pid_last_err_px.store(err);
+            g_pid_mode_track.store(true);
         }
         else
         {
+            // No target this frame → release the trigger but do not enqueue a
+            // counter-move; the boss algo is "do nothing when no target".
+            mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
+            mouseThread.forceTriggerRelease();
             mouseThread.clearQueuedMoves();
+            g_pid_last_err_px.store(0.0f);
         }
 
-        mouseThread.checkAndResetPredictions();
+        // ─── Replay buffer (one snapshot per detection) ─────────────────
+        auto& replay = runtime::ReplayBuffer::instance();
+        replay.setEnabled(config.replay_record_enabled);
+        replay.setRetentionSeconds(config.replay_seconds);
+        if (config.replay_record_enabled)
+        {
+            runtime::ReplayFrame f;
+            f.ts = now;
+            f.boxes = boxes;
+            f.class_ids = classes;
+            f.locked_track_id = out.current_track_id;
+            f.hotkey_active = true;
+            if (out.have_target)
+            {
+                f.pivot_x = out.anchor.x;
+                f.pivot_y = out.anchor.y;
+            }
+            // Match detections to engine tracks by bbox-center proximity so the
+            // overlay can colour the locked detection (mirrors the legacy IoU
+            // match — close-enough centre = same track).
+            f.track_ids.assign(f.boxes.size(), -1);
+            const auto& tracks = engine.tracks();
+            for (size_t bi = 0; bi < f.boxes.size(); ++bi)
+            {
+                const cv::Rect& b = f.boxes[bi];
+                const double bcx = b.x + b.width  * 0.5;
+                const double bcy = b.y + b.height * 0.5;
+                double best_d2 = std::numeric_limits<double>::infinity();
+                int best_id = -1;
+                for (const auto& t : tracks)
+                {
+                    const double tcx = t.bbox.x + t.bbox.width  * 0.5;
+                    const double tcy = t.bbox.y + t.bbox.height * 0.5;
+                    const double dx = tcx - bcx;
+                    const double dy = tcy - bcy;
+                    const double d2 = dx * dx + dy * dy;
+                    if (d2 < best_d2)
+                    {
+                        best_d2 = d2;
+                        best_id = t.id;
+                    }
+                }
+                // Same threshold as MATCH_RATIO in the engine: bbox short edge × 0.5.
+                const double thresh = std::max(b.width, b.height) * 0.5;
+                if (best_id >= 0 && best_d2 < thresh * thresh)
+                    f.track_ids[bi] = best_id;
+            }
+            replay.push(f);
+        }
     }
+
+    // On shutdown make absolutely sure the fire button is released.
+    mouseThread.releaseLeftButton();
 }

@@ -17,6 +17,7 @@
 #include "capture.h"
 #include "config/config.h"
 #include "crosshair/crosshair_detector.h"
+#include "crosshair/flashlight_detector.h"
 #include "crosshair/laser_detector.h"
 #include "depth/depth_mask.h"
 #include "detection_buffer.h"
@@ -91,6 +92,19 @@ struct PreviewConfigSnapshot
     std::vector<crosshair::CrosshairColorBand> laser_colors;
     bool   any_laser_color_enabled = false;
 
+    // Flashlight halo (debug preview). When `flashlight_show_preview` is on
+    // the preview thread runs the detector against `canvas` directly and
+    // overlays a yellow ring + centre cross + confidence label for every
+    // matching halo (the mouse loop separately consumes the runtime-side
+    // snapshot, so what's drawn here is purely diagnostic).
+    bool   flashlight_show_preview = false;
+    int    flashlight_brightness_threshold = 220;
+    int    flashlight_min_radius = 5;
+    int    flashlight_max_radius = 100;
+    float  flashlight_min_circularity = 0.60f;
+    int    flashlight_open_radius = 1;
+    int    flashlight_min_local_contrast = 30;
+
     // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
     int    fov_base_y = 0;
@@ -140,6 +154,14 @@ PreviewConfigSnapshot snapshot_config()
     s.laser_target_center_y = config.laser_target_center_y;
     s.laser_target_rect_w   = config.laser_target_rect_w;
     s.laser_target_rect_h   = config.laser_target_rect_h;
+
+    s.flashlight_show_preview         = config.flashlight_show_preview;
+    s.flashlight_brightness_threshold = config.flashlight_brightness_threshold;
+    s.flashlight_min_radius           = config.flashlight_min_radius;
+    s.flashlight_max_radius           = config.flashlight_max_radius;
+    s.flashlight_min_circularity      = config.flashlight_min_circularity;
+    s.flashlight_open_radius          = config.flashlight_open_radius;
+    s.flashlight_min_local_contrast   = config.flashlight_min_local_contrast;
     s.laser_colors.reserve(config.laser_colors.size());
     for (const auto& c : config.laser_colors)
     {
@@ -366,6 +388,56 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                 cv::circle(canvas, t, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
                 cv::circle(canvas, t, 5, laserCol, 1, cv::LINE_AA);
             }
+        }
+    }
+
+    // 4c. Flashlight halo preview. Independent of crosshair / laser / hotkey
+    //     gates — when the user enables it on the Flashlight page we draw
+    //     every bright contour the detector evaluated, green when accepted,
+    //     red when rejected with the reason printed. This is purely visual
+    //     diagnostics; the runtime path consumes its own snapshot.
+    if (cfg.flashlight_show_preview && canvas.type() == CV_8UC3)
+    {
+        crosshair::FlashlightDetectorSettings fs;
+        fs.enabled              = true;
+        fs.brightness_threshold = cfg.flashlight_brightness_threshold;
+        fs.min_radius           = cfg.flashlight_min_radius;
+        fs.max_radius           = cfg.flashlight_max_radius;
+        fs.min_circularity      = cfg.flashlight_min_circularity;
+        fs.open_radius          = cfg.flashlight_open_radius;
+        fs.min_local_contrast   = cfg.flashlight_min_local_contrast;
+
+        static crosshair::FlashlightDetector flashlight_detector;
+        const auto cands = flashlight_detector.detectVerbose(canvas, fs);
+
+        const cv::Scalar ringOk    = bgr(0, 255, 0);     // green = accepted
+        const cv::Scalar ringBad   = bgr(60, 60, 255);   // red   = rejected
+        const cv::Scalar centerCol = bgr(255, 255, 255);
+        for (const auto& cd : cands)
+        {
+            const cv::Point c(static_cast<int>(std::lround(cd.center.x)),
+                              static_cast<int>(std::lround(cd.center.y)));
+            const int r = std::max(2, static_cast<int>(std::lround(cd.radius)));
+            const cv::Scalar col = cd.accepted ? ringOk : ringBad;
+
+            // Dark underlay + coloured ring on top.
+            cv::circle(canvas, c, r, bgr(0, 0, 0), 3, cv::LINE_AA);
+            cv::circle(canvas, c, r, col,          1, cv::LINE_AA);
+
+            // Centre cross (4 px arms) to mark the picked centroid.
+            cv::line(canvas, cv::Point(c.x - 4, c.y), cv::Point(c.x + 4, c.y), centerCol, 1, cv::LINE_AA);
+            cv::line(canvas, cv::Point(c.x, c.y - 4), cv::Point(c.x, c.y + 4), centerCol, 1, cv::LINE_AA);
+
+            // Label: "circ r=12" when accepted, "r=12 deformed" etc. when not.
+            char lbuf[48];
+            if (cd.accepted)
+                std::snprintf(lbuf, sizeof(lbuf), "OK c=%.2f r=%d", cd.circularity, r);
+            else
+                std::snprintf(lbuf, sizeof(lbuf), "%s c=%.2f r=%d",
+                              cd.reject_reason ? cd.reject_reason : "rejected",
+                              cd.circularity, r);
+            const cv::Point label_org(c.x + r + 4, std::max(12, c.y - r));
+            draw_text_with_bg(canvas, lbuf, label_org, col, bgr(0, 0, 0));
         }
     }
 

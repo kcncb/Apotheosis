@@ -1,11 +1,20 @@
 #include "pages/SessionPage.h"
+#include "config/ConfigManager.h"
+#include "config/config_bridge.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
 
+#include "Apotheosis.h"
+#include "config.h"
+#include "runtime/inference_session.h"
+
+#include <mutex>
+
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
@@ -27,36 +36,13 @@ SessionPage::SessionPage(QWidget* parent)
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(14);
 
-    // -- Card 1: 推理后端 --
-    auto* backendCard = new CardWidget(QStringLiteral("推理后端"), QStringLiteral("cpu"), container);
-    auto* bc = backendCard->contentLayout();
+    auto& cfg = ConfigManager::instance();
 
-    m_backendCombo = new QComboBox();
-    m_backendCombo->addItem(QStringLiteral("TensorRT (TRT)"), QStringLiteral("trt"));
-    m_backendCombo->addItem(QStringLiteral("DirectML (DML)"), QStringLiteral("dml"));
-    bc->addWidget(FormKit::fieldRow(QStringLiteral("后端"), m_backendCombo));
-
-    m_dmlDeviceId = new QSpinBox();
-    m_dmlDeviceId->setRange(0, 15);
-    m_dmlDeviceId->setValue(0);
-    m_dmlDeviceRow = FormKit::fieldRow(QStringLiteral("DML 设备"), m_dmlDeviceId);
-    bc->addWidget(m_dmlDeviceRow);
-
-    // Keep the label handle pointing at the row's label for compatibility.
-    m_dmlDeviceLabel = m_dmlDeviceRow->findChild<QLabel*>();
-    m_dmlDeviceRow->setVisible(false);
-
-    m_modelFileLabel = new QLabel(QStringLiteral("(未选择)"));
-    m_modelFileLabel->setProperty("class", "secondary");
-    bc->addWidget(FormKit::fieldRow(QStringLiteral("模型"), m_modelFileLabel));
-
-    layout->addWidget(backendCard);
-
-    // -- Card 2: 推理控制 --
-    auto* controlCard = new CardWidget(QStringLiteral("推理控制"), QStringLiteral("player-play"), container);
+    // ── Card 1: 推理会话 (Session Control) ──
+    auto* controlCard = new CardWidget(tr("推理会话"), QStringLiteral("player-play"), container);
     auto* cc = controlCard->contentLayout();
 
-    m_toggleBtn = new QPushButton(QStringLiteral("启动推理"));
+    m_toggleBtn = new QPushButton(tr("启动推理"));
     m_toggleBtn->setProperty("class", "primary");
     m_toggleBtn->setMinimumHeight(40);
     m_toggleBtn->setFixedWidth(160);
@@ -66,7 +52,7 @@ SessionPage::SessionPage(QWidget* parent)
     btnRow->setContentsMargins(0, 0, 0, 0);
     btnRow->setSpacing(12);
     btnRow->addWidget(m_toggleBtn);
-    m_statusLabel = new QLabel(QStringLiteral("已停止"));
+    m_statusLabel = new QLabel(tr("已停止"));
     m_statusLabel->setProperty("class", "secondary");
     btnRow->addWidget(m_statusLabel);
     btnRow->addStretch();
@@ -74,23 +60,111 @@ SessionPage::SessionPage(QWidget* parent)
 
     layout->addWidget(controlCard);
 
-    // -- Card 3: CUDA 设置 (collapsible) --
-    auto* cudaCard = new CardWidget(QStringLiteral("CUDA 设置"), QStringLiteral("settings"), container);
+    // ── Card 2: 推理后端 (Backend) ──
+    auto* backendCard = new CardWidget(tr("推理后端"), QStringLiteral("cpu"), container);
+    auto* bc = backendCard->contentLayout();
+
+    m_backendCombo = new QComboBox();
+    m_backendCombo->addItem(QStringLiteral("TensorRT (CUDA)"), QStringLiteral("TRT"));
+    m_backendCombo->addItem(QStringLiteral("DirectML (CPU/GPU)"), QStringLiteral("DML"));
+    auto* backendRow = FormKit::fieldRow(tr("推理后端"), m_backendCombo);
+    bc->addWidget(backendRow);
+    m_backendCombo->setToolTip(tr(
+        "TRT(CUDA): N 卡专用,延迟最低,需要 CUDA 与 TensorRT 运行时。\n"
+        "DML(DirectML): 通用后端,A 卡/Intel 卡也能跑。停止推理后才能切换。"));
+
+    // DML device ID
+    m_dmlDeviceId = new QSpinBox();
+    m_dmlDeviceId->setRange(0, 15);
+    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
+    m_dmlDeviceRow = FormKit::fieldRow(tr("DirectML 显卡"), m_dmlDeviceId);
+    bc->addWidget(m_dmlDeviceRow);
+    m_dmlDeviceId->setToolTip(tr(
+        "DirectML 后端跑在哪个显卡上。多显卡机器请选独显;只在 DML 后端时生效。"));
+
+    // Current backend status line
+    m_backendStatusLabel = new QLabel();
+    m_backendStatusLabel->setProperty("class", "secondary");
+    bc->addWidget(m_backendStatusLabel);
+
+    // Set initial backend selection and visibility
+    {
+        QString be = cfg.backend();
+        int idx = m_backendCombo->findData(be);
+        if (idx >= 0)
+            m_backendCombo->setCurrentIndex(idx);
+        bool isDml = (be == QStringLiteral("DML"));
+        m_dmlDeviceRow->setVisible(isDml);
+        m_backendStatusLabel->setText(
+            isDml ? tr("当前选择：DirectML (CPU/GPU)")
+                  : tr("当前选择：TensorRT (CUDA)"));
+    }
+
+    layout->addWidget(backendCard);
+
+    // ── Card 3: 检测预览 (Preview) ──
+    auto* previewCard = new CardWidget(tr("检测预览"), QStringLiteral("eye"), container);
+    auto* pc = previewCard->contentLayout();
+
+    auto* previewToggleRow = FormKit::toggleRow(tr("启用独立检测预览窗口"), cfg.showWindow(), m_showWindow);
+    pc->addWidget(previewToggleRow);
+    m_showWindow->setToolTip(tr(
+        "开启后弹出一个独立窗口,实时叠画检测框/锁定目标/瞄准 FOV,\n"
+        "用来验证模型识别和瞄准逻辑;不影响游戏画面与瞄准。"));
+
+    auto* previewHint = new QLabel(tr("勾选后会在控制台外浮出一个可拖动 / 缩放的预览窗口。"));
+    previewHint->setProperty("class", "secondary");
+    previewHint->setWordWrap(true);
+    pc->addWidget(previewHint);
+
+    layout->addWidget(previewCard);
+
+    // ── Card 5: CUDA 设置 (collapsible) ──
+    auto* cudaCard = new CardWidget(tr("CUDA 设置"), QStringLiteral("settings"), container);
     cudaCard->setCollapsible(true);
     auto* gc = cudaCard->contentLayout();
 
-    gc->addWidget(FormKit::toggleRow(QStringLiteral("CUDA Graph"), false, m_cudaGraph));
-    gc->addWidget(FormKit::toggleRow(QStringLiteral("双缓冲流水线"), false, m_dualBuffer));
-    gc->addWidget(FormKit::toggleRow(QStringLiteral("固定内存"), false, m_pinnedMemory));
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        gc->addWidget(FormKit::toggleRow(tr("CUDA Graph"), config.use_cuda_graph, m_cudaGraph));
+        gc->addWidget(FormKit::toggleRow(tr("双缓冲流水线"), config.use_double_buffer, m_dualBuffer));
+        gc->addWidget(FormKit::toggleRow(tr("固定内存"), config.use_pinned_memory, m_pinnedMemory));
 
-    QSlider* gpuSlider = nullptr;
-    gc->addWidget(FormKit::sliderRow(QStringLiteral("GPU 显存"), 256, 8192, 2048,
-                                     gpuSlider, m_gpuReserve, QStringLiteral(" MB")));
-    m_gpuReserve->setSingleStep(256);
+        QSlider* gpuSlider = nullptr;
+        gc->addWidget(FormKit::sliderRow(tr("GPU 显存"), 256, 8192, config.gpuMemoryReserveMB,
+                                         gpuSlider, m_gpuReserve, QStringLiteral(" MB")));
+        m_gpuReserve->setSingleStep(256);
 
-    QSlider* cpuSlider = nullptr;
-    gc->addWidget(FormKit::sliderRow(QStringLiteral("CPU 核心"), 1, 32, 4,
-                                     cpuSlider, m_cpuReserve));
+        QSlider* cpuSlider = nullptr;
+        gc->addWidget(FormKit::sliderRow(tr("CPU 核心"), 1, 32, config.cpuCoreReserveCount,
+                                         cpuSlider, m_cpuReserve));
+    }
+
+    connect(m_cudaGraph, &ToggleSwitch::toggled, this, [this](bool v) {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.use_cuda_graph = v;
+        ConfigBridge::instance().markDirty();
+    });
+    connect(m_dualBuffer, &ToggleSwitch::toggled, this, [this](bool v) {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.use_double_buffer = v;
+        ConfigBridge::instance().markDirty();
+    });
+    connect(m_pinnedMemory, &ToggleSwitch::toggled, this, [this](bool v) {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.use_pinned_memory = v;
+        ConfigBridge::instance().markDirty();
+    });
+    connect(m_gpuReserve, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.gpuMemoryReserveMB = v;
+        ConfigBridge::instance().markDirty();
+    });
+    connect(m_cpuReserve, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.cpuCoreReserveCount = v;
+        ConfigBridge::instance().markDirty();
+    });
 
     layout->addWidget(cudaCard);
 
@@ -99,30 +173,128 @@ SessionPage::SessionPage(QWidget* parent)
     scroll->setWidget(container);
     root->addWidget(scroll);
 
+    // ── Connections ──
     connect(m_backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &SessionPage::onBackendChanged);
+    connect(m_dmlDeviceId, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &SessionPage::onDmlDeviceChanged);
     connect(m_toggleBtn, &QPushButton::clicked,
             this, &SessionPage::onToggleInference);
+    connect(m_showWindow, &ToggleSwitch::toggled,
+            this, &SessionPage::onShowWindowChanged);
+    connect(&cfg, &ConfigManager::configLoaded,
+            this, &SessionPage::loadConfig);
 }
 
 void SessionPage::onBackendChanged(int index) {
-    bool isDml = (m_backendCombo->itemData(index).toString() == "dml");
+    auto& cfg = ConfigManager::instance();
+    QString val = m_backendCombo->itemData(index).toString();
+    bool isDml = (val == QStringLiteral("DML"));
     m_dmlDeviceRow->setVisible(isDml);
+    m_backendStatusLabel->setText(
+        isDml ? tr("当前选择：DirectML (CPU/GPU)")
+              : tr("当前选择：TensorRT (CUDA)"));
+    cfg.setBackend(val);
 }
 
-void SessionPage::onToggleInference() {
-    m_running = !m_running;
+void SessionPage::onDmlDeviceChanged(int value) {
+    ConfigManager::instance().setDmlDeviceId(value);
+}
 
-    if (m_running) {
-        m_toggleBtn->setText(QStringLiteral("停止推理"));
-        m_toggleBtn->setProperty("class", "danger");
-        m_statusLabel->setText(QStringLiteral("运行中"));
-    } else {
-        m_toggleBtn->setText(QStringLiteral("启动推理"));
+
+void SessionPage::onToggleInference() {
+    if (!g_inference_session)
+        return;
+
+    if (g_inference_session->running()) {
+        g_inference_session->stop();
+        m_running = false;
+        m_toggleBtn->setText(tr("启动推理"));
         m_toggleBtn->setProperty("class", "primary");
-        m_statusLabel->setText(QStringLiteral("已停止"));
+        m_statusLabel->setText(tr("已停止"));
+    } else {
+        // Flush UI changes to config before starting
+        ConfigBridge::instance().syncToRuntime();
+
+        std::string backend   = config.backend;
+        std::string modelPath = "models/" + config.ai_model;
+
+        bool ok = g_inference_session->start(backend, modelPath);
+        if (ok) {
+            m_running = true;
+            m_toggleBtn->setText(tr("停止推理"));
+            m_toggleBtn->setProperty("class", "danger");
+            m_statusLabel->setText(tr("运行中"));
+        } else {
+            m_running = false;
+            std::string err = g_inference_session->last_error();
+            m_statusLabel->setText(err.empty()
+                ? tr("启动失败")
+                : QString::fromStdString(err));
+        }
     }
 
     m_toggleBtn->style()->unpolish(m_toggleBtn);
     m_toggleBtn->style()->polish(m_toggleBtn);
+}
+
+void SessionPage::onShowWindowChanged(bool checked) {
+    ConfigManager::instance().setShowWindow(checked);
+}
+
+void SessionPage::loadConfig() {
+    auto& cfg = ConfigManager::instance();
+
+    // Backend
+    m_backendCombo->blockSignals(true);
+    int idx = m_backendCombo->findData(cfg.backend());
+    if (idx >= 0)
+        m_backendCombo->setCurrentIndex(idx);
+    bool isDml = (cfg.backend() == QStringLiteral("DML"));
+    m_dmlDeviceRow->setVisible(isDml);
+    m_backendStatusLabel->setText(
+        isDml ? tr("当前选择：DirectML (CPU/GPU)")
+              : tr("当前选择：TensorRT (CUDA)"));
+    m_backendCombo->blockSignals(false);
+
+    // DML device ID
+    m_dmlDeviceId->blockSignals(true);
+    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
+    m_dmlDeviceId->blockSignals(false);
+
+    // Preview window
+    m_showWindow->blockSignals(true);
+    m_showWindow->setChecked(cfg.showWindow());
+    m_showWindow->blockSignals(false);
+
+    // CUDA settings
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        m_cudaGraph->blockSignals(true);
+        m_cudaGraph->setChecked(config.use_cuda_graph);
+        m_cudaGraph->blockSignals(false);
+        m_dualBuffer->blockSignals(true);
+        m_dualBuffer->setChecked(config.use_double_buffer);
+        m_dualBuffer->blockSignals(false);
+        m_pinnedMemory->blockSignals(true);
+        m_pinnedMemory->setChecked(config.use_pinned_memory);
+        m_pinnedMemory->blockSignals(false);
+        m_gpuReserve->blockSignals(true);
+        m_gpuReserve->setValue(config.gpuMemoryReserveMB);
+        m_gpuReserve->blockSignals(false);
+        m_cpuReserve->blockSignals(true);
+        m_cpuReserve->setValue(config.cpuCoreReserveCount);
+        m_cpuReserve->blockSignals(false);
+    }
+
+    // Sync button state with actual session
+    if (g_inference_session) {
+        bool running = g_inference_session->running();
+        m_running = running;
+        m_toggleBtn->setText(running ? tr("停止推理") : tr("启动推理"));
+        m_toggleBtn->setProperty("class", running ? "danger" : "primary");
+        m_statusLabel->setText(running ? tr("运行中") : tr("已停止"));
+        m_toggleBtn->style()->unpolish(m_toggleBtn);
+        m_toggleBtn->style()->polish(m_toggleBtn);
+    }
 }

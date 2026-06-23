@@ -87,3 +87,95 @@ void launch_resize_bgr_u8_bilinear(
         src, static_cast<int>(srcStep), srcW, srcH,
         dst, static_cast<int>(dstStep), dstW, dstH);
 }
+
+// ---- NV12 -> BGR8 -----------------------------------------------------------
+// One thread per output pixel. U/V plane is 4:2:0 downsampled + interleaved
+// (NVDEC NV12 layout): UV row i = floor(y/2), UV col j = (x/2)*2 (U) and +1 (V).
+// BT.601 full-range JFIF:
+//   R = Y + 1.402   * (V - 128)
+//   G = Y - 0.34414 * (U - 128) - 0.71414 * (V - 128)
+//   B = Y + 1.772   * (U - 128)
+// Q10 fixed point: x1024 integer math, shift back to byte, clamp.
+static __device__ __forceinline__ unsigned char clamp_byte(int v) {
+    return (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+static __global__ void nv12_to_bgr_u8_kernel(
+    const unsigned char* __restrict__ y_plane, int yStep,
+    const unsigned char* __restrict__ uv_plane, int uvStep,
+    unsigned char* __restrict__ bgr, int bgrStep,
+    int width, int height)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int yy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || yy >= height) return;
+
+    const int Y = (int)y_plane[yy * yStep + x];
+    const int uvRow = yy >> 1;
+    const int uvCol = (x >> 1) << 1;
+    const int U = (int)uv_plane[uvRow * uvStep + uvCol]     - 128;
+    const int V = (int)uv_plane[uvRow * uvStep + uvCol + 1] - 128;
+
+    int R = (Y * 1024 +              1436 * V + 512) >> 10;
+    int G = (Y * 1024 -  352 * U -    731 * V + 512) >> 10;
+    int B = (Y * 1024 + 1815 * U              + 512) >> 10;
+
+    unsigned char* dp = bgr + yy * bgrStep + x * 3;
+    dp[0] = clamp_byte(B);
+    dp[1] = clamp_byte(G);
+    dp[2] = clamp_byte(R);
+}
+
+void launch_nv12_to_bgr_u8(
+    const unsigned char* y, size_t yStep,
+    const unsigned char* uv, size_t uvStep,
+    unsigned char* bgr, size_t bgrStep,
+    int width, int height,
+    cudaStream_t stream)
+{
+    if (!y || !uv || !bgr || width <= 0 || height <= 0) return;
+    const dim3 block(32, 8);
+    const dim3 grid((width + block.x - 1) / block.x,
+                    (height + block.y - 1) / block.y);
+    nv12_to_bgr_u8_kernel<<<grid, block, 0, stream>>>(
+        y,  (int)yStep,
+        uv, (int)uvStep,
+        bgr,(int)bgrStep,
+        width, height);
+}
+
+// ---- In-place 圆形掩码 ------------------------------------------------------
+// 半径平方比较代替 sqrt;一个线程一个像素,圆外置 0,圆内不动。
+static __global__ void circle_mask_bgr_u8_kernel(
+    unsigned char* __restrict__ img, int step,
+    int width, int height,
+    int cx, int cy, int radius_sq)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    const int dx = x - cx;
+    const int dy = y - cy;
+    if (dx * dx + dy * dy > radius_sq)
+    {
+        unsigned char* p = img + y * step + x * 3;
+        p[0] = 0; p[1] = 0; p[2] = 0;
+    }
+}
+
+void launch_circle_mask_bgr_u8(
+    unsigned char* img, size_t step,
+    int width, int height,
+    cudaStream_t stream)
+{
+    if (!img || width <= 0 || height <= 0) return;
+    const int cx = width / 2;
+    const int cy = height / 2;
+    const int r  = (width < height ? width : height) / 2;
+    const int r2 = r * r;
+    const dim3 block(32, 8);
+    const dim3 grid((width + block.x - 1) / block.x,
+                    (height + block.y - 1) / block.y);
+    circle_mask_bgr_u8_kernel<<<grid, block, 0, stream>>>(
+        img, (int)step, width, height, cx, cy, r2);
+}

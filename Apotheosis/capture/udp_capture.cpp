@@ -37,6 +37,14 @@ UDPCapture::~UDPCapture()
         pinned_jpeg_buffer_ = nullptr;
         pinned_jpeg_capacity_ = 0;
     }
+    for (auto& evt : decode_events_)
+    {
+        if (evt)
+        {
+            cudaEventDestroy(evt);
+            evt = nullptr;
+        }
+    }
     if (decode_stream_)
     {
         cudaStreamDestroy(decode_stream_);
@@ -177,6 +185,8 @@ void UDPCapture::ReceiveThread()
             else if (!decode_stream_)
             {
                 cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+                for (auto& evt : decode_events_)
+                    cudaEventCreateWithFlags(&evt, cudaEventDisableTiming);
             }
         }
 
@@ -260,7 +270,11 @@ void UDPCapture::ReceiveThread()
                     decode_src = pinned_jpeg_buffer_;
                 }
 
-                GpuImage decoded;
+                // Decode into the next ring slot rather than a fresh GpuImage:
+                // GpuImage::create() reuses the slot's device buffer in steady
+                // state, so the hot path no longer pays a device-synchronizing
+                // cudaMalloc (decode) + cudaFree (consume) every frame.
+                GpuImage& decoded = decode_pool_[decode_pool_index_];
                 if (gpu_decoder_->decode(decode_src, jpeg_size, decoded, decode_stream_))
                 {
                     // Sender is expected to emit frames already at width_/height_
@@ -269,20 +283,39 @@ void UDPCapture::ReceiveThread()
                     GpuImage finalFrame = decoded;
                     if (!decoded.empty() && (decoded.cols() != width_ || decoded.rows() != height_))
                     {
-                        GpuImage resized;
+                        GpuImage& resized = resize_pool_[decode_pool_index_];
                         if (resized.create(height_, width_, 3))
                         {
                             launch_resize_bgr_u8_bilinear(
                                 decoded.data(), decoded.step(), decoded.cols(), decoded.rows(),
                                 resized.data(), resized.step(), width_, height_,
                                 decode_stream_);
-                            finalFrame = std::move(resized);
+                            // Share (not move) so the ring slot keeps owning the
+                            // buffer for reuse next cycle.
+                            finalFrame = resized;
                         }
                     }
 
-                    // Flush decode+resize before handing to the detector
-                    // thread, which runs its preprocess on a different stream.
-                    cudaStreamSynchronize(decode_stream_);
+                    // Record (don't wait for) decode+resize completion on this
+                    // slot's event. The detector waits on it from its own stream
+                    // via cudaStreamWaitEvent, so decode and inference overlap
+                    // instead of being serialized by a CPU sync here. The event
+                    // tracks decode_stream_'s progress, so it covers both the
+                    // decode-only and the resized cases.
+                    cudaEvent_t slot_event = decode_events_[decode_pool_index_];
+                    if (slot_event)
+                    {
+                        cudaEventRecord(slot_event, decode_stream_);
+                        finalFrame.setReadyEvent(slot_event);
+                    }
+                    else
+                    {
+                        // Event creation failed: fall back to the safe sync so
+                        // the detector never reads an incomplete decode.
+                        cudaStreamSynchronize(decode_stream_);
+                    }
+
+                    decode_pool_index_ = (decode_pool_index_ + 1) % DECODE_POOL_SIZE;
 
                     std::lock_guard<std::mutex> lock(frame_mutex_);
                     while (gpu_frame_queue_.size() >= MAX_QUEUE_SIZE)

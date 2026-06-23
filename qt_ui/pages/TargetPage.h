@@ -1,9 +1,12 @@
 #pragma once
 
 #include <QWidget>
+#include <cstddef>
 
-class QTableWidget;
+class QLabel;
 class QPushButton;
+class QTimer;
+class QVBoxLayout;
 
 class TargetPage : public QWidget {
     Q_OBJECT
@@ -11,11 +14,20 @@ class TargetPage : public QWidget {
 public:
     explicit TargetPage(QWidget* parent = nullptr);
 
-private:
-    void addRow();
-    void removeSelectedRows();
+signals:
+    void classFiltersChanged();
 
-    QTableWidget* m_table{};
-    QPushButton* m_addBtn{};
-    QPushButton* m_removeBtn{};
+public slots:
+    void refreshFromRuntime();
+
+private:
+    void rebuildTable();
+    static size_t computeFilterFingerprint();
+
+    QLabel* m_statusLabel{};
+    QVBoxLayout* m_tableLayout{};
+    QWidget* m_tableWidget{};
+    QTimer* m_pollTimer{};
+    int m_lastFilterCount = -1;
+    size_t m_lastFingerprint = 0;
 };

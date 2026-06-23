@@ -46,7 +46,7 @@ This file is a fresh project-orientation note for AI assistants. It is based on 
 
 - Capture layer (`Apotheosis/capture/`):
   - `captureThread()` selects the configured capture backend.
-  - Supported capture modes are `udp_capture`, `tcp_capture`, and `opencv_capture`.
+  - Supported capture modes are `udp_capture`, `tcp_capture`, `eth_capture` (ProSexy raw layer-2 / npcap receiver), `opencv_capture`, and `mf_capture`.
   - `IScreenCapture` exposes CPU frames and optionally GPU frames for zero-copy decode paths.
   - Shared outputs include `latestFrame`, `frameQueue`, capture FPS counters, and a detection suppression mask.
   - UDP/TCP capture can use GPU JPEG decode through `gpu_jpeg_decoder` when available.

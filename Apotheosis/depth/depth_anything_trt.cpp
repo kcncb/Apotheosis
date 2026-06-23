@@ -140,6 +140,7 @@ namespace depth_anything
         , mean{ 123.675f, 116.28f, 103.53f }
         , stddev{ 58.395f, 57.12f, 57.375f }
         , colormap_type(COLORMAP_TWILIGHT)
+        , opt_input_size(kOptInputSize)
         , runtime(nullptr)
         , engine(nullptr)
         , context(nullptr)
@@ -184,6 +185,22 @@ namespace depth_anything
     int DepthAnythingTrt::colormapType() const
     {
         return colormap_type;
+    }
+
+    void DepthAnythingTrt::setOptInputSize(int size)
+    {
+        opt_input_size = std::clamp(size, kMinInputSize, kMaxInputSize);
+    }
+
+    int DepthAnythingTrt::optInputSize() const
+    {
+        return opt_input_size;
+    }
+
+    void DepthAnythingTrt::setNormPercentiles(float lo_pct, float hi_pct)
+    {
+        norm_low_pct  = std::clamp(lo_pct, 0.0f, 50.0f);
+        norm_high_pct = std::clamp(hi_pct, 50.0f, 100.0f);
     }
 
     void DepthAnythingTrt::reset()
@@ -537,7 +554,51 @@ namespace depth_anything
         }
 
         cv::Mat depth_mat(out_h, out_w, CV_32FC1, depth_data.data());
-        cv::normalize(depth_mat, depth_norm, 0, 255, cv::NORM_MINMAX, CV_8U);
+
+        // Percentile-clip + linear map. Default (0, 100) is identical to
+        // NORM_MINMAX. Tightening the high percentile (e.g. 95) suppresses
+        // a too-close outlier (player body / weapon) that would otherwise
+        // dominate the bright end and squash mid-distance pixels into a
+        // narrow band near 0 — that band would then catch real enemies
+        // when the percentile-based mask threshold sweeps from 0 upward.
+        const float pLo = std::clamp(norm_low_pct,  0.0f, 50.0f);
+        const float pHi = std::clamp(norm_high_pct, 50.0f, 100.0f);
+        const bool legacy = (pLo <= 0.0f && pHi >= 100.0f - 1e-3f);
+        if (legacy)
+        {
+            cv::normalize(depth_mat, depth_norm, 0, 255, cv::NORM_MINMAX, CV_8U);
+            return true;
+        }
+
+        std::vector<float> tmp(depth_data.begin(), depth_data.end());
+        const size_t n = tmp.size();
+        if (n == 0)
+        {
+            cv::normalize(depth_mat, depth_norm, 0, 255, cv::NORM_MINMAX, CV_8U);
+            return true;
+        }
+        const size_t loIdx = std::min<size_t>(
+            static_cast<size_t>(n * (pLo / 100.0f)), n - 1);
+        size_t hiIdx = static_cast<size_t>(n * (pHi / 100.0f));
+        if (hiIdx >= n) hiIdx = n - 1;
+        std::nth_element(tmp.begin(), tmp.begin() + loIdx, tmp.end());
+        const float v_lo = tmp[loIdx];
+        std::nth_element(tmp.begin(), tmp.begin() + hiIdx, tmp.end());
+        const float v_hi = tmp[hiIdx];
+
+        if (v_hi > v_lo + 1e-6f)
+        {
+            cv::Mat clipped;
+            cv::max(depth_mat, v_lo, clipped);
+            cv::min(clipped, v_hi, clipped);
+            const double scale  = 255.0 / (static_cast<double>(v_hi) - v_lo);
+            const double offset = -255.0 * v_lo / (static_cast<double>(v_hi) - v_lo);
+            clipped.convertTo(depth_norm, CV_8U, scale, offset);
+        }
+        else
+        {
+            cv::normalize(depth_mat, depth_norm, 0, 255, cv::NORM_MINMAX, CV_8U);
+        }
         return true;
     }
 
@@ -737,7 +798,7 @@ namespace depth_anything
             if (has_dynamic)
             {
                 auto profile = builder->createOptimizationProfile();
-                int opt_size = std::clamp(kOptInputSize, kMinInputSize, kMaxInputSize);
+                int opt_size = std::clamp(opt_input_size, kMinInputSize, kMaxInputSize);
                 const char* input_tensor_name = input->getName();
                 bool ok = profile->setDimensions(input_tensor_name, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ 1, 3, kMinInputSize, kMinInputSize });
                 ok = ok && profile->setDimensions(input_tensor_name, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ 1, 3, opt_size, opt_size });

@@ -42,6 +42,8 @@ void launch_decode_and_filter(
     int numClasses,
     bool isHalf,
     float confThreshold,
+    float smallConf,
+    float areaThreshPx,
     float imgScale,
     int maxCandidates,
     bool cnLayout,

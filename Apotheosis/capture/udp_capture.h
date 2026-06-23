@@ -9,6 +9,7 @@
 #include <ws2tcpip.h>
 #include <cuda_runtime.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -74,6 +75,31 @@ private:
     // thread-safe, so keep it pinned to that thread).
     std::unique_ptr<capture::GpuJpegDecoder> gpu_decoder_;
     cudaStream_t decode_stream_{ nullptr };
+
+    // Pre-allocated ring of nvJPEG output buffers. Each frame decodes into the
+    // next slot; GpuImage::create() reuses a slot's device buffer when its
+    // shape matches and no consumer still holds a reference (use_count()==1).
+    // This eliminates the per-frame cudaMalloc/cudaFree that the old "fresh
+    // GpuImage every frame" pattern incurred. That matters enormously here:
+    // cudaMalloc and cudaFree synchronize the WHOLE device, so at 240fps the
+    // churn was fencing the detector's high-priority inference stream hundreds
+    // of times a second — inflating measured inference time and capping
+    // throughput. The ring must be deeper than the max frames in flight (GPU
+    // queue depth + the consumer that is mid-inference) so a slot is always
+    // back to use_count()==1 by the time we cycle around to it; otherwise
+    // create() falls back to a fresh malloc for that slot (still correct).
+    // resize_pool_ mirrors decode_pool_ for the rare case the sender ships a
+    // non-target resolution and we have to GPU-resize.
+    static const int DECODE_POOL_SIZE = 10;
+    std::array<GpuImage, DECODE_POOL_SIZE> decode_pool_{};
+    std::array<GpuImage, DECODE_POOL_SIZE> resize_pool_{};
+    size_t decode_pool_index_{ 0 };
+
+    // One CUDA event per decode slot. After decode(+resize) on decode_stream_
+    // we record the matching event (no CPU sync) and hand it to the consumer
+    // via GpuImage::setReadyEvent; the detector waits on it from its own stream.
+    // Created lazily alongside decode_stream_ on the receive thread.
+    std::array<cudaEvent_t, DECODE_POOL_SIZE> decode_events_{};
 
     static const int MAX_FRAME_SIZE = 1024 * 1024;
     static const int MAX_QUEUE_SIZE = 5;

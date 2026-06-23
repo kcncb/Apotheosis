@@ -67,7 +67,8 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
             {
                 if (key_name == "LeftMouseButton")       pressed = makcuSerial->shooting_active;
                 else if (key_name == "RightMouseButton") pressed = makcuSerial->zooming_active;
-                else if (key_name == "X2MouseButton")    pressed = makcuSerial->aiming_active;
+                else if (key_name == "X1MouseButton")    pressed = makcuSerial->side2_active; // upper side button
+                else if (key_name == "X2MouseButton")    pressed = makcuSerial->side1_active; // lower side button
                 else handled_by_device = false;
             }
         }
@@ -105,8 +106,11 @@ void keyboardListener()
         int next_active = -1;
         {
             std::lock_guard<std::recursive_mutex> cfg(configMutex);
+            const auto& ag = config.active_hotkey_group;
             for (size_t i = 0; i < config.hotkeys.size(); ++i)
             {
+                if (config.hotkeys[i].group != ag)
+                    continue;
                 if (isAnyKeyPressed(config.hotkeys[i].keys))
                 {
                     next_active = static_cast<int>(i);

@@ -56,7 +56,6 @@ QWidget* sliderRow(const QString& label, int min, int max, int value,
         spin->setSuffix(suffix);
 
     QObject::connect(slider, &QSlider::valueChanged, spin, [spin](int v) {
-        QSignalBlocker b(spin);
         spin->setValue(v);
     });
     QObject::connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), slider, [slider](int v) {
@@ -99,7 +98,6 @@ QWidget* sliderRowD(const QString& label, double min, double max, double value,
         spin->setSuffix(suffix);
 
     QObject::connect(slider, &QSlider::valueChanged, spin, [spin, min, step](int v) {
-        QSignalBlocker b(spin);
         spin->setValue(min + v * step);
     });
     QObject::connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), slider,
