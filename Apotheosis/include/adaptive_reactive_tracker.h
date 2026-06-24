@@ -181,8 +181,21 @@ public:
         const double prox_gate = clamp(raw_err / prox_r, 0.0, 1.0);
 
         const double warmup = clamp(age_ / 4.0, 0.0, 1.0);
-        const double pred_sec =
-            0.5 / (2.0 * kPi * fc) * cons * warmup * speed_gate * prox_gate;
+        const double pred_gate = cons * warmup * speed_gate * prox_gate;
+
+        // Look-ahead time. Two parts:
+        //   filter_lead = 1/(2π·fc) — the FULL group delay of the position
+        //     low-pass. The previous coefficient was 0.5/(2π·fc), i.e. only
+        //     HALF the delay, which left the aim point trailing the *current*
+        //     detection by half the smoothing lag — the literal "慢半拍".
+        //     Undoing the full delay makes the feed-forward cancel the
+        //     smoothing lag instead of only half of it.
+        //   kBaseLeadSec — a fixed lead for the residual capture→inference→
+        //     actuation latency the position filter can't observe (the
+        //     detection is already stale by the time we act on it). Pushes the
+        //     aim point AHEAD of the live target.
+        const double filter_lead = 1.0 / (2.0 * kPi * fc);
+        const double pred_sec = (filter_lead + kBaseLeadSec) * pred_gate;
 
         // Use slow velocity (dsx_/dsy_) for the prediction vector.
         // dfx_/dfy_ (10 Hz) amplifies frame-to-frame bbox noise into
@@ -215,6 +228,14 @@ private:
 
     // Prediction gate threshold (px/s, measured on speed_slow).
     static constexpr double kPredSpeedThresh = 120.0;
+
+    // Fixed look-ahead (seconds) added on top of full filter-delay
+    // compensation. Covers the residual capture→inference→actuation latency
+    // the position filter can't observe, so the aim point leads the LIVE
+    // target rather than the already-stale detection. ~12 ms is conservative:
+    // raise it if the aim still trails fast targets, lower it if fast targets
+    // overshoot / the cursor leads through the target on a sudden stop.
+    static constexpr double kBaseLeadSec = 0.012;
 
     // Proximity gate: within kProxFrac of bbox diagonal the prediction
     // fades to zero, preventing aim-point orbiting on small targets.
