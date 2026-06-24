@@ -1,0 +1,140 @@
+/* ==========================================================================
+   Apotheosis — 企业级重设计预览主题(浅色 Linear)
+   accent #5E6AD2 · text #1A1A1F · page #F6F7F9 · card #FFFFFF
+   ========================================================================== */
+
+QMainWindow,
+QWidget#centralWidget,
+QStackedWidget {
+    background-color: #F6F7F9;
+}
+
+QWidget {
+    color: #1A1A1F;
+    font-size: 13px;
+}
+
+QLabel { background: transparent; color: #1A1A1F; }
+QLabel[class="secondary"] { color: #71717A; font-size: 12px; }
+QLabel[class="tertiary"]  { color: #9A9AA2; font-size: 12px; }
+QLabel[class="heading"]   { color: #1A1A1F; font-size: 14px; font-weight: 500; }
+QLabel#metricValue { font-size: 24px; font-weight: 500; color: #1A1A1F; }
+QLabel#heroTitle   { font-size: 15px; font-weight: 500; color: #1A1A1F; }
+
+/* ── Top nav ─────────────────────────────────────────────────────────── */
+
+QWidget#topNav {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #ECECEF;
+}
+
+QLabel#brandMark { background-color: #5E6AD2; color: #FFFFFF; border-radius: 8px; }
+QLabel#brandWord { font-size: 15px; font-weight: 500; color: #1A1A1F; }
+QFrame#navDivider { background-color: #E6E6EA; border: none; }
+QLabel#avatar { background-color: #EEF0FC; color: #5E6AD2; border-radius: 16px; }
+
+QPushButton#primaryNavItem {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0 13px;
+    color: #6B6B73;
+    font-size: 14px;
+}
+QPushButton#primaryNavItem:hover { color: #1A1A1F; }
+QPushButton#primaryNavItem:checked {
+    color: #1A1A1F;
+    font-weight: 500;
+    border-bottom: 2px solid #5E6AD2;
+}
+
+/* ── Secondary sidebar ───────────────────────────────────────────────── */
+
+QWidget#sideNav {
+    background-color: #FFFFFF;
+    border-right: 1px solid #ECECEF;
+}
+
+QLabel#sideNavTitle {
+    color: #A6A6AE;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 9px;
+}
+
+QPushButton#sideNavItem {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 11px;
+    color: #52525B;
+    font-size: 13px;
+    text-align: left;
+}
+QPushButton#sideNavItem:hover { background-color: #F4F4F6; }
+QPushButton#sideNavItem:checked {
+    background-color: #EEF0FC;
+    color: #4A55C8;
+    font-weight: 500;
+}
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+
+QFrame#card,
+QFrame#metricCard {
+    background-color: #FFFFFF;
+    border: 1px solid #EAEAEE;
+    border-radius: 12px;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+
+QPushButton {
+    background-color: #FBFBFC;
+    border: 1px solid rgba(0,0,0,0.10);
+    border-radius: 8px;
+    padding: 8px 16px;
+    color: #3C3C44;
+    font-size: 13px;
+    font-weight: 500;
+    min-height: 16px;
+}
+QPushButton:hover { background-color: #F2F2F5; border-color: rgba(0,0,0,0.14); }
+QPushButton:pressed { background-color: #EAEAEE; }
+
+QPushButton[class="primary"] {
+    background-color: #5E6AD2;
+    border: none;
+    color: #FFFFFF;
+    font-weight: 500;
+    padding: 8px 16px;
+}
+QPushButton[class="primary"]:hover { background-color: #515DC8; }
+QPushButton[class="primary"]:pressed { background-color: #4A55C8; }
+
+QPushButton[class="danger"] {
+    background-color: #E5484D;
+    border: none;
+    color: #FFFFFF;
+    font-weight: 500;
+    padding: 8px 16px;
+}
+QPushButton[class="danger"]:hover { background-color: #D63A40; }
+QPushButton[class="danger"]:pressed { background-color: #C2363B; }
+
+/* ── Scroll area / bars ──────────────────────────────────────────────── */
+
+QScrollArea { background: transparent; border: none; }
+QAbstractScrollArea { background: transparent; }
+
+QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; }
+QScrollBar::handle:vertical { background: rgba(0,0,0,0.16); border-radius: 4px; min-height: 40px; }
+QScrollBar::handle:vertical:hover { background: rgba(0,0,0,0.28); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { height: 0; background: transparent; }
+
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px 4px; }
+QScrollBar::handle:horizontal { background: rgba(0,0,0,0.16); border-radius: 4px; min-width: 40px; }
+QScrollBar::handle:horizontal:hover { background: rgba(0,0,0,0.28); }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { width: 0; background: transparent; }

@@ -37,8 +37,10 @@
 - **顶部导航栏(TopNav)**:左=品牌(紫色圆角方块 + `ti-crosshair` 标记 + "Apotheosis"
   字标);中=主导航(概览 / 会话 / 配置 / 控制 / 监控),当前项深色文字 + 2px 紫色下划线;
   右=全局操作(实时会话状态药丸、`保存配置` 主按钮、账户头像)。
-- **分段式次级导航(SegmentedNav)**:当前主分组有子页时,在 TopNav 下方显示一排分段控件
-  (圆角容器,选中段白底 + 轻阴影 + 紫色图标)。`概览` 无子页,则隐藏此条。
+- **二级导航侧边栏(SideNav)**:当前主分组有子页时,在 TopNav 下方、内容区左侧显示一条竖直
+  侧边栏,列出该分组的子页(图标 + 名称),顶部带分组名;选中项紫色高亮(`#EEF0FC` 底 + 紫字 +
+  紫图标)。`概览` 无子页,则隐藏侧边栏,仪表盘占满宽度。
+  (早期试过"顶栏下方一排分段控件"方案,确认观感偏弱,已改为本侧边栏。)
 - 去掉 `MainWindow` 现有的两层 `QTabBar` 与底部 emoji 保存按钮。
 - 内容区浅灰底(`#F6F7F9`),卡片白底带 1px 描边 + 极轻阴影。
 
@@ -77,10 +79,11 @@
   - 头像为占位(本期不接下拉菜单)。
   - 依赖:`IconFont`、QSS objectName(`topNav` / `primaryNavItem`)。
 
-- **SegmentedControl**:分段式次级导航(替代第二层 QTabBar)。
-  - 接口:`void setSegments(QList<QPair<QString,QString>> labelIcon)`、
+- **SideNav**:二级导航侧边栏(替代第二层 QTabBar)。
+  - 接口:`void setItems(const QString& groupTitle, const QStringList& labels, const QStringList& iconNames)`、
     `setCurrentIndex(int)`、`int currentIndex()`;信号 `currentChanged(int)`。
-  - 选中段白底 + 轻阴影;容器 `#ECECEF`,圆角 9,段圆角 7。
+  - 宽 208;白底 + 右描边;选中项 `#EEF0FC` 底 + `#4A55C8` 字 + 紫图标。图标用 `IconFont`
+    渲染成 `QIcon`(单按钮无法混排图标字体与 UI 字体),选中态重新着色为紫。
 
 - **MetricCard**:KPI 指标卡。
   - 接口:`MetricCard(label, iconName)`、`setValue(QString)`、`setUnit(QString)`、
@@ -91,7 +94,7 @@
     可选 `setValueSuffix(QString)`、网格 + 末端当前值。
   - `StatsPage` 与 `OverviewPage` 共用;`FpsGraphWidget` 迁移/重命名为 `TelemetryChart`。
 
-- **StatusPill**:小药丸(圆点 + 文本 + 语义色)。TopNav 与 Hero 复用。
+- **StatusPill**:状态指示(圆点 + 文本 + 语义色,**无填充背景**)。TopNav 复用。
 
 - **CardWidget(增强,非新增)**:
   - 新增副题:`CardWidget(title, subtitle, iconName)` 或 `setSubtitle(QString)`。
@@ -111,7 +114,7 @@
 
 ### 4.3 MainWindow 改动
 
-- 用 `TopNavBar` + `SegmentedControl` 替换 `m_primaryTabs` / `m_secondaryTabs`。
+- 用 `TopNavBar`(一级)+ `SideNav`(二级,内容区左侧)替换 `m_primaryTabs` / `m_secondaryTabs`。
 - 导航结构收敛为**单一数据源**(消除 `setupPages` 与 `onPrimaryTabChanged` 里
   `secondaryLabels` 的重复硬编码):
   ```
@@ -129,7 +132,7 @@
 ### 4.4 主题与入口
 
 - `style/theme.qss`:重构为 **Token 化样式表**——集中定义调色板、间距、圆角、字阶,
-  统一强调色,新增 TopNav / 主导航项 / 分段控件 / 指标卡 / 药丸 / Hero 的样式;
+  统一强调色,新增 TopNav / 主导航项 / 二级侧边栏 / 指标卡 / 状态指示 / Hero 的样式;
   删除任何 emoji 文案来源。
 - `main.cpp`:`applyLightPalette` 的 palette 对齐 Token;字体栈保留 `PingFang SC`
   并补 `Microsoft YaHei` / `Segoe UI` 回退;沿用 Fusion;保留登录与 `--shot` 截图模式。
@@ -176,7 +179,21 @@
 ## 9. 实现阶段(高层;细节进入实现计划)
 
 1. Token 化 `theme.qss` + `main.cpp` palette/字体对齐(地基,无功能变更)。
-2. 基础控件:`StatusPill`、`SegmentedControl`、`MetricCard`、`TelemetryChart`(由 `FpsGraphWidget` 泛化)、`CardWidget` 增强。
+2. 基础控件:`StatusPill`(无背景)、`SideNav`、`MetricCard`、`TelemetryChart`(由 `FpsGraphWidget` 泛化)、`CardWidget` 增强。
 3. `TopNavBar` + MainWindow 外壳替换(导航单一数据源、保存迁移、底部 StatusBar 重配色)。
 4. `OverviewPage` 概览仪表盘 + 接入 `pollMonitorTelemetry`。
 5. 全站 emoji 清除与一致性收尾;`--shot` 扩展与视觉核对。
+
+## 10. Mac 预览骨架(已落地)
+
+为了在 Mac 上直接看 / 点新设计(完整 app 因 runtime 耦合无法在 Mac 构建),新增独立预览工程:
+
+- 位置:`qt_ui/preview/`(`preview_main.cpp` / `PreviewWindow.{h,cpp}` / `preview.qss` / 独立 `CMakeLists.txt`)。
+- 仅依赖 `Qt6::Widgets`,**显式列出源**(不 GLOB),编译新组件 + `OverviewPage` + `IconFont`,无 runtime、无登录。
+- 用假数据(250ms `QTimer`)驱动概览仪表盘;可点一级 / 二级导航、可切会话启停状态。
+- 新组件(`TopNavBar` / `SideNav` / `MetricCard` / `TelemetryChart` / `StatusPill` / `OverviewPage`)是
+  **正式实现**,后续正式 `MainWindow` 直接复用;预览程序只是它们的驱动壳与 Mac 验证台。
+- 构建:`cmake -S qt_ui/preview -B qt_ui/preview/build -G Ninja && cmake --build qt_ui/preview/build`;
+  运行加 `--shot` 生成 `/tmp/apo_preview/*.png` 供无头核对。
+- 约束:这些组件为保持 Mac 可预览,**不得**直接 include runtime 头或访问全局;runtime 接线只在
+  `MainWindow` 侧通过 setter / 信号完成(`OverviewPage` 已解耦:setter 喂数 + `startStopRequested` 信号)。
