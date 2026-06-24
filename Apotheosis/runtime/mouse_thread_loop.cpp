@@ -465,6 +465,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.crosshair_y = pivot.y;
         in.fov_radius_x = fov_rx;
         in.fov_radius_y = fov_ry;
+        in.image_size   = static_cast<double>(config.detection_resolution);
         in.aim.speed_x        = static_cast<double>(profile_ptr->speed_x);
         in.aim.speed_y        = static_cast<double>(profile_ptr->speed_y);
         in.aim.dead_zone_px   = static_cast<double>(profile_ptr->dead_zone_px);

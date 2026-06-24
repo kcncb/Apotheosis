@@ -61,6 +61,10 @@ struct EngineInput
     double fov_radius_x = 0.0;
     double fov_radius_y = 0.0;
 
+    // 检测图边长(= detection_resolution)。疾风用它把 bbox 对角线归一成占比,
+    // 驱动 box 大小自适应(大框压增益/小框抬增益)。微澜不使用。
+    double image_size = 0.0;
+
     ArtSettings aim{};
 
     // Trajectory shaper. When mode == Linear the engine uses ART's

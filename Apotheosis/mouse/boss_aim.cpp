@@ -334,10 +334,44 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         return out;
     }
 
-    art_.configure(in.aim);
-
     const int bbox_w = static_cast<int>(std::lround(current->bbox.width));
     const int bbox_h = static_cast<int>(std::lround(current->bbox.height));
+
+    // 移动控制器路由 — 微澜与疾风是两套独立的 Layer B,共享上面的 Layer A 选目标。
+    // 切换 mover 时复位被切入那一套的内部状态,避免上一套的残留窜进来。
+    const bool mover_changed = (in.mover_kind != last_mover_kind_);
+    last_mover_kind_ = in.mover_kind;
+
+    if (in.mover_kind == mover::Kind::Predictive)
+    {
+        // ── 疾风:完全独立于 ART 的 bbox 自适应「带预测 PID」。直接吃原始
+        //    anchor + bbox,自己估速 / 预测领先 / 位置式 P+D。ART 这条路彻底
+        //    旁路(根本不调用 art_.step),所以 ART 的任何改动都不影响疾风。 ──
+        if (mover_changed)
+            predictive_mover_.reset();
+        predictive_mover_.configure(in.predictive_params);
+        const mover::Move m = predictive_mover_.step(
+            static_cast<double>(current->anchor.x),
+            static_cast<double>(current->anchor.y),
+            in.crosshair_x, in.crosshair_y,
+            static_cast<double>(current->bbox.width),
+            static_cast<double>(current->bbox.height),
+            in.image_size, dt, current->id);
+        out.dx = m.dx;
+        out.dy = m.dy;
+        // 疾风没有 ART 诊断量 → 留中性,不覆盖面板旧值。
+        out.cutoff_hz   = 0.0;
+        out.consistency = 0.0;
+        out.snapped     = false;
+        prev_current_id_ = current->id;
+        return out;
+    }
+
+    // ── 微澜:ART 路径(Linear 直驱 / Bezier-Custom 经 AimPathDriver)。 ──
+    if (mover_changed)
+        art_.reset();   // 从疾风切回时清 ART 残留,下一帧重新播种 fx_
+
+    art_.configure(in.aim);
 
     ArtResult r = art_.step(
         static_cast<double>(current->anchor.x),
@@ -345,42 +379,20 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         in.crosshair_x, in.crosshair_y,
         dt, bbox_w, bbox_h, current->id);
 
-    // 移动控制器路由:
-    //   微澜 (Smooth) → 走 ART/path 原路径,沿用 aim_path_mode 选 Linear/Bezier/Custom。
-    //   疾风/流光     → 旁路 AimPathDriver,把 (filtered aim − crosshair) 喂给 PID。
-    if (in.mover_kind == mover::Kind::Smooth)
+    if (in.path.mode == AimPathDriver::Mode::Linear)
     {
-        if (in.path.mode == AimPathDriver::Mode::Linear)
-        {
-            out.dx = r.move_x;
-            out.dy = r.move_y;
-        }
-        else
-        {
-            path_.configure(in.path);
-            AimPathDriver::Result pr = path_.step(
-                r.aim_x, r.aim_y,
-                in.crosshair_x, in.crosshair_y,
-                dt, current->id);
-            out.dx = pr.move_x;
-            out.dy = pr.move_y;
-        }
+        out.dx = r.move_x;
+        out.dy = r.move_y;
     }
     else
     {
-        // 切到/回到 Predictive: 清状态避免上一段微澜阶段的残留进新算法。
-        if (in.mover_kind != last_mover_kind_)
-        {
-            predictive_mover_.reset();
-            last_mover_kind_ = in.mover_kind;
-        }
-
-        const double err_x = r.aim_x - in.crosshair_x;
-        const double err_y = r.aim_y - in.crosshair_y;
-        predictive_mover_.configure(in.predictive_params);
-        const mover::Move m = predictive_mover_.step(err_x, err_y, dt, current->id);
-        out.dx = m.dx;
-        out.dy = m.dy;
+        path_.configure(in.path);
+        AimPathDriver::Result pr = path_.step(
+            r.aim_x, r.aim_y,
+            in.crosshair_x, in.crosshair_y,
+            dt, current->id);
+        out.dx = pr.move_x;
+        out.dy = pr.move_y;
     }
     out.cutoff_hz = r.cutoff_hz;
     out.consistency = r.consistency;

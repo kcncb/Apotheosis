@@ -7,22 +7,24 @@ namespace mover
 {
 
 // =============================================================================
-// 疾风 PredictiveMover — 位置式 PID + 预测器。
+// 疾风 — 独立 bbox 自适应「带预测 PID」(实现见 movers.h 顶部说明)。
 //
-// 关键设计:
-//   - 位置式 dx = (Kp*fused + Kd*d_fused/dt_norm) * scale,err→0 时 dx 自然→0。
-//   - 预测器只贡献 "fused = err + pred*weight",pred 跟随 |err| 线性缩放。
-//   - 1 px 死区 hardcoded;锁住后 80ms smoothstep 渐入。
-//   - 残差累加保证亚像素移动不丢失。
+// 关键不变量:
+//   · 从不调用 ART;只吃 Layer A 给的原始 anchor + bbox。
+//   · 大框单帧 |u| ≤ |err|(overshoot=1.0)→ 结构性保证不冲过目标。
+//   · 锁切 / teleport / 掉帧重捕 → 重播种,prev_err 对齐当前,vel 清零,
+//     避免微分瞬冲与多帧位移除以单帧 dt 产生的速度尖刺。
 // =============================================================================
 
 void PredictiveMover::reset()
 {
-    predictor_.reset();
-    prev_err_x_ = prev_err_y_ = 0.0;
     last_track_id_ = -1;
-    lock_age_sec_  = 0.0;
+    has_prev_      = false;
+    prev_ax_ = prev_ay_ = 0.0;
+    vel_x_   = vel_y_   = 0.0;
+    prev_err_x_ = prev_err_y_ = 0.0;
     rx_ = ry_ = 0.0;
+    lock_age_sec_ = 0.0;
 }
 
 void PredictiveMover::configure(const PredictiveParams& p)
@@ -30,87 +32,137 @@ void PredictiveMover::configure(const PredictiveParams& p)
     params_ = p;
 }
 
-Move PredictiveMover::step(double err_x, double err_y, double dt, int track_id)
+Move PredictiveMover::step(double anchor_x, double anchor_y,
+                           double cross_x,  double cross_y,
+                           double bbox_w,   double bbox_h,
+                           double image_size, double dt, int track_id)
 {
     Move out;
 
-    // 锁切换: 全部清零,prev_err 对齐当前 err 避免微分项瞬冲。
-    if (track_id >= 0 && track_id != last_track_id_)
-    {
-        predictor_.reset();
-        prev_err_x_ = err_x;
-        prev_err_y_ = err_y;
-        rx_ = ry_ = 0.0;
-        lock_age_sec_ = 0.0;
-        last_track_id_ = track_id;
-    }
-
     if (!(dt > 1e-6)) dt = 1e-6;
     if (dt > 0.25)    dt = 0.25;
-    lock_age_sec_ += dt;
+    if (!(image_size > 1.0)) image_size = 1.0;
 
-    // 渐入: 锁住后 80ms 内 scale 从 0.4 smoothstep 到 1.0。
-    constexpr double kInitScale = 0.4;
-    constexpr double kRampSec   = 0.08;
-    const double prog       = std::clamp(lock_age_sec_ / kRampSec, 0.0, 1.0);
-    const double smoothstep = prog * prog * (3.0 - 2.0 * prog);
-    const double scale      = kInitScale + (1.0 - kInitScale) * smoothstep;
+    const double diag = std::sqrt(bbox_w * bbox_w + bbox_h * bbox_h);
 
-    // 预测器 (只看 err 变化,不再喂 prev_move,避免单位错配)。
-    auto [pred_x, pred_y] = predictor_.predict(err_x, err_y, dt);
-
-    // 预测幅度跟随当前 |err| 缩放,上限 60。err 越小,预测能扰动越少。
-    const double pred_lim_x = std::min(std::fabs(err_x), 60.0);
-    const double pred_lim_y = std::min(std::fabs(err_y), 60.0);
-    pred_x = std::clamp(pred_x, -pred_lim_x, pred_lim_x);
-    pred_y = std::clamp(pred_y, -pred_lim_y, pred_lim_y);
-
-    if (std::fabs(pred_x) > 100.0 || std::fabs(pred_y) > 100.0)
+    // ── 锁切:清状态,本帧作为新序列重播种 ──
+    bool reseed = false;
+    if (track_id != last_track_id_)
     {
-        predictor_.reset();
-        pred_x = pred_y = 0.0;
+        last_track_id_ = track_id;
+        has_prev_      = false;
+        vel_x_ = vel_y_ = 0.0;
+        rx_ = ry_ = 0.0;
+        lock_age_sec_ = 0.0;
+        reseed = true;
     }
 
-    const double fused_x = err_x + pred_x * params_.pred_weight;
-    const double fused_y = err_y + pred_y * params_.pred_weight;
+    // ── teleport / 掉帧重捕:anchor 跳变过大 → 速度清零、本帧不预测 ──
+    if (has_prev_ && !reseed)
+    {
+        const double jump = std::hypot(anchor_x - prev_ax_, anchor_y - prev_ay_);
+        const double snapThresh =
+            std::max(kSnapDiagMul * diag, kSnapImgFrac * image_size);
+        if (jump > snapThresh)
+        {
+            vel_x_ = vel_y_ = 0.0;
+            reseed = true;
+        }
+    }
 
-    // 单像素死区: 误差<1 px 直接 0 输出,清残差,prev_err 对齐。
-    constexpr double kDeadZonePx = 1.0;
-    if (std::fabs(fused_x) < kDeadZonePx && std::fabs(fused_y) < kDeadZonePx)
+    // ── 速度估计(目标位移 EMA);重播种帧只对齐 prev,不产生速度 ──
+    if (!has_prev_ || reseed)
+    {
+        prev_ax_ = anchor_x;
+        prev_ay_ = anchor_y;
+        has_prev_ = true;
+    }
+    else
+    {
+        double rvx = (anchor_x - prev_ax_) / dt;
+        double rvy = (anchor_y - prev_ay_) / dt;
+        rvx = clampd(rvx, -kVelClampPx, kVelClampPx);
+        rvy = clampd(rvy, -kVelClampPx, kVelClampPx);
+        const double a = ema_alpha(kVelCutHz, dt);
+        vel_x_ += a * (rvx - vel_x_);
+        vel_y_ += a * (rvy - vel_y_);
+        prev_ax_ = anchor_x;
+        prev_ay_ = anchor_y;
+    }
+
+    lock_age_sec_ += dt;
+
+    // ── bbox 尺寸因子 t_small(1 = 远小框,0 = 近大框)──
+    const double sz = diag / image_size;
+    const double t_small =
+        clampd((kSizeFracHi - sz) / (kSizeFracHi - kSizeFracLo), 0.0, 1.0);
+
+    // ── 自适应系数 ──
+    const double kpx       = params_.kp_x * lerp(kGainBig, kGainSmall, t_small);
+    const double kpy       = params_.kp_y * lerp(kGainBig, kGainSmall, t_small);
+    const double kd        = params_.kd   * lerp(kDampBig, kDampSmall, t_small);
+    const double lead      = params_.pred_weight * kLeadBaseSec
+                             * lerp(kLeadBig, kLeadSmall, t_small);
+    const double overshoot = lerp(kOvershootBig, kOvershootSmall, t_small);
+    const double dzFrac    = lerp(kDzFracBig, kDzFracSmall, t_small);
+
+    // ── 预测领先点 → led-err ──
+    const double led_x = anchor_x + vel_x_ * lead;
+    const double led_y = anchor_y + vel_y_ * lead;
+    const double err_x = led_x - cross_x;
+    const double err_y = led_y - cross_y;
+
+    // 重播种帧 prev_err 对齐当前,微分项不瞬冲。
+    if (reseed)
+    {
+        prev_err_x_ = err_x;
+        prev_err_y_ = err_y;
+    }
+
+    // ── 死区(基于领先误差幅值):settled 时停手、清残差 ──
+    const double errMag = std::hypot(err_x, err_y);
+    const double dz = std::max(kDzMinPx, diag * dzFrac);
+    if (errMag < dz)
     {
         rx_ = ry_ = 0.0;
         prev_err_x_ = err_x;
         prev_err_y_ = err_y;
-        return out;
+        return out;  // {0, 0}
     }
 
-    // 位置式 PID: dx = (Kp*fused + Kd*d_fused/dt_norm) * scale。
-    // dt_norm 用 1/240 当 baseline,让 Kd 在 240 FPS 时刚好等效,
-    // 帧率变化时按 dt 比例缩放,避免低帧率微分爆掉。
-    constexpr double kDtNorm = 1.0 / 240.0;
+    // ── 位置式 P + D(微分作用于 led-err)──
     const double dt_eff = std::max(dt, kDtNorm);
-    const double d_fused_x = (fused_x - prev_err_x_) / dt_eff;
-    const double d_fused_y = (fused_y - prev_err_y_) / dt_eff;
+    const double dErrX  = (err_x - prev_err_x_) / dt_eff;
+    const double dErrY  = (err_y - prev_err_y_) / dt_eff;
 
-    double u_x = (params_.kp_x * fused_x + params_.kd * d_fused_x * kDtNorm) * scale;
-    double u_y = (params_.kp_y * fused_y + params_.kd * d_fused_y * kDtNorm) * scale;
+    double ux = kpx * err_x + kd * dErrX * kDtNorm;
+    double uy = kpy * err_y + kd * dErrY * kDtNorm;
 
-    // 输出绝对值上限 100 px/帧,防一帧暴走。
-    constexpr double kOutputMax = 100.0;
-    u_x = std::clamp(u_x, -kOutputMax, kOutputMax);
-    u_y = std::clamp(u_y, -kOutputMax, kOutputMax);
+    // ── 不过冲硬钳位:单帧 |u| ≤ |err|·overshoot(大框=1.0 → 绝不冲过目标)──
+    ux = clampd(ux, -std::fabs(err_x) * overshoot, std::fabs(err_x) * overshoot);
+    uy = clampd(uy, -std::fabs(err_y) * overshoot, std::fabs(err_y) * overshoot);
 
-    // 亚像素残差累加,trunc 取整。
-    const double raw_x = u_x + rx_;
-    const double raw_y = u_y + ry_;
-    out.dx = static_cast<int>(std::trunc(raw_x));
-    out.dy = static_cast<int>(std::trunc(raw_y));
-    rx_ = raw_x - out.dx;
-    ry_ = raw_y - out.dy;
+    // ── 渐入:锁后 kRampSec 内 scale 从 kInitScale smoothstep 到 1.0 ──
+    const double prog   = clampd(lock_age_sec_ / kRampSec, 0.0, 1.0);
+    const double smooth = prog * prog * (3.0 - 2.0 * prog);
+    const double scale  = kInitScale + (1.0 - kInitScale) * smooth;
+    ux *= scale;
+    uy *= scale;
+
+    // ── 输出上限,防单帧暴走 ──
+    ux = clampd(ux, -kOutMaxPx, kOutMaxPx);
+    uy = clampd(uy, -kOutMaxPx, kOutMaxPx);
+
+    // ── 亚像素残差累加,trunc 取整 ──
+    const double rawx = ux + rx_;
+    const double rawy = uy + ry_;
+    out.dx = static_cast<int>(std::trunc(rawx));
+    out.dy = static_cast<int>(std::trunc(rawy));
+    rx_ = rawx - out.dx;
+    ry_ = rawy - out.dy;
 
     prev_err_x_ = err_x;
     prev_err_y_ = err_y;
-
     return out;
 }
 

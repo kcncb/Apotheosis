@@ -6,17 +6,17 @@
 //
 //   Kind::Smooth      微澜 — 走 ART/path 原路径(EMA 自适应平滑),controller 不介入,
 //                            engine 直接用 ArtResult/AimPathDriver 的 move。
-//   Kind::Predictive  疾风 — 位置式 PID + 导数估计预测器。每帧:
-//                              dx = Kp*err + Kd*(err - prev_err)/dt_norm
-//                            自然 err→0 时 dx→0,不会绕目标转。预测器只贡献 fused 误差。
+//   Kind::Predictive  疾风 — 独立于 ART 的「带预测 PID」。直接读原始 anchor + bbox,
+//                            自己估速、预测领先、位置式 P+D 出 dx/dy。box 占比自适应:
+//                            大框(近) 压增益 / 加阻尼 / 大死区 / 单帧硬钳位 → 不过冲;
+//                            小框(远) 抬增益 / 满预测领先 → 紧跟。bbox 适配全内部自动,
+//                            不占用户旋钮。疾风从不调用 ART。
 //
-// 用户面只 4 个旋钮: 灵敏度 X (Kp_x) / 灵敏度 Y (Kp_y) / 阻尼 (Kd) / 预测权重。
-// 渐入、输出上限、单像素死区都硬编默认值。
+// 用户面 4 旋钮: 速度X (kp_x) / 速度Y (kp_y) / 阻尼 (kd) / 预测 (pred_weight)。
 // =============================================================================
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 
 namespace mover
 {
@@ -33,94 +33,88 @@ struct Move
     int dy = 0;
 };
 
-// ---------------------------------------------------------------------------
-// 疾风 — 暴露 4 项可调。
-// ---------------------------------------------------------------------------
+// 疾风 4 旋钮(沿用现有 config 字段,语义即 UI 标签)。
 struct PredictiveParams
 {
-    double kp_x        = 0.6;
-    double kp_y        = 0.6;
-    double kd          = 0.10;
-    double pred_weight = 0.5;   // 双轴共用,0 = 纯 PID,1 = 完整预测。
+    double kp_x        = 0.6;   // 速度X — X 轴比例增益(收敛快慢)
+    double kp_y        = 0.6;   // 速度Y
+    double kd          = 0.10;  // 阻尼   — 微分阻尼(抑过冲 / 抑抖)
+    double pred_weight = 0.5;   // 预测   — 速度前瞻领先强度(0 = 纯 PID)
 };
 
-// ---------------------------------------------------------------------------
-// 疾风内部: 导数估计预测器 (vel/acc 平滑 + 运动学外推)。
-// ---------------------------------------------------------------------------
-class DerivativePredictor
-{
-public:
-    void reset() noexcept
-    {
-        last_error_x_ = last_error_y_ = 0.0;
-        smooth_vel_x_ = smooth_vel_y_ = 0.0;
-        smooth_acc_x_ = smooth_acc_y_ = 0.0;
-        has_last_ = false;
-    }
-
-    std::pair<double, double> predict(double error_x, double error_y, double dt) noexcept
-    {
-        if (!has_last_)
-        {
-            last_error_x_ = error_x;
-            last_error_y_ = error_y;
-            has_last_ = true;
-            return { 0.0, 0.0 };
-        }
-
-        dt = std::clamp(dt, 0.001, 0.05);
-
-        // 注意: 不再用 prev_move 反推 (mouse counts vs detection pixels 单位错配会
-        // 在高灵敏度时引入稳态偏置,锁偏的根因之一)。直接看 err 变化。
-        double vel_x = std::clamp((error_x - last_error_x_) / dt, -3000.0, 3000.0);
-        double vel_y = std::clamp((error_y - last_error_y_) / dt, -3000.0, 3000.0);
-
-        // 过冲抑制: vel 与 err 反号时压速度。
-        if (std::fabs(error_x) > 5.0 && vel_x * error_x > 0.0) vel_x *= 0.1;
-        if (std::fabs(error_y) > 5.0 && vel_y * error_y > 0.0) vel_y *= 0.1;
-
-        const double acc_x = std::clamp((vel_x - smooth_vel_x_) / dt, -5000.0, 5000.0);
-        const double acc_y = std::clamp((vel_y - smooth_vel_y_) / dt, -5000.0, 5000.0);
-
-        const double alpha_v = std::clamp(1.0 - std::pow(0.75, dt / 0.01), 0.05, 0.8);
-        const double alpha_a = std::clamp(1.0 - std::pow(0.85, dt / 0.01), 0.05, 0.8);
-
-        smooth_vel_x_ += (vel_x - smooth_vel_x_) * alpha_v;
-        smooth_vel_y_ += (vel_y - smooth_vel_y_) * alpha_v;
-        smooth_acc_x_ += (acc_x - smooth_acc_x_) * alpha_a;
-        smooth_acc_y_ += (acc_y - smooth_acc_y_) * alpha_a;
-
-        last_error_x_ = error_x;
-        last_error_y_ = error_y;
-
-        return {
-            smooth_vel_x_ * dt + 0.5 * smooth_acc_x_ * dt * dt,
-            smooth_vel_y_ * dt + 0.5 * smooth_acc_y_ * dt * dt
-        };
-    }
-
-private:
-    double last_error_x_ = 0.0, last_error_y_ = 0.0;
-    double smooth_vel_x_ = 0.0, smooth_vel_y_ = 0.0;
-    double smooth_acc_x_ = 0.0, smooth_acc_y_ = 0.0;
-    bool   has_last_ = false;
-};
-
+// =============================================================================
+// 疾风 — 独立 bbox 自适应「带预测 PID」。
+//
+// 每个观测帧 step(anchor, crosshair, bbox, image_size, dt, id):
+//   1. vel  = EMA(anchor 位移 / dt)              目标速度(检测 px/s)
+//   2. led  = anchor + vel · lead                预测领先点
+//   3. err  = led − crosshair
+//   4. u    = kp_eff·err + kd_eff·d(err)/dt_norm  位置式 P + D
+//   5. |u| ≤ |err|·overshoot                      不过冲硬钳位(大框 = 1.0,绝不冲过)
+//   6. 渐入 · 输出钳位 · 死区 · 亚像素残差 → 整数 dx/dy
+//   7. 锁切 / teleport / 掉帧重捕 → 重播种,避免速度尖刺与微分瞬冲
+//
+// bbox 适配(内部自动,t_small ∈ [0,1],1 = 远小框 0 = 近大框):
+//   kp_eff   = kp   · lerp(kGainBig,  kGainSmall,  t_small)
+//   kd_eff   = kd   · lerp(kDampBig,  kDampSmall,  t_small)
+//   lead     = pred · kLeadBaseSec · lerp(kLeadBig, kLeadSmall, t_small)
+//   死区     = diag · lerp(kDzFracBig,   kDzFracSmall,   t_small)
+//   钳位系数 =        lerp(kOvershootBig, kOvershootSmall, t_small)
+// =============================================================================
 class PredictiveMover
 {
 public:
     void reset();
     void configure(const PredictiveParams& p);
-    Move step(double err_x, double err_y, double dt, int track_id);
+
+    // anchor / crosshair / bbox 均为检测像素;image_size = detection_resolution。
+    Move step(double anchor_x, double anchor_y,
+              double cross_x,  double cross_y,
+              double bbox_w,   double bbox_h,
+              double image_size, double dt, int track_id);
 
 private:
+    // ── bbox 自适应系数(near/big ←→ far/small)──
+    static constexpr double kSizeFracLo    = 0.12;   // diag/image ≤ 此 → 全小框 (t_small=1)
+    static constexpr double kSizeFracHi    = 0.50;   // diag/image ≥ 此 → 全大框 (t_small=0)
+    static constexpr double kGainBig       = 0.55;   // 大框增益系数(压低 → 不过冲)
+    static constexpr double kGainSmall     = 1.35;   // 小框增益系数(抬高 → 紧跟)
+    static constexpr double kDampBig       = 1.60;   // 大框阻尼系数(更稳)
+    static constexpr double kDampSmall     = 0.80;   // 小框阻尼系数(更跟手)
+    static constexpr double kLeadBaseSec   = 0.05;   // 预测前瞻基准(秒)
+    static constexpr double kLeadBig       = 0.40;   // 大框前瞻系数(少领先)
+    static constexpr double kLeadSmall     = 1.00;   // 小框前瞻系数(满领先)
+    static constexpr double kDzFracBig     = 0.025;  // 大框死区 = diag × 此
+    static constexpr double kDzFracSmall   = 0.010;  // 小框死区
+    static constexpr double kOvershootBig  = 1.00;   // 大框单帧 |u| ≤ |err| × 1.0(绝不冲过)
+    static constexpr double kOvershootSmall= 1.50;   // 小框允许冲 1.5×(更跟手)
+
+    // ── 通用常量 ──
+    static constexpr double kDzMinPx    = 1.5;        // 死区下限(px)
+    static constexpr double kOutMaxPx   = 120.0;      // 单帧输出上限(px)
+    static constexpr double kVelCutHz   = 6.0;        // 估速 EMA 截止(Hz)
+    static constexpr double kVelClampPx = 4000.0;     // 估速钳位(px/s,防尖刺)
+    static constexpr double kDtNorm     = 1.0 / 240.0;// 微分归一化基准(240FPS)
+    static constexpr double kSnapDiagMul= 2.5;        // anchor 跳变 > diag×此 → 重播种
+    static constexpr double kSnapImgFrac= 0.50;       // 或跳变 > image×此 → 重播种
+    static constexpr double kRampSec    = 0.08;       // 锁后渐入时长
+    static constexpr double kInitScale  = 0.40;       // 渐入起点 scale
+
+    static double lerp(double a, double b, double t) { return a + (b - a) * t; }
+    static double clampd(double v, double lo, double hi)
+    { return v < lo ? lo : (v > hi ? hi : v); }
+    static double ema_alpha(double fc, double dt)
+    { const double r = 2.0 * 3.14159265358979323846 * fc * dt; return r / (r + 1.0); }
+
     PredictiveParams params_{};
-    DerivativePredictor predictor_{};
-    double prev_err_x_   = 0.0;
-    double prev_err_y_   = 0.0;
+
     int    last_track_id_ = -1;
-    double lock_age_sec_  = 0.0;
-    double rx_ = 0.0, ry_ = 0.0;   // 亚像素残差。
+    bool   has_prev_      = false;
+    double prev_ax_ = 0.0, prev_ay_ = 0.0;     // 上帧 anchor(估速用)
+    double vel_x_   = 0.0, vel_y_   = 0.0;      // 平滑速度
+    double prev_err_x_ = 0.0, prev_err_y_ = 0.0;// 上帧 led-err(微分用)
+    double rx_ = 0.0, ry_ = 0.0;               // 亚像素残差
+    double lock_age_sec_ = 0.0;                 // 锁后时长(渐入用)
 };
 
 } // namespace mover
