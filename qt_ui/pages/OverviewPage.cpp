@@ -221,7 +221,10 @@ void OverviewPage::setSessionState(bool running, const QString& model,
     m_running = running;
     if (running) {
         m_heroTitle->setText(QStringLiteral("推理运行中"));
-        m_heroSub->setText(QStringLiteral("%1 · %2 · 已运行 %3").arg(model, backend, uptime));
+        QString sub = QStringLiteral("%1 · %2").arg(model, backend);
+        if (!uptime.isEmpty())
+            sub += QStringLiteral(" · 已运行 %1").arg(uptime);
+        m_heroSub->setText(sub);
         m_heroChip->setStyleSheet(QStringLiteral("background:#E7F6EC; border-radius:8px; color:#16A34A;"));
         m_startBtn->setText(QStringLiteral("停止推理"));
         m_startBtn->setProperty("class", "danger");

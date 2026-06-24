@@ -90,13 +90,14 @@ int main(int argc, char* argv[]) {
     if (shotMode) {
         QDir().mkpath("/tmp/apo_shots");
         const std::vector<std::tuple<int, int, QString>> shots = {
-            {0, 0, "01_session"},
-            {0, 1, "02_modeltools"},
-            {1, 0, "03_capture"},
-            {1, 3, "04_aimodel"},
-            {2, 0, "05_hotkey"},
-            {3, 0, "06_stats"},
-            {3, 1, "07_log"},
+            {0, 0, "00_overview"},
+            {1, 0, "01_session"},
+            {1, 1, "02_modeltools"},
+            {2, 0, "03_capture"},
+            {2, 3, "04_aimodel"},
+            {3, 0, "05_hotkey"},
+            {4, 0, "06_stats"},
+            {4, 1, "07_log"},
         };
         for (const auto& [a, b, name] : shots) {
             window.selectPage(a, b);

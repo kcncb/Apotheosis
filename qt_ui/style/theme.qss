@@ -592,3 +592,80 @@ QSplitter::handle {
 
 QSplitter::handle:horizontal { width: 1px; }
 QSplitter::handle:vertical { height: 1px; }
+
+/* ==========================================================================
+   Enterprise shell — top nav + secondary sidebar + dashboard
+   ========================================================================== */
+
+QLabel[class="tertiary"] { color: #9A9AA2; font-size: 12px; }
+QLabel#heroTitle { font-size: 15px; font-weight: 500; color: #1A1A1F; }
+
+/* ── Top nav ───────────────────────────────────────────────────────────── */
+
+QWidget#topNav {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #ECECEF;
+}
+
+QLabel#brandMark { background-color: #5E6AD2; color: #FFFFFF; border-radius: 8px; }
+QLabel#brandWord { font-size: 15px; font-weight: 500; color: #1A1A1F; }
+QFrame#navDivider { background-color: #E6E6EA; border: none; }
+QLabel#avatar { background-color: #EEF0FC; color: #5E6AD2; border-radius: 16px; }
+
+QPushButton#primaryNavItem {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0 13px;
+    color: #6B6B73;
+    font-size: 14px;
+    font-weight: 400;
+    min-height: 0;
+}
+QPushButton#primaryNavItem:hover { background: transparent; color: #1A1A1F; }
+QPushButton#primaryNavItem:checked {
+    background: transparent;
+    color: #1A1A1F;
+    font-weight: 500;
+    border-bottom: 2px solid #5E6AD2;
+}
+
+/* ── Secondary sidebar ─────────────────────────────────────────────────── */
+
+QWidget#sideNav {
+    background-color: #FFFFFF;
+    border-right: 1px solid #ECECEF;
+}
+
+QLabel#sideNavTitle {
+    color: #A6A6AE;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 9px;
+}
+
+QPushButton#sideNavItem {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 11px;
+    color: #52525B;
+    font-size: 13px;
+    font-weight: 400;
+    text-align: left;
+    min-height: 0;
+}
+QPushButton#sideNavItem:hover { background-color: #F4F4F6; }
+QPushButton#sideNavItem:checked {
+    background-color: #EEF0FC;
+    color: #4A55C8;
+    font-weight: 500;
+}
+
+/* ── Metric card ───────────────────────────────────────────────────────── */
+
+QFrame#metricCard {
+    background-color: #FFFFFF;
+    border: 1px solid rgba(0,0,0,0.07);
+    border-radius: 12px;
+}

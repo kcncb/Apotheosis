@@ -1,11 +1,12 @@
 #include "MainWindow.h"
 
 #include <QHBoxLayout>
-#include <QPushButton>
 #include <QStackedWidget>
-#include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <chrono>
+#include <mutex>
 
 #include "Apotheosis.h"
 #include "app_log.h"
@@ -16,6 +17,9 @@
 #include "detector/i_detector.h"
 #include "runtime/inference_session.h"
 #include "widgets/StatusBar.h"
+#include "widgets/TopNavBar.h"
+#include "widgets/SideNav.h"
+#include "pages/OverviewPage.h"
 #include "pages/SessionPage.h"
 #include "pages/ModelToolsPage.h"
 #include "pages/CapturePage.h"
@@ -34,11 +38,47 @@
 #include "pages/AutoCapturePage.h"
 #include "capture/auto_capture.h"
 
+namespace {
+
+struct GroupDef {
+    QString name;
+    QStringList subs;
+    QStringList icons;
+};
+
+// 单一导航数据源:一级分组(顶栏)+ 二级子页(侧边栏)+ 子页图标。
+const QVector<GroupDef>& navGroups() {
+    static const QVector<GroupDef> kGroups = {
+        {QStringLiteral("概览"), {}, {}},
+        {QStringLiteral("会话"),
+         {QStringLiteral("推理启动"), QStringLiteral("模型工具")},
+         {QStringLiteral("player-play"), QStringLiteral("settings")}},
+        {QStringLiteral("配置"),
+         {QStringLiteral("画面采集"), QStringLiteral("目标"), QStringLiteral("硬件"),
+          QStringLiteral("AI 模型"), QStringLiteral("深度模型")},
+         {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
+          QStringLiteral("cpu"), QStringLiteral("stack-2")}},
+        {QStringLiteral("控制"),
+         {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"),
+          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本")},
+         {QStringLiteral("keyboard"), QStringLiteral("color-swatch"), QStringLiteral("world"),
+          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2")}},
+        {QStringLiteral("监控"),
+         {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"),
+          QStringLiteral("调试")},
+         {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
+          QStringLiteral("bug")}},
+    };
+    return kGroups;
+}
+
+}  // namespace
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setWindowTitle("Apotheosis");
-    resize(960, 640);
-    setMinimumSize(720, 480);
+    resize(1080, 720);
+    setMinimumSize(940, 600);
 
     auto* central = new QWidget(this);
     central->setObjectName("centralWidget");
@@ -48,51 +88,19 @@ MainWindow::MainWindow(QWidget* parent)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    m_primaryTabs = new QTabBar(central);
-    m_primaryTabs->setObjectName("primaryTabs");
-    m_primaryTabs->setDocumentMode(true);
-    m_primaryTabs->setExpanding(false);
-    m_primaryTabs->setDrawBase(false);
-    m_primaryTabs->setTabsClosable(false);
-
-    auto* topRow = new QHBoxLayout;
-    topRow->setContentsMargins(0, 0, 4, 0);
-    topRow->setSpacing(0);
-    topRow->addWidget(m_primaryTabs, 1);
-
-    auto* saveBtn = new QPushButton(QStringLiteral("\xf0\x9f\x92\xbe \xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae"), central);
-    saveBtn->setObjectName("saveConfigBtn");
-    saveBtn->setCursor(Qt::PointingHandCursor);
-    saveBtn->setFixedHeight(28);
-    saveBtn->setStyleSheet(
-        "QPushButton { background:#2563EB; color:white; border:none; border-radius:4px; padding:0 12px; font-size:12px; }"
-        "QPushButton:hover { background:#1D4ED8; }"
-        "QPushButton:pressed { background:#1E40AF; }");
-    connect(saveBtn, &QPushButton::clicked, this, [saveBtn] {
-        ConfigBridge::instance().syncToRuntime();
-        {
-            std::lock_guard<std::recursive_mutex> lk(configMutex);
-            config.saveConfig();
-        }
-        saveBtn->setText(QStringLiteral("\xe2\x9c\x93 \xe5\xb7\xb2\xe4\xbf\x9d\xe5\xad\x98"));
-        QTimer::singleShot(1500, saveBtn, [saveBtn] {
-            saveBtn->setText(QStringLiteral("\xf0\x9f\x92\xbe \xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae"));
-        });
-    });
-    topRow->addWidget(saveBtn);
-
-    m_secondaryTabs = new QTabBar(central);
-    m_secondaryTabs->setObjectName("secondaryTabs");
-    m_secondaryTabs->setDocumentMode(true);
-    m_secondaryTabs->setExpanding(false);
-    m_secondaryTabs->setDrawBase(false);
-
+    m_topNav = new TopNavBar(central);
+    m_sideNav = new SideNav(central);
     m_pageStack = new QStackedWidget(central);
     m_statusBar = new StatusBar(central);
 
-    layout->addLayout(topRow);
-    layout->addWidget(m_secondaryTabs);
-    layout->addWidget(m_pageStack, 1);
+    auto* body = new QHBoxLayout;
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(0);
+    body->addWidget(m_sideNav);
+    body->addWidget(m_pageStack, 1);
+
+    layout->addWidget(m_topNav);
+    layout->addLayout(body, 1);
     layout->addWidget(m_statusBar);
 
     setupPages();
@@ -100,17 +108,19 @@ MainWindow::MainWindow(QWidget* parent)
     m_statusBar->setInferenceStatus(false);
     m_statusBar->setBackend("TRT");
 
-    connect(m_primaryTabs, &QTabBar::currentChanged,
-            this, &MainWindow::onPrimaryTabChanged);
-    connect(m_secondaryTabs, &QTabBar::currentChanged,
-            this, &MainWindow::onSecondaryTabChanged);
+    connect(m_topNav, &TopNavBar::primaryChanged, this, &MainWindow::onPrimaryChanged);
+    connect(m_sideNav, &SideNav::currentChanged, this, &MainWindow::onSecondaryChanged);
+    connect(m_topNav, &TopNavBar::saveClicked, this, [] {
+        ConfigBridge::instance().syncToRuntime();
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.saveConfig();
+    });
 
-    m_primaryTabs->setCurrentIndex(0);
-    onPrimaryTabChanged(0);
+    m_topNav->setCurrentPrimary(0);
+    onPrimaryChanged(0);
 
-    // Monitor pages (性能统计 / 日志 / 调试) are static widgets — without
-    // this poll loop their setters never get called, which is why the
-    // monitor tab looked frozen at startup defaults.
+    // Monitor pages (概览 / 性能统计 / 日志 / 调试) are static widgets — without
+    // this poll loop their setters never get called.
     m_monitorTimer = new QTimer(this);
     m_monitorTimer->setInterval(200);
     connect(m_monitorTimer, &QTimer::timeout, this, &MainWindow::pollMonitorTelemetry);
@@ -119,77 +129,97 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 void MainWindow::setupPages() {
-    const QVector<QPair<QString, QStringList>> tabStructure = {
-        {QStringLiteral("会话"), {QStringLiteral("推理启动"), QStringLiteral("模型工具")}},
-        {QStringLiteral("配置"), {QStringLiteral("画面采集"), QStringLiteral("目标"), QStringLiteral("硬件"), QStringLiteral("AI 模型"), QStringLiteral("深度模型")}},
-        {QStringLiteral("控制"), {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"), QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本")}},
-        {QStringLiteral("监控"), {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"), QStringLiteral("调试")}},
-    };
-
     int pageIndex = 0;
+    QStringList primaryNames;
 
-    for (const auto& [primary, secondaries] : tabStructure) {
-        m_primaryTabs->addTab(primary);
+    for (const auto& g : navGroups()) {
+        primaryNames << g.name;
 
         PageRange range;
         range.first = pageIndex;
-        range.count = secondaries.size();
+        range.name = g.name;
+        range.subs = g.subs;
+        range.icons = g.icons;
 
-        for (const auto& name : secondaries) {
-            QWidget* page = createPage(name);
-            m_pageStack->addWidget(page);
+        if (g.subs.isEmpty()) {
+            // 概览 仪表盘:无子页,作为该分组唯一落地页。
+            m_overviewPage = new OverviewPage();
+            connect(m_overviewPage, &OverviewPage::startStopRequested,
+                    this, &MainWindow::onHeroToggleInference);
+            m_pageStack->addWidget(m_overviewPage);
+            range.count = 1;
             ++pageIndex;
+        } else {
+            range.count = g.subs.size();
+            for (const auto& name : g.subs) {
+                QWidget* page = createPage(name);
+                m_pageStack->addWidget(page);
+                ++pageIndex;
+            }
         }
 
         m_tabPages.append(range);
     }
+
+    m_topNav->setPrimaryItems(primaryNames);
 
     if (m_hotkeyPage && m_targetPage)
         m_hotkeyPage->setTargetPage(m_targetPage);
 }
 
 void MainWindow::selectPage(int primary, int secondary) {
-    m_primaryTabs->setCurrentIndex(primary);
-    m_secondaryTabs->setCurrentIndex(secondary);
-    onSecondaryTabChanged(secondary);
+    if (primary < 0 || primary >= m_tabPages.size())
+        return;
+    m_topNav->setCurrentPrimary(primary);
+    onPrimaryChanged(primary);
+    if (secondary > 0 && secondary < m_tabPages[primary].count) {
+        m_sideNav->setCurrentIndex(secondary);
+        onSecondaryChanged(secondary);
+    }
 }
 
-void MainWindow::onPrimaryTabChanged(int index) {
-    if (index < 0 || index >= m_tabPages.size()) {
+void MainWindow::onPrimaryChanged(int index) {
+    if (index < 0 || index >= m_tabPages.size())
         return;
+
+    const PageRange& r = m_tabPages[index];
+    if (r.subs.isEmpty()) {
+        m_sideNav->hide();
+    } else {
+        m_sideNav->setItems(r.name, r.subs, r.icons);
+        m_sideNav->show();
     }
-
-    const QVector<QStringList> secondaryLabels = {
-        {QStringLiteral("推理启动"), QStringLiteral("模型工具")},
-        {QStringLiteral("画面采集"), QStringLiteral("目标"), QStringLiteral("硬件"), QStringLiteral("AI 模型"), QStringLiteral("深度模型")},
-        {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"), QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本")},
-        {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"), QStringLiteral("调试")},
-    };
-
-    QSignalBlocker blocker(m_secondaryTabs);
-    while (m_secondaryTabs->count() > 0) {
-        m_secondaryTabs->removeTab(0);
-    }
-
-    for (const auto& label : secondaryLabels[index]) {
-        m_secondaryTabs->addTab(label);
-    }
-
-    blocker.unblock();
-    m_secondaryTabs->setCurrentIndex(0);
-    onSecondaryTabChanged(0);
+    m_pageStack->setCurrentIndex(r.first);
 }
 
-void MainWindow::onSecondaryTabChanged(int index) {
-    int primaryIndex = m_primaryTabs->currentIndex();
-    if (primaryIndex < 0 || primaryIndex >= m_tabPages.size()) {
+void MainWindow::onSecondaryChanged(int index) {
+    const int primaryIndex = m_topNav->currentPrimary();
+    if (primaryIndex < 0 || primaryIndex >= m_tabPages.size())
         return;
-    }
-    if (index < 0 || index >= m_tabPages[primaryIndex].count) {
+    if (index < 0 || index >= m_tabPages[primaryIndex].count)
         return;
-    }
 
     m_pageStack->setCurrentIndex(m_tabPages[primaryIndex].first + index);
+}
+
+void MainWindow::onHeroToggleInference() {
+    if (!g_inference_session)
+        return;
+
+    if (g_inference_session->running()) {
+        g_inference_session->stop();
+    } else {
+        ConfigBridge::instance().syncToRuntime();
+        std::string backend;
+        std::string modelPath;
+        {
+            std::lock_guard<std::recursive_mutex> lk(configMutex);
+            backend = config.backend;
+            modelPath = "models/" + config.ai_model;
+        }
+        g_inference_session->start(backend, modelPath);
+    }
+    // Display refreshes on the next pollMonitorTelemetry() tick.
 }
 
 QWidget* MainWindow::createPage(const QString& name) {
@@ -213,53 +243,90 @@ QWidget* MainWindow::createPage(const QString& name) {
 }
 
 void MainWindow::pollMonitorTelemetry() {
-    // ── Stats ────────────────────────────────────────────────────────────
-    if (m_statsPage) {
-        const double fps = static_cast<double>(captureFps.load());
-        m_statsPage->setFps(fps);
-        // 产帧 FPS:eth_capture 等支持的后端通过 GetSourceFpsEstimate 把"receive
-        // 线程每秒解码+入队的真实帧数"塞到这里。captureFps(消费侧) < 产帧 FPS
-        // 意味着 capture 循环跟不上;两者持平意味着已经吃满产帧速率,瓶颈在产帧。
-        m_statsPage->setSourceFps(static_cast<double>(captureSourceFps.load()));
-        // 接收诊断:五个互不重叠的桶定位"产帧 FPS 上不去"的源头。
-        m_statsPage->setReceiverDiagnostics(
-            captureSenderSpanFps.load(),
-            captureWireLostFps.load(),
-            capturePartialLostFps.load(),
-            capturePcapKernelDroppedFps.load(),
-            capturePcapIfDroppedFps.load());
+    // ── Shared telemetry (computed once, fed to both 概览 and 性能统计) ──────
+    const double fps = static_cast<double>(captureFps.load());
+    const double sourceFps = static_cast<double>(captureSourceFps.load());
+    const int rxSender = captureSenderSpanFps.load();
+    const int rxWire = captureWireLostFps.load();
+    const int rxPartial = capturePartialLostFps.load();
+    const int rxKernel = capturePcapKernelDroppedFps.load();
+    const int rxIf = capturePcapIfDroppedFps.load();
 
-        double infer_ms = 0.0;
-        double pre_ms   = 0.0;
-        double post_ms  = 0.0;
-        double copy_ms  = 0.0;
-        double nms_ms   = 0.0;
-        if (g_inference_session && g_inference_session->detector()) {
-            auto* d = g_inference_session->detector();
-            pre_ms   = d->lastPreprocessTime().count();
-            infer_ms = d->lastInferenceTime().count();
-            copy_ms  = d->lastCopyTime().count();
-            post_ms  = d->lastPostprocessTime().count();
-            nms_ms   = d->lastNmsTime().count();
+    double pre_ms = 0.0, infer_ms = 0.0, copy_ms = 0.0, post_ms = 0.0, nms_ms = 0.0;
+    if (g_inference_session && g_inference_session->detector()) {
+        auto* d = g_inference_session->detector();
+        pre_ms   = d->lastPreprocessTime().count();
+        infer_ms = d->lastInferenceTime().count();
+        copy_ms  = d->lastCopyTime().count();
+        post_ms  = d->lastPostprocessTime().count();
+        nms_ms   = d->lastNmsTime().count();
+    }
+    const double total_ms = pre_ms + infer_ms + copy_ms + post_ms + nms_ms;
+    const double cap_ms = (fps > 0.5) ? (1000.0 / fps) : 0.0;
+    const bool running = g_inference_session && g_inference_session->running();
+
+    // Session uptime: stamp on the false→true edge.
+    if (running && !m_sessionRunning)
+        m_sessionStart = std::chrono::steady_clock::now();
+    m_sessionRunning = running;
+
+    int gpuMb = 0, cpuCores = 0;
+    QString model, backendRaw;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        gpuMb = config.gpuMemoryReserveMB;
+        cpuCores = config.cpuCoreReserveCount;
+        model = QString::fromStdString(config.ai_model);
+        backendRaw = QString::fromStdString(config.backend);
+    }
+    const QString backendDisp = (backendRaw == QStringLiteral("DML"))
+        ? QStringLiteral("DirectML")
+        : QStringLiteral("TensorRT (CUDA)");
+
+    m_statusBar->setInferenceStatus(running);
+    m_statusBar->setFps(fps);
+    m_topNav->setSessionStatus(running, running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
+
+    // ── 概览 dashboard ──────────────────────────────────────────────────
+    if (m_overviewPage) {
+        m_overviewPage->setFps(fps);
+        m_overviewPage->setSourceFps(sourceFps);
+        m_overviewPage->setReceiverDiagnostics(rxSender, rxWire, rxPartial, rxKernel, rxIf);
+        m_overviewPage->setInferenceLatency(infer_ms);
+        m_overviewPage->setTotalLatency(total_ms);
+        m_overviewPage->setDetectionCount(static_cast<int>(detectionBuffer.boxes.size()), -1);
+
+        QString uptime;
+        if (running) {
+            const long s = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - m_sessionStart).count());
+            uptime = QStringLiteral("%1:%2:%3")
+                .arg(s / 3600, 2, 10, QChar('0'))
+                .arg((s % 3600) / 60, 2, 10, QChar('0'))
+                .arg(s % 60, 2, 10, QChar('0'));
         }
-        // Capture-side latency proxy: 1000 / max(captureFps, 1).
-        const double cap_ms = (fps > 0.5) ? (1000.0 / fps) : 0.0;
+        m_overviewPage->setSessionState(
+            running,
+            model.isEmpty() ? QStringLiteral("(未选择模型)") : model,
+            backendDisp, uptime);
+    }
+
+    // ── 性能统计 ────────────────────────────────────────────────────────
+    if (m_statsPage) {
+        m_statsPage->setFps(fps);
+        m_statsPage->setSourceFps(sourceFps);
+        m_statsPage->setReceiverDiagnostics(rxSender, rxWire, rxPartial, rxKernel, rxIf);
         m_statsPage->setCaptureLatency(cap_ms);
         m_statsPage->setInferenceLatency(infer_ms);
-        m_statsPage->setTotalLatency(pre_ms + infer_ms + copy_ms + post_ms + nms_ms);
-
-        {
-            std::lock_guard<std::recursive_mutex> lk(configMutex);
-            m_statsPage->setGpuMemory(QStringLiteral("%1 MB").arg(config.gpuMemoryReserveMB));
-            m_statsPage->setCpuCores(QString::number(config.cpuCoreReserveCount));
-        }
+        m_statsPage->setTotalLatency(total_ms);
+        m_statsPage->setGpuMemory(QStringLiteral("%1 MB").arg(gpuMb));
+        m_statsPage->setCpuCores(QString::number(cpuCores));
     }
 
     // ── Log: drain new tail lines into the textbox ──────────────────────
     if (m_logPage) {
         const auto snap = AppLog::Snapshot();
         const int total = static_cast<int>(snap.size());
-        // Snapshot can shrink after a manual Clear — reset cursor if so.
         if (m_logCursor > total) m_logCursor = 0;
         for (int i = m_logCursor; i < total; ++i)
             m_logPage->appendLog(QString::fromUtf8(snap[static_cast<size_t>(i)].c_str()));
