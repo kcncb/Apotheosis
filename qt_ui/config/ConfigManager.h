@@ -238,8 +238,8 @@ public:
     void setFlashlightOpenRadius(int v);
     int flashlightMinLocalContrast() const;
     void setFlashlightMinLocalContrast(int v);
-    int flashlightTargetClassId() const;
-    void setFlashlightTargetClassId(int v);
+    int flashlightMaxSpots() const;
+    void setFlashlightMaxSpots(int v);
 
     // Glass filter (玻璃后目标抑制)
     bool glassFilterShowPreview() const;

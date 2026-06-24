@@ -72,6 +72,7 @@ void process_frame(const cv::Mat& bgrFrame)
         settings.min_circularity      = config.flashlight_min_circularity;
         settings.open_radius          = config.flashlight_open_radius;
         settings.min_local_contrast   = config.flashlight_min_local_contrast;
+        settings.max_spots            = config.flashlight_max_spots;
     }
     if (!enabled)
     {

@@ -7,12 +7,10 @@
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
 
-#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
 #include <QScrollArea>
 #include <QSpinBox>
-#include <QTimer>
 #include <QVBoxLayout>
 
 #include <mutex>
@@ -43,40 +41,30 @@ FlashlightPage::FlashlightPage(QWidget* parent)
         QStringLiteral("寻光 - 说明"),
         QStringLiteral("info"));
     auto* intro = new QLabel(tr(
-        "在整个画面里搜亮度满足阈值的圆形光斑(手电筒/闪光筒眩光)。命中后会作为"
-        "一条虚拟检测注入瞄准管线,以下面选定的「目标类别」上报 —— 该类别在「目标」"
-        "页设为 Aim 并且在某个瞄准热键里加进 aim_classes,即可像普通目标一样被瞄。\n\n"
-        "原理:亮度门限基于 max(B,G,R),不挑颜色;圆度过滤掉细长 UI 反光/天空块。"
-        "整套和准星找色 / 镭射找色相互独立,可并行运行。\n"
+        "在整个画面里搜亮度满足阈值、且呈径向衰减的圆形光斑(手电筒/闪光筒眩光)。"
+        "命中后固定作为「shoudiantong」类别注入瞄准管线 —— 在「瞄准热键」页把 "
+        "shoudiantong 加进该热键的瞄准类别并排好优先级,即可像普通目标一样被瞄。\n\n"
+        "原理:亮度门限基于 max(B,G,R),不挑颜色;靠圆度 + 径向衰减(核心比外圈亮、"
+        "向外递减)判定,远近通吃,不再依赖固定像素半径。结果去重后最多取「最多识别"
+        "数量」个,远处不会误识别成一大片。\n"
         "每个热键单独开关在「瞄准热键」页的「启用寻光检测」。"));
     intro->setWordWrap(true);
     introCard->contentLayout()->addWidget(intro);
     layout->addWidget(introCard);
 
     // ====================================================================
-    // Target class card
+    // Routing hint card — the halo is filed under a fixed class now
     // ====================================================================
     auto* classCard = new CardWidget(
-        QStringLiteral("目标类别"),
+        QStringLiteral("瞄准类别"),
         QStringLiteral("target"));
     auto* classHint = new QLabel(tr(
-        "把检测到的光斑归类为哪个类别。该类别需要在「目标」页存在 (Aim 或 Filter "
-        "都可以,Delete 会被直接丢弃)。-1 = 不分类,瞄准管线收不到这个虚拟目标。"));
+        "光斑固定作为「shoudiantong」类别注入,这里无需选类。\n"
+        "到「瞄准热键」页 → 选中热键 → 在瞄准类别里添加 shoudiantong,"
+        "拖到合适位置定优先级(和模型类完全一样)。不添加 = 检测照跑、但不会瞄它。"));
     classHint->setWordWrap(true);
     classHint->setStyleSheet(QStringLiteral("color: #888;"));
     classCard->contentLayout()->addWidget(classHint);
-
-    m_classCombo = new QComboBox(this);
-    classCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("光斑类别"), m_classCombo));
-    rebuildClassCombo();
-    connect(m_classCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int){
-                const int cls = m_classCombo->currentData().toInt();
-                ConfigManager::instance().setFlashlightTargetClassId(cls);
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_target_class_id = cls;
-            });
     layout->addWidget(classCard);
 
     // ====================================================================
@@ -185,44 +173,28 @@ FlashlightPage::FlashlightPage(QWidget* parent)
                 config.flashlight_min_local_contrast = v;
             });
 
+    // 最多识别数量 — 去重后最多保留几个光斑,封顶避免远处误识别成一片
+    paramCard->contentLayout()->addWidget(
+        FormKit::sliderRow(QStringLiteral("最多识别数量"),
+                           1, 8, cfg.flashlightMaxSpots(),
+                           m_maxSpotsSlider, m_maxSpots));
+    m_maxSpots->setToolTip(tr(
+        "一帧最多上报几个光斑(按置信度排序、去重后截断)。\n"
+        "瞄准只会用其中最佳的一个 —— 这里主要是封顶:远距离误识别一大片时,"
+        "不会把一堆幻影目标塞给瞄准管线。默认 3。"));
+    m_maxSpotsSlider->setToolTip(m_maxSpots->toolTip());
+    connect(m_maxSpots, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [](int v) {
+                ConfigManager::instance().setFlashlightMaxSpots(v);
+                std::lock_guard<std::recursive_mutex> lk(configMutex);
+                config.flashlight_max_spots = v;
+            });
+
     layout->addWidget(paramCard);
     layout->addStretch();
 
-    // Re-poll the class list every second — TargetPage may add/remove
-    // entries while we're up. The combo's currentData (= class_id) survives
-    // a rebuild because we re-select by id, not by row.
-    auto* poll = new QTimer(this);
-    poll->setInterval(1000);
-    connect(poll, &QTimer::timeout, this, &FlashlightPage::rebuildClassCombo);
-    poll->start();
-
     loadConfig();
     connect(&cfg, &ConfigManager::configLoaded, this, &FlashlightPage::loadConfig);
-}
-
-void FlashlightPage::rebuildClassCombo() {
-    const int current = m_classCombo->currentData().isValid()
-        ? m_classCombo->currentData().toInt()
-        : ConfigManager::instance().flashlightTargetClassId();
-
-    m_classCombo->blockSignals(true);
-    m_classCombo->clear();
-    m_classCombo->addItem(QStringLiteral("(-1) 不分类 — 不注入虚拟目标"), -1);
-    {
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        for (const auto& cf : config.class_filters) {
-            QString name = cf.class_name.empty()
-                ? QStringLiteral("class_%1").arg(cf.class_id)
-                : QString::fromStdString(cf.class_name);
-            m_classCombo->addItem(QStringLiteral("(%1) %2").arg(cf.class_id).arg(name),
-                                  cf.class_id);
-        }
-    }
-    // Restore by id.
-    int idx = m_classCombo->findData(current);
-    if (idx < 0) idx = 0;
-    m_classCombo->setCurrentIndex(idx);
-    m_classCombo->blockSignals(false);
 }
 
 void FlashlightPage::loadConfig() {
@@ -234,5 +206,5 @@ void FlashlightPage::loadConfig() {
     m_circularity->setValue(static_cast<double>(cfg.flashlightMinCircularity()));
     m_openRadius->setValue(cfg.flashlightOpenRadius());
     m_localContrast->setValue(cfg.flashlightMinLocalContrast());
-    rebuildClassCombo();
+    m_maxSpots->setValue(cfg.flashlightMaxSpots());
 }

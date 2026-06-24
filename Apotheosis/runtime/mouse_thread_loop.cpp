@@ -320,11 +320,15 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
 
         // Flashlight halo injection. The detector runs on the capture thread
-        // and publishes a separate snapshot; we splice the halo into the
-        // local detection arrays as a virtual class so the existing target
-        // tracker, FOV gates and smart trigger handle it identically to a
-        // real model detection. Per-hotkey opt-in is checked inside the
-        // runtime, so just gate on freshness + a configured class_id here.
+        // and publishes a separate snapshot; we splice the halo into the local
+        // detection arrays under the fixed `shoudiantong` class
+        // (kFlashlightClassId) so the existing target tracker, FOV gates and
+        // smart trigger handle it identically to a real model detection.
+        // Per-hotkey opt-in (whether the detector even runs) is enforced in the
+        // runtime; whether the halo is actually aimed is decided by the user
+        // adding `shoudiantong` to this hotkey's aim_classes. So gate only on
+        // freshness here — an unrouted class is ignored by the tracker, exactly
+        // like any non-aim model class.
         {
             const auto fs = flashlight_runtime::read();
             const auto now = std::chrono::steady_clock::now();
@@ -332,15 +336,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 fs.valid && fs.ts.time_since_epoch().count() != 0 &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - fs.ts).count() < flashlight_runtime::kFreshnessMs;
-            int target_cls = -1;
-            {
-                std::lock_guard<std::recursive_mutex> cfg(configMutex);
-                target_cls = config.flashlight_target_class_id;
-            }
-            if (fresh && target_cls >= 0 && fs.box.area() > 0)
+            if (fresh && fs.box.area() > 0)
             {
                 boxes.push_back(fs.box);
-                classes.push_back(target_cls);
+                classes.push_back(kFlashlightClassId);
                 confidences.push_back(std::clamp(fs.confidence, 0.0f, 1.0f));
                 hasNewDetection = true;
             }

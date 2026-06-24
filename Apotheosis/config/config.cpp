@@ -417,13 +417,13 @@ bool Config::loadConfig(const std::string& filename)
     flashlight_show_preview         = get_bool("",   "flashlight_show_preview", false);
     flashlight_brightness_threshold = std::clamp(get_long("", "flashlight_brightness_threshold", 220), 0, 255);
     flashlight_min_radius           = std::clamp(get_long("", "flashlight_min_radius", 5),   1, 4096);
-    flashlight_max_radius           = std::clamp(get_long("", "flashlight_max_radius", 100), 1, 4096);
+    flashlight_max_radius           = std::clamp(get_long("", "flashlight_max_radius", 200), 1, 4096);
     if (flashlight_max_radius < flashlight_min_radius)
         flashlight_max_radius = flashlight_min_radius;
     flashlight_min_circularity      = std::clamp(static_cast<float>(get_double("", "flashlight_min_circularity", 0.60)), 0.0f, 1.0f);
     flashlight_open_radius          = std::clamp(get_long("", "flashlight_open_radius", 1), 0, 9);
     flashlight_min_local_contrast   = std::clamp(get_long("", "flashlight_min_local_contrast", 30), 0, 255);
-    flashlight_target_class_id      = static_cast<int>(get_long("", "flashlight_target_class_id", -1));
+    flashlight_max_spots            = std::clamp(get_long("", "flashlight_max_spots", 3), 1, 16);
 
     // ---- Glass filter ----
     glass_filter_show_preview  = get_bool("",   "glass_filter_show_preview", false);
@@ -607,6 +607,9 @@ bool Config::loadConfig(const std::string& filename)
                 return a.class_id < b.class_id;
             });
     }
+    // Synthetic flashlight aim class — keep it present even on a fresh config
+    // or one saved before this feature existed.
+    ensure_flashlight_class();
 
     // ---------- Hotkeys ----------
     hotkeys.clear();
@@ -979,7 +982,7 @@ bool Config::saveConfig(const std::string& filename)
         << "flashlight_min_circularity = "      << flashlight_min_circularity                   << "\n"
         << "flashlight_open_radius = "          << flashlight_open_radius                       << "\n"
         << "flashlight_min_local_contrast = "   << flashlight_min_local_contrast                << "\n"
-        << "flashlight_target_class_id = "      << flashlight_target_class_id                   << "\n"
+        << "flashlight_max_spots = "            << flashlight_max_spots                         << "\n"
         << "glass_filter_show_preview = "       << to_bool_str(glass_filter_show_preview)       << "\n"
         << "glass_edge_ring_frac = "            << glass_edge_ring_frac                         << "\n"
         << "glass_coverage_threshold = "        << glass_coverage_threshold                     << "\n"
@@ -1166,6 +1169,23 @@ void Config::sync_class_filters_from_model(int class_count,
 
         class_filters.push_back(std::move(st));
     }
+
+    // The rebuild above only emits 0..class_count-1, so re-add the synthetic
+    // flashlight class it just dropped.
+    ensure_flashlight_class();
+}
+
+void Config::ensure_flashlight_class()
+{
+    for (const auto& cf : class_filters)
+        if (cf.class_id == kFlashlightClassId)
+            return; // already present (incl. a user-chosen bucket) — leave it
+
+    ClassFilterState st;
+    st.class_id   = kFlashlightClassId;
+    st.class_name = kFlashlightClassName;
+    st.bucket     = ClassBucket::Aim; // default routable; user may rebucket later
+    class_filters.push_back(std::move(st));
 }
 
 

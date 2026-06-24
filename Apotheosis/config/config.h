@@ -23,6 +23,16 @@ struct ClassFilterState
     ClassBucket bucket = ClassBucket::Delete;
 };
 
+// Reserved synthetic class id for the flashlight halo "detection". Kept far
+// above any real model class count so it can never collide, and it only ever
+// flows into the engine's eligible-class set / priority map (hash lookups) and
+// the preview's "#id" label — never an array index — so the large value is
+// safe. The fixed name lets the user route it from the aim-class UI exactly
+// like a model class: Config::ensure_flashlight_class() seeds a class_filters
+// row {kFlashlightClassId, "shoudiantong", Aim} that survives model reloads.
+inline constexpr int         kFlashlightClassId   = 9000;
+inline constexpr const char* kFlashlightClassName = "shoudiantong";
+
 // Per-hotkey class selection: a class the user has enabled for THIS hotkey,
 // with an optional per-class Y offset (0.0 = top of the detection box,
 // 1.0 = bottom). X is always box center.
@@ -452,15 +462,16 @@ public:
     bool  flashlight_show_preview = false;     // overlay debug toggle
     int   flashlight_brightness_threshold = 220; // grey-level on max(B,G,R) [0,255]
     int   flashlight_min_radius = 5;           // min equiv-area radius (det px)
-    int   flashlight_max_radius = 100;         // max equiv-area radius (det px)
+    int   flashlight_max_radius = 200;         // max equiv-area radius (det px); wide so near halos pass — falloff gate handles selectivity
     float flashlight_min_circularity = 0.60f;  // 4πA/P² floor (1.0 = perfect circle)
     int   flashlight_open_radius = 1;          // MORPH_OPEN px before CC (0=off)
-    int   flashlight_min_local_contrast = 30;  // sky-rejection: inner_mean − ring_mean floor (0=off)
-    // Class id the synthesized halo "detection" is filed under so the user
-    // can route it via the existing per-hotkey aim_classes (priority, y-offset,
-    // smart-trigger gating, etc.). -1 = unassigned (mouse loop still appends
-    // it but the user must tag a class for any aim hotkey to pick it up).
-    int   flashlight_target_class_id = -1;
+    int   flashlight_min_local_contrast = 30;  // sky-rejection: core_mean − ring_mean floor, radius-proportional (0=off)
+    // Hard cap on simultaneously reported halos (after dedup, by descending
+    // confidence). Bounds the "tuned for near flood → swarm of phantoms at
+    // distance" failure. The mouse loop still injects only the single best one,
+    // filed under the fixed `shoudiantong` aim class (kFlashlightClassId);
+    // route its priority from the aim-class UI like any model class.
+    int   flashlight_max_spots = 3;
 
     // ---- Glass filter (穿不透玻璃后的人形抑制) ----------------------------
     // 三角洲里有打不穿的玻璃,模型只看轮廓也会识别出后面的人,锁过去白浪
@@ -501,6 +512,13 @@ public:
     // - update class_name when the model supplies a better one
     void sync_class_filters_from_model(int class_count,
                                        const std::vector<std::string>& class_names);
+
+    // Guarantee the synthetic flashlight aim class ({kFlashlightClassId,
+    // "shoudiantong", Aim}) exists in class_filters. Idempotent. Called after
+    // loadConfig() and after sync_class_filters_from_model() (which otherwise
+    // rebuilds the table from 0..class_count-1 and would drop it), so the
+    // flashlight stays routable in the aim-class UI across model reloads.
+    void ensure_flashlight_class();
 
     // Return the first hotkey whose keys list includes any currently-pressed
     // physical key. Caller owns the pressed-test predicate (keyboard_listener

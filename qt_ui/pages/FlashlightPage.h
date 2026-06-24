@@ -5,7 +5,6 @@
 class QSlider;
 class QSpinBox;
 class QDoubleSpinBox;
-class QComboBox;
 class ToggleSwitch;
 
 class FlashlightPage : public QWidget {
@@ -16,7 +15,6 @@ public:
 
 private:
     void loadConfig();
-    void rebuildClassCombo();
 
     ToggleSwitch*   m_showPreview{};
     QSpinBox*       m_threshold{};
@@ -31,5 +29,6 @@ private:
     QSlider*        m_openRadiusSlider{};
     QSpinBox*       m_localContrast{};
     QSlider*        m_localContrastSlider{};
-    QComboBox*      m_classCombo{};
+    QSpinBox*       m_maxSpots{};
+    QSlider*        m_maxSpotsSlider{};
 };

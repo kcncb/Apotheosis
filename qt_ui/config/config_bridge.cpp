@@ -172,7 +172,7 @@ void ConfigBridge::syncToRuntime() {
     config.flashlight_min_circularity      = cm.flashlightMinCircularity();
     config.flashlight_open_radius          = cm.flashlightOpenRadius();
     config.flashlight_min_local_contrast   = cm.flashlightMinLocalContrast();
-    config.flashlight_target_class_id      = cm.flashlightTargetClassId();
+    config.flashlight_max_spots            = cm.flashlightMaxSpots();
 
     // --- Glass filter ---
     config.glass_filter_show_preview = cm.glassFilterShowPreview();
@@ -360,7 +360,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setFlashlightMinCircularity(config.flashlight_min_circularity);
     cm.setFlashlightOpenRadius(config.flashlight_open_radius);
     cm.setFlashlightMinLocalContrast(config.flashlight_min_local_contrast);
-    cm.setFlashlightTargetClassId(config.flashlight_target_class_id);
+    cm.setFlashlightMaxSpots(config.flashlight_max_spots);
 
     // --- Glass filter ---
     cm.setGlassFilterShowPreview(config.glass_filter_show_preview);

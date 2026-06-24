@@ -1080,7 +1080,7 @@ void ConfigManager::setFlashlightMinRadius(int v) {
 }
 
 int ConfigManager::flashlightMaxRadius() const {
-    return m_settings->value("Flashlight/flashlight_max_radius", 100).toInt();
+    return m_settings->value("Flashlight/flashlight_max_radius", 200).toInt();
 }
 void ConfigManager::setFlashlightMaxRadius(int v) {
     m_settings->setValue("Flashlight/flashlight_max_radius", v);
@@ -1111,11 +1111,11 @@ void ConfigManager::setFlashlightMinLocalContrast(int v) {
     emit configChanged();
 }
 
-int ConfigManager::flashlightTargetClassId() const {
-    return m_settings->value("Flashlight/flashlight_target_class_id", -1).toInt();
+int ConfigManager::flashlightMaxSpots() const {
+    return m_settings->value("Flashlight/flashlight_max_spots", 3).toInt();
 }
-void ConfigManager::setFlashlightTargetClassId(int v) {
-    m_settings->setValue("Flashlight/flashlight_target_class_id", v);
+void ConfigManager::setFlashlightMaxSpots(int v) {
+    m_settings->setValue("Flashlight/flashlight_max_spots", v);
     emit configChanged();
 }
 
