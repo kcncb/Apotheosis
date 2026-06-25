@@ -36,6 +36,7 @@
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
+#include "pages/LinksPage.h"
 #include "capture/auto_capture.h"
 
 namespace {
@@ -68,6 +69,8 @@ const QVector<GroupDef>& navGroups() {
           QStringLiteral("调试")},
          {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
           QStringLiteral("bug")}},
+        // 「找母狗」:无二级导航,落地页是一排快速跳转按钮(LinksPage)。
+        {QStringLiteral("找母狗"), {}, {}},
     };
     return kGroups;
 }
@@ -142,11 +145,18 @@ void MainWindow::setupPages() {
         range.icons = g.icons;
 
         if (g.subs.isEmpty()) {
-            // 概览 仪表盘:无子页,作为该分组唯一落地页。
-            m_overviewPage = new OverviewPage();
-            connect(m_overviewPage, &OverviewPage::startStopRequested,
-                    this, &MainWindow::onHeroToggleInference);
-            m_pageStack->addWidget(m_overviewPage);
+            // 无二级导航的一级分组:整组只有一个落地页。
+            QWidget* landing = nullptr;
+            if (g.name == QStringLiteral("找母狗")) {
+                landing = new LinksPage();
+            } else {
+                // 概览 仪表盘。
+                m_overviewPage = new OverviewPage();
+                connect(m_overviewPage, &OverviewPage::startStopRequested,
+                        this, &MainWindow::onHeroToggleInference);
+                landing = m_overviewPage;
+            }
+            m_pageStack->addWidget(landing);
             range.count = 1;
             ++pageIndex;
         } else {

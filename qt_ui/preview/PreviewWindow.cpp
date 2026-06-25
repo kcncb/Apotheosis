@@ -1,6 +1,7 @@
 #include "preview/PreviewWindow.h"
 
 #include "pages/OverviewPage.h"
+#include "pages/LinksPage.h"
 #include "widgets/IconFont.h"
 #include "widgets/SideNav.h"
 #include "widgets/TopNavBar.h"
@@ -43,6 +44,8 @@ const QVector<GroupDef>& groups() {
           QStringLiteral("调试")},
          {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
           QStringLiteral("bug")}},
+        // 「找母狗」:无二级导航,落地页是一排快速跳转按钮(LinksPage)。
+        {QStringLiteral("找母狗"), {}, {}},
     };
     return kGroups;
 }
@@ -110,8 +113,12 @@ void PreviewWindow::buildPages() {
         r.subs = g.subs;
         r.icons = g.icons;
         if (g.subs.isEmpty()) {
-            m_overview = new OverviewPage;
-            m_stack->addWidget(m_overview);
+            if (g.name == QStringLiteral("找母狗")) {
+                m_stack->addWidget(new LinksPage);
+            } else {
+                m_overview = new OverviewPage;
+                m_stack->addWidget(m_overview);
+            }
             ++index;
         } else {
             for (int s = 0; s < g.subs.size(); ++s) {
