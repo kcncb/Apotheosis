@@ -3,6 +3,10 @@
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 
+#include "crosshair/color_picker.h"
+
+#include <algorithm>
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -14,6 +18,7 @@
 #include <QSpinBox>
 #include <QStyledItemDelegate>
 #include <QTableWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -189,6 +194,27 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     m_rectH->setToolTip(hSlider->toolTip());
     connect(m_rectH, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setCrosshairRectH(v); });
+
+    // 取色:点「取色」后到「检测预览」窗口点一下准星,自动把该处颜色加进下面的颜色表。
+    auto* pickRow = new QHBoxLayout;
+    m_pickColorBtn = new QPushButton(QStringLiteral("取色"));
+    m_pickColorBtn->setToolTip(QStringLiteral(
+        "点击后切到「检测预览」窗口,在准星颜色上单击一下:\n"
+        "自动取该处 5×5 区域的 HSV(中位数)并按宽容差加一行到下面的颜色表"
+        "(红色跨 0/179 接缝时自动拆成两行)。\n"
+        "预览里右键、或再点一次本按钮可取消;预览窗口没开时会自动打开。"));
+    auto* pickHint = new QLabel(QStringLiteral(
+        "在预览画面点一下取样(固定 5×5 中位数,自动加色)"));
+    pickHint->setStyleSheet(QStringLiteral("color:#888;"));
+    pickRow->addWidget(m_pickColorBtn);
+    pickRow->addWidget(pickHint);
+    pickRow->addStretch();
+    regionCard->contentLayout()->addLayout(pickRow);
+
+    m_pickTimer = new QTimer(this);
+    m_pickTimer->setInterval(120);
+    connect(m_pickTimer, &QTimer::timeout, this, &CrosshairPage::pollPickedColor);
+    connect(m_pickColorBtn, &QPushButton::clicked, this, &CrosshairPage::toggleColorPick);
 
     layout->addWidget(regionCard);
 
@@ -652,6 +678,78 @@ void CrosshairPage::saveCrosshairColors() {
         colors.append(c);
     }
     ConfigManager::instance().setCrosshairColors(colors);
+}
+
+// ---- Crosshair colour eyedropper ----
+
+void CrosshairPage::toggleColorPick() {
+    if (m_picking) {
+        crosshair::CancelColorPick();
+        finishPicking();
+        return;
+    }
+    // Need the OpenCV "检测预览" window open to click on; open it if the user
+    // hasn't. (Left on afterward — they can toggle it off on the 会话/Debug page.)
+    auto& cm = ConfigManager::instance();
+    if (!cm.showWindow())
+        cm.setShowWindow(true);
+
+    crosshair::ArmColorPick();
+    m_picking = true;
+    m_pickColorBtn->setText(QStringLiteral("取消取色"));
+    m_pickColorBtn->setStyleSheet(QStringLiteral("color:#D23B3B; font-weight:600;"));
+    m_pickTimer->start();
+}
+
+void CrosshairPage::pollPickedColor() {
+    int h = 0, s = 0, v = 0;
+    if (crosshair::TakePickedColor(h, s, v)) {
+        applyPickedColor(h, s, v);
+        finishPicking();
+    } else if (!crosshair::IsColorPickArmed()) {
+        // Disarmed without a result (e.g. right-click cancel inside the preview).
+        finishPicking();
+    }
+}
+
+void CrosshairPage::applyPickedColor(int h, int s, int v) {
+    // "宽" tolerance, per the agreed design: H ±15, S/V lower = sample − 70
+    // (clamped to 0), upper = 255.
+    constexpr int kHueHalf = 15;
+    constexpr int kSvMargin = 70;
+    const int sLo = std::max(0, s - kSvMargin);
+    const int vLo = std::max(0, v - kSvMargin);
+    const QString base = QStringLiteral("取色 H%1 S%2 V%3").arg(h).arg(s).arg(v);
+
+    const int lo = h - kHueHalf;
+    const int hi = h + kHueHalf;
+
+    m_colorTable->blockSignals(true);
+    if (lo < 0) {
+        // Hue band wraps below 0 (reddish): [0, hi] + [180+lo, 179].
+        insertColorRow(m_colorTable, base + QStringLiteral(" 低"), true,
+                       0, hi, sLo, 255, vLo, 255);
+        insertColorRow(m_colorTable, base + QStringLiteral(" 高"), true,
+                       180 + lo, 179, sLo, 255, vLo, 255);
+    } else if (hi > 179) {
+        // Hue band wraps above 179 (reddish): [0, hi-180] + [lo, 179].
+        insertColorRow(m_colorTable, base + QStringLiteral(" 低"), true,
+                       0, hi - 180, sLo, 255, vLo, 255);
+        insertColorRow(m_colorTable, base + QStringLiteral(" 高"), true,
+                       lo, 179, sLo, 255, vLo, 255);
+    } else {
+        insertColorRow(m_colorTable, base, true, lo, hi, sLo, 255, vLo, 255);
+    }
+    m_colorTable->blockSignals(false);
+    saveCrosshairColors();
+}
+
+void CrosshairPage::finishPicking() {
+    m_picking = false;
+    if (m_pickTimer)
+        m_pickTimer->stop();
+    m_pickColorBtn->setText(QStringLiteral("取色"));
+    m_pickColorBtn->setStyleSheet(QString());
 }
 
 // ---- Laser color helpers ----

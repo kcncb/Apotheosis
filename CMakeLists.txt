@@ -112,6 +112,7 @@ set(APP_SOURCES
     "${SRC_DIR}/capture/avermedia/avermedia_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/crosshair/crosshair_detector.cpp"
+    "${SRC_DIR}/crosshair/color_picker.cpp"
     "${SRC_DIR}/crosshair/laser_detector.cpp"
     "${SRC_DIR}/crosshair/flashlight_detector.cpp"
     "${SRC_DIR}/crosshair/flashlight_runtime.cpp"

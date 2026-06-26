@@ -8,6 +8,7 @@ class QDoubleSpinBox;
 class QTableWidget;
 class QPushButton;
 class QComboBox;
+class QTimer;
 
 class CrosshairPage : public QWidget {
     Q_OBJECT
@@ -25,6 +26,14 @@ private:
     void removeCrosshairSelectedRows();
     void addCrosshairPreset();
     void saveCrosshairColors();
+
+    // ---- Crosshair colour eyedropper (取色) ----
+    // Arm/cancel pick mode, poll the OpenCV preview thread for a result, and
+    // turn one sampled HSV point into a (wide-tolerance) band row.
+    void toggleColorPick();
+    void pollPickedColor();
+    void applyPickedColor(int h, int s, int v);
+    void finishPicking();
 
     // ---- Laser color table helpers ----
     void addLaserColorRow(const QString& name, bool enabled,
@@ -49,6 +58,11 @@ private:
     QPushButton* m_addColorBtn{};
     QPushButton* m_removeColorBtn{};
     QComboBox* m_presetCombo{};
+
+    // ---- Crosshair colour eyedropper ----
+    QPushButton* m_pickColorBtn{};
+    QTimer* m_pickTimer{};
+    bool m_picking = false;
 
     // ---- Laser sampling region & params ----
     QSpinBox* m_laserRectW{};

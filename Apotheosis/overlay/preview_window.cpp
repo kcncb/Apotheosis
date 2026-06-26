@@ -16,6 +16,7 @@
 #include "Apotheosis.h"
 #include "capture.h"
 #include "config/config.h"
+#include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
 #include "crosshair/flashlight_detector.h"
 #include "crosshair/laser_detector.h"
@@ -32,6 +33,19 @@ constexpr const char* kWindowName = "Detection Preview";
 
 std::thread g_thread;
 std::atomic<bool> g_run{ false };
+
+// Eyedropper ("取色") plumbing. The OpenCV mouse callback runs on THIS preview
+// thread (HighGUI dispatches it from cv::pollKey below), so the cursor state is
+// only ever touched here and needs no locking against the render loop. The
+// clean frame, however, is what the callback samples: we stash a copy of each
+// shown frame BEFORE overlays are drawn so a pick never reads the boxes / ROI
+// lines painted on top. The arm flag and the picked result cross to the Qt
+// thread via crosshair/color_picker (its own synchronisation).
+std::mutex g_clean_mutex;
+cv::Mat    g_clean_frame;          // last frame shown, sans overlays
+int        g_pick_cursor_x = -1;   // preview-thread only
+int        g_pick_cursor_y = -1;
+bool       g_pick_cursor_inside = false;
 
 cv::Scalar bgr(int b, int g, int r) { return cv::Scalar(b, g, r); }
 
@@ -484,6 +498,84 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     draw_text_with_bg(canvas, buf, cv::Point(6, 16), bgr(245, 245, 245), bgr(0, 0, 0));
 }
 
+// Mouse callback for the preview window. HighGUI runs this on the preview
+// thread during cv::pollKey. Tracks the cursor (to draw the sample marker) and,
+// when the eyedropper is armed, turns a left click into an HSV sample taken
+// from the stashed clean frame. Right click cancels. WINDOW_NORMAL already maps
+// (x, y) into image-pixel space, so no manual de-scaling is needed.
+void on_mouse(int event, int x, int y, int /*flags*/, void* /*userdata*/)
+{
+    if (event == cv::EVENT_MOUSEMOVE)
+    {
+        g_pick_cursor_x = x;
+        g_pick_cursor_y = y;
+        g_pick_cursor_inside = true;
+        return;
+    }
+
+    if (!crosshair::IsColorPickArmed())
+        return;
+
+    if (event == cv::EVENT_RBUTTONDOWN)
+    {
+        crosshair::CancelColorPick();
+        return;
+    }
+
+    if (event == cv::EVENT_LBUTTONDOWN)
+    {
+        cv::Mat clean;
+        {
+            std::lock_guard<std::mutex> lk(g_clean_mutex);
+            if (!g_clean_frame.empty()) g_clean_frame.copyTo(clean);
+        }
+        int h = 0, s = 0, v = 0;
+        if (crosshair::SampleRegionHSV(clean, x, y, crosshair::kPickHalf, h, s, v))
+            crosshair::SubmitPickedColor(h, s, v);
+        // If sampling failed (no frame yet) stay armed so the next click retries.
+    }
+}
+
+// Draw the eyedropper marker: a translucent disc + crisp ring at the cursor and
+// the exact 5x5 sample footprint, plus a one-line hint. No-op unless armed.
+// ASCII only — OpenCV putText can't render CJK (the Chinese UI lives in Qt).
+void draw_pick_overlay(cv::Mat& canvas)
+{
+    if (canvas.empty() || canvas.type() != CV_8UC3) return;
+    if (!crosshair::IsColorPickArmed()) return;
+
+    draw_text_with_bg(canvas, "PICK: click=sample  right-click=cancel",
+                      cv::Point(6, canvas.rows - 8), bgr(245, 245, 245), bgr(0, 0, 0));
+
+    if (!g_pick_cursor_inside) return;
+
+    const int cx = g_pick_cursor_x;
+    const int cy = g_pick_cursor_y;
+    const int half = crosshair::kPickHalf;
+    const int ringR = half + 4;
+
+    // Translucent cyan disc so the spot under the cursor is obvious without
+    // hiding the pixels being sampled.
+    cv::Rect rr(cx - ringR, cy - ringR, 2 * ringR + 1, 2 * ringR + 1);
+    rr &= cv::Rect(0, 0, canvas.cols, canvas.rows);
+    if (rr.area() > 0)
+    {
+        cv::Mat patch = canvas(rr).clone();
+        cv::circle(patch, cv::Point(cx - rr.x, cy - rr.y), ringR,
+                   bgr(0, 220, 255), cv::FILLED, cv::LINE_AA);
+        cv::addWeighted(patch, 0.25, canvas(rr), 0.75, 0.0, canvas(rr));
+    }
+
+    cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
+    cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
+
+    // Exact sample footprint (5x5).
+    cv::Rect foot(cx - half, cy - half, 2 * half + 1, 2 * half + 1);
+    foot &= cv::Rect(0, 0, canvas.cols, canvas.rows);
+    if (foot.area() > 0)
+        cv::rectangle(canvas, foot, bgr(255, 255, 255), 1, cv::LINE_AA);
+}
+
 void preview_loop()
 {
     bool window_open = false;
@@ -512,6 +604,10 @@ void preview_loop()
             try {
                 cv::namedWindow(kWindowName, cv::WINDOW_NORMAL | cv::WINDOW_KEEPRATIO);
                 cv::setWindowProperty(kWindowName, cv::WND_PROP_TOPMOST, 0);
+                // (Re)attach the eyedropper callback: it's lost whenever the
+                // window is destroyed/recreated (e.g. user closed the OS X).
+                cv::setMouseCallback(kWindowName, on_mouse, nullptr);
+                g_pick_cursor_inside = false;
                 window_open = true;
             } catch (...) {
                 window_open = false;
@@ -539,7 +635,14 @@ void preview_loop()
         }
         else
         {
+            // Stash a clean copy for the eyedropper BEFORE overlays are drawn,
+            // so a colour pick samples the real frame, not the boxes/ROI lines.
+            {
+                std::lock_guard<std::mutex> lk(g_clean_mutex);
+                frameCopy.copyTo(g_clean_frame);
+            }
             render_overlays(frameCopy, cfg);
+            draw_pick_overlay(frameCopy);
             cv::imshow(kWindowName, frameCopy);
         }
 
