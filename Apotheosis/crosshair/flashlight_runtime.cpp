@@ -151,8 +151,8 @@ void process_frame(const cv::Mat& bgrFrame)
             {
                 const int cx = std::clamp(static_cast<int>(std::lround(s.center.x)), 0, depthN.cols - 1);
                 const int cy = std::clamp(static_cast<int>(std::lround(s.center.y)), 0, depthN.rows - 1);
-                const bool far = depthN.at<uint8_t>(cy, cx) <= tuning.depth.far_level;
-                if (far)
+                const bool is_far = depthN.at<uint8_t>(cy, cx) <= tuning.depth.far_level;
+                if (is_far)
                 {
                     if (tuning.depth.mode == 2 && sky_present)
                         passed_depth = false; // hard-reject sun/sky (loop can still

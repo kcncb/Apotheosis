@@ -9,6 +9,7 @@
 
 #include <QLabel>
 #include <QScrollArea>
+#include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
