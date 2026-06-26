@@ -37,10 +37,6 @@ bool ConfigManager::load(const QString& path) {
 
         setDepthInferenceEnabled(true);
         setDepthModelPath("depth_anything_v2.engine");
-        setDepthFps(100);
-        setDepthMaskEnabled(false);
-        setDepthMaskNearPercent(20);
-        setDepthMaskAlpha(90);
 
         setOverlayOpacity(240);
         setOverlayUiScale(1.0f);
@@ -530,42 +526,6 @@ void ConfigManager::setDepthModelPath(const QString& v) {
     emit configChanged();
 }
 
-int ConfigManager::depthFps() const {
-    return m_settings->value("Depth/depth_fps", 100).toInt();
-}
-
-void ConfigManager::setDepthFps(int v) {
-    m_settings->setValue("Depth/depth_fps", v);
-    emit configChanged();
-}
-
-bool ConfigManager::depthMaskEnabled() const {
-    return m_settings->value("Depth/depth_mask_enabled", false).toBool();
-}
-
-void ConfigManager::setDepthMaskEnabled(bool v) {
-    m_settings->setValue("Depth/depth_mask_enabled", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthMaskNearPercent() const {
-    return m_settings->value("Depth/depth_mask_near_percent", 20).toInt();
-}
-
-void ConfigManager::setDepthMaskNearPercent(int v) {
-    m_settings->setValue("Depth/depth_mask_near_percent", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthMaskAlpha() const {
-    return m_settings->value("Depth/depth_mask_alpha", 90).toInt();
-}
-
-void ConfigManager::setDepthMaskAlpha(int v) {
-    m_settings->setValue("Depth/depth_mask_alpha", v);
-    emit configChanged();
-}
-
 int ConfigManager::depthMaskFps() const {
     return m_settings->value("Depth/depth_mask_fps", 5).toInt();
 }
@@ -599,78 +559,6 @@ float ConfigManager::depthNormClipHighPct() const {
 
 void ConfigManager::setDepthNormClipHighPct(float v) {
     m_settings->setValue("Depth/depth_norm_clip_high_pct", static_cast<double>(v));
-    emit configChanged();
-}
-
-bool ConfigManager::depthShowHeatmap() const {
-    return m_settings->value("Depth/depth_show_heatmap", false).toBool();
-}
-
-void ConfigManager::setDepthShowHeatmap(bool v) {
-    m_settings->setValue("Depth/depth_show_heatmap", v);
-    emit configChanged();
-}
-
-float ConfigManager::depthHeatmapGamma() const {
-    return m_settings->value("Depth/depth_heatmap_gamma", 1.0).toFloat();
-}
-
-void ConfigManager::setDepthHeatmapGamma(float v) {
-    m_settings->setValue("Depth/depth_heatmap_gamma", static_cast<double>(v));
-    emit configChanged();
-}
-
-bool ConfigManager::depthShowBboxDistance() const {
-    return m_settings->value("Depth/depth_show_bbox_distance", false).toBool();
-}
-
-void ConfigManager::setDepthShowBboxDistance(bool v) {
-    m_settings->setValue("Depth/depth_show_bbox_distance", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthMaskExpand() const {
-    return m_settings->value("Depth/depth_mask_expand", 0).toInt();
-}
-
-void ConfigManager::setDepthMaskExpand(int v) {
-    m_settings->setValue("Depth/depth_mask_expand", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthMaskHoldFrames() const {
-    return m_settings->value("Depth/depth_mask_hold_frames", 5).toInt();
-}
-
-void ConfigManager::setDepthMaskHoldFrames(int v) {
-    m_settings->setValue("Depth/depth_mask_hold_frames", v);
-    emit configChanged();
-}
-
-float ConfigManager::depthMaskSuppressionRatio() const {
-    return m_settings->value("Depth/depth_mask_suppression_ratio", 0.30).toFloat();
-}
-
-void ConfigManager::setDepthMaskSuppressionRatio(float v) {
-    m_settings->setValue("Depth/depth_mask_suppression_ratio", static_cast<double>(v));
-    emit configChanged();
-}
-
-bool ConfigManager::depthMaskInvert() const {
-    return m_settings->value("Depth/depth_mask_invert", false).toBool();
-}
-
-void ConfigManager::setDepthMaskInvert(bool v) {
-    m_settings->setValue("Depth/depth_mask_invert", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthColormap() const {
-    return m_settings->value("Depth/depth_colormap", 2).toInt();
-}
-
-void ConfigManager::setDepthColormap(int v) {
-    m_settings->setValue("Depth/depth_colormap", v);
     emit configChanged();
 }
 
@@ -1063,59 +951,27 @@ void ConfigManager::setFlashlightShowPreview(bool v) {
     emit configChanged();
 }
 
-int ConfigManager::flashlightBrightnessThreshold() const {
-    return m_settings->value("Flashlight/flashlight_brightness_threshold", 220).toInt();
+int ConfigManager::flashlightSensitivity() const {
+    return m_settings->value("Flashlight/flashlight_sensitivity", 50).toInt();
 }
-void ConfigManager::setFlashlightBrightnessThreshold(int v) {
-    m_settings->setValue("Flashlight/flashlight_brightness_threshold", v);
+void ConfigManager::setFlashlightSensitivity(int v) {
+    m_settings->setValue("Flashlight/flashlight_sensitivity", v);
     emit configChanged();
 }
 
-int ConfigManager::flashlightMinRadius() const {
-    return m_settings->value("Flashlight/flashlight_min_radius", 5).toInt();
+int ConfigManager::flashlightRejectStrength() const {
+    return m_settings->value("Flashlight/flashlight_reject_strength", 50).toInt();
 }
-void ConfigManager::setFlashlightMinRadius(int v) {
-    m_settings->setValue("Flashlight/flashlight_min_radius", v);
+void ConfigManager::setFlashlightRejectStrength(int v) {
+    m_settings->setValue("Flashlight/flashlight_reject_strength", v);
     emit configChanged();
 }
 
-int ConfigManager::flashlightMaxRadius() const {
-    return m_settings->value("Flashlight/flashlight_max_radius", 200).toInt();
+int ConfigManager::flashlightSpotSize() const {
+    return m_settings->value("Flashlight/flashlight_spot_size", 50).toInt();
 }
-void ConfigManager::setFlashlightMaxRadius(int v) {
-    m_settings->setValue("Flashlight/flashlight_max_radius", v);
-    emit configChanged();
-}
-
-float ConfigManager::flashlightMinCircularity() const {
-    return m_settings->value("Flashlight/flashlight_min_circularity", 0.60).toFloat();
-}
-void ConfigManager::setFlashlightMinCircularity(float v) {
-    m_settings->setValue("Flashlight/flashlight_min_circularity", static_cast<double>(v));
-    emit configChanged();
-}
-
-int ConfigManager::flashlightOpenRadius() const {
-    return m_settings->value("Flashlight/flashlight_open_radius", 1).toInt();
-}
-void ConfigManager::setFlashlightOpenRadius(int v) {
-    m_settings->setValue("Flashlight/flashlight_open_radius", v);
-    emit configChanged();
-}
-
-int ConfigManager::flashlightMinLocalContrast() const {
-    return m_settings->value("Flashlight/flashlight_min_local_contrast", 30).toInt();
-}
-void ConfigManager::setFlashlightMinLocalContrast(int v) {
-    m_settings->setValue("Flashlight/flashlight_min_local_contrast", v);
-    emit configChanged();
-}
-
-int ConfigManager::flashlightMaxSpots() const {
-    return m_settings->value("Flashlight/flashlight_max_spots", 3).toInt();
-}
-void ConfigManager::setFlashlightMaxSpots(int v) {
-    m_settings->setValue("Flashlight/flashlight_max_spots", v);
+void ConfigManager::setFlashlightSpotSize(int v) {
+    m_settings->setValue("Flashlight/flashlight_spot_size", v);
     emit configChanged();
 }
 
@@ -1129,27 +985,11 @@ void ConfigManager::setGlassFilterShowPreview(bool v) {
     emit configChanged();
 }
 
-float ConfigManager::glassEdgeRingFrac() const {
-    return m_settings->value("Glass/glass_edge_ring_frac", 0.15).toFloat();
+int ConfigManager::glassFilterStrength() const {
+    return m_settings->value("Glass/glass_filter_strength", 50).toInt();
 }
-void ConfigManager::setGlassEdgeRingFrac(float v) {
-    m_settings->setValue("Glass/glass_edge_ring_frac", static_cast<double>(v));
-    emit configChanged();
-}
-
-float ConfigManager::glassCoverageThreshold() const {
-    return m_settings->value("Glass/glass_coverage_threshold", 0.45).toFloat();
-}
-void ConfigManager::setGlassCoverageThreshold(float v) {
-    m_settings->setValue("Glass/glass_coverage_threshold", static_cast<double>(v));
-    emit configChanged();
-}
-
-int ConfigManager::glassMinBoxShortSide() const {
-    return m_settings->value("Glass/glass_min_box_short_side", 20).toInt();
-}
-void ConfigManager::setGlassMinBoxShortSide(int v) {
-    m_settings->setValue("Glass/glass_min_box_short_side", v);
+void ConfigManager::setGlassFilterStrength(int v) {
+    m_settings->setValue("Glass/glass_filter_strength", v);
     emit configChanged();
 }
 

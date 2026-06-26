@@ -16,18 +16,11 @@ namespace depth_anything
 
     struct DepthMaskOptions
     {
-        bool enabled = false;
         int fps = 5;
-        int near_percent = 20;
-        int expand = 0;
-        bool invert = false;
-        bool produce_colormap = false;
-        // 仅需要 normalized depth(用于 bbox 距离标注等),不需要 mask 也
-        // 不需要 colormap 时,把这个置 true。
+        // 唯一的产出开关:置 true 时 update() 跑深度推理并刷新 normalized
+        // depth(供手电筒特性消费),否则直接早退。
         bool produce_normalized = false;
-        int colormap_type = 18;
         int opt_input_size = 224;
-        float heatmap_gamma = 1.0f;
         float norm_low_pct = 0.0f;
         float norm_high_pct = 100.0f;
     };
@@ -45,18 +38,13 @@ namespace depth_anything
     public:
         void update(const cv::Mat& frame, const DepthMaskOptions& options,
             const std::string& modelPath, nvinfer1::ILogger& logger);
-        cv::Mat getMask() const;
-        cv::Mat getColormap() const;
-        bool hasColormap() const;
         // Normalized depth (CV_8UC1, frame-sized). 255 = closest in frame,
         // 0 = farthest. Per-frame MIN-MAX normalization, so values are
         // RELATIVE not absolute.
         cv::Mat getDepthNormalized() const;
-        // Diagnostic counters: number of times update() entered, number of
-        // times predictDepth() returned a non-empty depth map, number of
-        // times cv::applyColorMap() actually ran. Helps localize where the
-        // heatmap pipeline is dropping frames.
-        int colormapProducedCount() const;
+        // Diagnostic counters: number of times update() entered and number of
+        // times predictDepth() returned a non-empty depth map. Helps localize
+        // where the depth pipeline is dropping frames.
         int updateEnteredCount() const;
         int depthSucceededCount() const;
         bool ready() const;
@@ -68,10 +56,7 @@ namespace depth_anything
 
     private:
         mutable std::mutex state_mutex;
-        cv::Mat mask_binary;
-        cv::Mat colormap_bgr;
         cv::Mat depth_normalized;
-        int colormap_produced_count = 0;
         int update_entered_count = 0;
         int depth_succeeded_count = 0;
         // Default-constructed (epoch) instead of time_point::min() — the

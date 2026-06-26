@@ -16,19 +16,11 @@ public:
 private:
     void loadConfig();
 
-    ToggleSwitch*   m_showPreview{};
-    QSpinBox*       m_threshold{};
-    QSlider*        m_thresholdSlider{};
-    QSpinBox*       m_minRadius{};
-    QSlider*        m_minRadiusSlider{};
-    QSpinBox*       m_maxRadius{};
-    QSlider*        m_maxRadiusSlider{};
-    QDoubleSpinBox* m_circularity{};
-    QSlider*        m_circularitySlider{};
-    QSpinBox*       m_openRadius{};
-    QSlider*        m_openRadiusSlider{};
-    QSpinBox*       m_localContrast{};
-    QSlider*        m_localContrastSlider{};
-    QSpinBox*       m_maxSpots{};
-    QSlider*        m_maxSpotsSlider{};
+    ToggleSwitch* m_showPreview{};
+    QSpinBox*     m_sensitivity{};        // 灵敏度
+    QSlider*      m_sensitivitySlider{};
+    QSpinBox*     m_reject{};             // 抗误锁
+    QSlider*      m_rejectSlider{};
+    QSpinBox*     m_spotSize{};           // 光斑大小
+    QSlider*      m_spotSizeSlider{};
 };

@@ -19,6 +19,7 @@
 #include "crosshair/flashlight_runtime.h"
 #include "crosshair/glass_filter.h"
 #include "crosshair/glass_runtime.h"
+#include "crosshair/glass_tuning.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
@@ -52,7 +53,6 @@ int g_trackerLockedId = -1;
 // Defined in mouse.cpp; the boss loop just keeps them at neutral values.
 extern std::atomic<float> g_pid_last_err_px;
 extern std::atomic<bool>  g_pid_mode_track;
-extern std::atomic<bool>  g_threat_depth_required;
 extern std::atomic<float> g_dynamic_fov_radius_x_px;
 extern std::atomic<float> g_dynamic_fov_radius_y_px;
 extern std::atomic<float> g_smart_trigger_hit_prob;
@@ -212,7 +212,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
     // Legacy telemetry — boss loop leaves these neutral.
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
-    g_threat_depth_required.store(false);
     g_smart_trigger_hit_prob.store(0.0f);
     g_smart_trigger_recent_variance_px.store(0.0f);
 
@@ -257,9 +256,14 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 {
                     glass_on = true;
                     gs.enabled              = true;
-                    gs.edge_ring_frac       = config.glass_edge_ring_frac;
-                    gs.coverage_threshold   = config.glass_coverage_threshold;
-                    gs.min_box_short_side   = config.glass_min_box_short_side;
+                    // Single macro knob → concrete params (ring fixed, min-box
+                    // auto-scaled to detection resolution). See glass_tuning.h.
+                    const auto gd = crosshair::glass_derive_settings(
+                        config.glass_filter_strength,
+                        cv::Size(config.detection_resolution, config.detection_resolution));
+                    gs.edge_ring_frac       = gd.edge_ring_frac;
+                    gs.coverage_threshold   = gd.coverage_threshold;
+                    gs.min_box_short_side   = gd.min_box_short_side;
                     gs.colors.reserve(config.glass_colors.size());
                     for (const auto& c : config.glass_colors)
                     {
@@ -319,29 +323,74 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
         }
 
-        // Flashlight halo injection. The detector runs on the capture thread
-        // and publishes a separate snapshot; we splice the halo into the local
-        // detection arrays under the fixed `shoudiantong` class
-        // (kFlashlightClassId) so the existing target tracker, FOV gates and
-        // smart trigger handle it identically to a real model detection.
-        // Per-hotkey opt-in (whether the detector even runs) is enforced in the
-        // runtime; whether the halo is actually aimed is decided by the user
-        // adding `shoudiantong` to this hotkey's aim_classes. So gate only on
-        // freshness here — an unrouted class is ignored by the tracker, exactly
-        // like any non-aim model class.
+        // Flashlight halo injection. The detector + depth-gate + temporal tracker
+        // run on the capture thread and publish RANKED candidates; here we apply
+        // the final accept rule that needs the model boxes: a halo is aimable when
+        // it is COLOCATED with a real model detection (someone the model already
+        // sees → trust it; the daytime case) OR it cleared the depth + time gates
+        // (an orphan light in the dark → the discriminators vouch for it). The
+        // best accepted halo is spliced in under the fixed `shoudiantong` class
+        // (kFlashlightClassId) so the tracker / FOV / smart-trigger treat it like
+        // a real model detection. Whether it is actually aimed still depends on
+        // the user routing `shoudiantong` into this hotkey's aim_classes.
         {
+            constexpr float kColocateOverlapFrac = 0.10f; // halo∩box / halo-area
+            constexpr float kColocateBoost       = 0.25f; // confidence bump when colocated
+
             const auto fs = flashlight_runtime::read();
             const auto now = std::chrono::steady_clock::now();
             const bool fresh =
                 fs.valid && fs.ts.time_since_epoch().count() != 0 &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - fs.ts).count() < flashlight_runtime::kFreshnessMs;
-            if (fresh && fs.box.area() > 0)
+            if (fresh && !fs.spots.empty())
             {
-                boxes.push_back(fs.box);
-                classes.push_back(kFlashlightClassId);
-                confidences.push_back(std::clamp(fs.confidence, 0.0f, 1.0f));
-                hasNewDetection = true;
+                int   best_idx  = -1;
+                float best_conf = 0.0f;
+                for (size_t si = 0; si < fs.spots.size(); ++si)
+                {
+                    const auto& sp = fs.spots[si];
+                    if (sp.box.area() <= 0)
+                        continue;
+
+                    // Colocation: does any non-flashlight model box overlap the
+                    // halo enough? (boxes/classes here are the model detections —
+                    // the flashlight class is not injected yet this frame.)
+                    bool colocated = false;
+                    for (size_t bi = 0; bi < boxes.size(); ++bi)
+                    {
+                        if (bi < classes.size() && classes[bi] == kFlashlightClassId)
+                            continue;
+                        const cv::Rect inter = sp.box & boxes[bi];
+                        if (inter.area() > 0 &&
+                            static_cast<float>(inter.area()) /
+                                    static_cast<float>(sp.box.area()) >= kColocateOverlapFrac)
+                        {
+                            colocated = true;
+                            break;
+                        }
+                    }
+
+                    const bool accept = colocated || (sp.passed_depth && sp.confirmed);
+                    if (!accept)
+                        continue;
+
+                    const float conf = std::clamp(
+                        sp.confidence + (colocated ? kColocateBoost : 0.0f), 0.0f, 1.0f);
+                    if (best_idx < 0 || conf > best_conf)
+                    {
+                        best_idx  = static_cast<int>(si);
+                        best_conf = conf;
+                    }
+                }
+
+                if (best_idx >= 0)
+                {
+                    boxes.push_back(fs.spots[static_cast<size_t>(best_idx)].box);
+                    classes.push_back(kFlashlightClassId);
+                    confidences.push_back(best_conf);
+                    hasNewDetection = true;
+                }
             }
         }
 

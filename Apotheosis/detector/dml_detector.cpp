@@ -18,7 +18,6 @@
 #include "postProcess.h"
 #include "capture.h"
 #include "other_tools.h"
-#include "depth/depth_mask.h"
 #include "model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "runtime/active_hotkey.h"
@@ -101,96 +100,6 @@ bool tryInt64ToInt(int64_t value, int* out)
 
     *out = static_cast<int>(value);
     return true;
-}
-
-// Decide whether a detection is "occluded enough" by the depth-derived
-// suppression mask to be discarded. The previous implementation tripped on
-// the centre pixel or on a single non-zero pixel anywhere in the bbox; that
-// caused the bbox to flicker in/out of the candidate pool when the bbox edge
-// scraped a wall edge between frames. We now compute the fraction of pixels
-// inside the bbox that fall under the suppression mask, and require the
-// fraction to exceed `ratio_threshold` (0..1). With ratio=0 the legacy
-// "any-pixel" behaviour is approximated; with ratio=1 nothing is ever
-// suppressed.
-bool intersectsDepthMask(const cv::Rect& box, const cv::Mat& mask, float ratio_threshold)
-{
-    if (box.width <= 0 || box.height <= 0 || mask.empty() || mask.type() != CV_8UC1)
-        return false;
-
-    const cv::Rect imageBounds(0, 0, mask.cols, mask.rows);
-    const cv::Rect clipped = box & imageBounds;
-    if (clipped.width <= 0 || clipped.height <= 0)
-        return false;
-
-    const cv::Mat roi = mask(clipped);
-    const int occluded = cv::countNonZero(roi);
-    if (occluded <= 0)
-        return false;
-
-    const int total = clipped.area();
-    if (total <= 0)
-        return false;
-
-    const float ratio = static_cast<float>(occluded) / static_cast<float>(total);
-    const float threshold = std::clamp(ratio_threshold, 0.0f, 1.0f);
-    return ratio >= threshold;
-}
-
-void filterDetectionsByDepthMask(std::vector<Detection>& detections)
-{
-    static cv::Mat holdTtl;
-
-    if (detections.empty())
-        return;
-
-    if (!config.depth_inference_enabled || !config.depth_mask_enabled)
-    {
-        holdTtl.release();
-        return;
-    }
-
-    const int holdFrames = std::clamp(config.depth_mask_hold_frames, 0, 120);
-    cv::Mat currentMask = getCurrentDetectionSuppressionMask();
-    cv::Mat suppressionMask;
-
-    if (holdFrames <= 0)
-    {
-        holdTtl.release();
-        suppressionMask = currentMask;
-    }
-    else
-    {
-        if (!currentMask.empty() && currentMask.type() == CV_8UC1)
-        {
-            if (holdTtl.empty() || holdTtl.size() != currentMask.size())
-                holdTtl = cv::Mat::zeros(currentMask.size(), CV_16UC1);
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-            holdTtl.setTo(cv::Scalar(static_cast<uint16_t>(holdFrames)), currentMask);
-        }
-        else if (!holdTtl.empty())
-        {
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-        }
-
-        if (!holdTtl.empty() && cv::countNonZero(holdTtl) > 0)
-        {
-            cv::compare(holdTtl, cv::Scalar(0), suppressionMask, cv::CMP_GT);
-        }
-        else
-        {
-            suppressionMask.release();
-        }
-    }
-
-    if (suppressionMask.empty() || suppressionMask.type() != CV_8UC1)
-        return;
-
-    const float ratio = std::clamp(config.depth_mask_suppression_ratio, 0.0f, 1.0f);
-
-    detections.erase(
-        std::remove_if(detections.begin(), detections.end(),
-            [&suppressionMask, ratio](const Detection& det) { return intersectsDepthMask(det.box, suppressionMask, ratio); }),
-        detections.end());
 }
 }
 
@@ -657,7 +566,6 @@ void DirectMLDetector::inferenceThread()
                 }
                 const std::vector<Detection>& detections = detectionsBatch.back();
                 std::vector<Detection> filteredDetections = detections;
-                filterDetectionsByDepthMask(filteredDetections);
                 capDetectionsToMax(filteredDetections, config.max_detections);
 
                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);

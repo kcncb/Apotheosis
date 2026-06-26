@@ -7,7 +7,6 @@
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
 
-#include <QDoubleSpinBox>
 #include <QLabel>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -41,19 +40,21 @@ FlashlightPage::FlashlightPage(QWidget* parent)
         QStringLiteral("寻光 - 说明"),
         QStringLiteral("info"));
     auto* intro = new QLabel(tr(
-        "在整个画面里搜亮度满足阈值、且呈径向衰减的圆形光斑(手电筒/闪光筒眩光)。"
-        "命中后固定作为「shoudiantong」类别注入瞄准管线 —— 在「瞄准热键」页把 "
-        "shoudiantong 加进该热键的瞄准类别并排好优先级,即可像普通目标一样被瞄。\n\n"
-        "原理:亮度门限基于 max(B,G,R),不挑颜色;靠圆度 + 径向衰减(核心比外圈亮、"
-        "向外递减)判定,远近通吃,不再依赖固定像素半径。结果去重后最多取「最多识别"
-        "数量」个,远处不会误识别成一大片。\n"
+        "在整个画面里找「亮 + 圆 + 径向衰减」的光斑(手电筒/闪光筒眩光),命中后固定作为"
+        "「shoudiantong」类别注入瞄准管线 —— 在「瞄准热键」页把 shoudiantong 加进该热键的"
+        "瞄准类别并排好优先级,即可像普通目标一样被瞄。\n\n"
+        "户外抗误锁:单帧只看外观分不清手电和太阳/天空/反光(它们也是亮圆渐变),所以加了"
+        "三道判别 —— 深度门(杀太阳/天空/远处泛光,需在「深度」页开启深度推理)、时间门"
+        "(杀水面/玻璃的闪烁反光)、与模型框联动(白天模型已看见人时直接采信)。三道的强度"
+        "由「抗误锁」一个旋钮统一控制。\n\n"
+        "调参只有三个旋钮:灵敏度 / 抗误锁 / 光斑大小,其余全部内部自动。\n"
         "每个热键单独开关在「瞄准热键」页的「启用寻光检测」。"));
     intro->setWordWrap(true);
     introCard->contentLayout()->addWidget(intro);
     layout->addWidget(introCard);
 
     // ====================================================================
-    // Routing hint card — the halo is filed under a fixed class now
+    // Routing hint card — the halo is filed under a fixed class
     // ====================================================================
     auto* classCard = new CardWidget(
         QStringLiteral("瞄准类别"),
@@ -68,7 +69,7 @@ FlashlightPage::FlashlightPage(QWidget* parent)
     layout->addWidget(classCard);
 
     // ====================================================================
-    // Detection params card
+    // Detection params card — three macro knobs only
     // ====================================================================
     auto* paramCard = new CardWidget(
         QStringLiteral("检测参数"),
@@ -77,7 +78,7 @@ FlashlightPage::FlashlightPage(QWidget* parent)
     paramCard->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("显示预览(用于调试)"),
                            cfg.flashlightShowPreview(), m_showPreview));
-    m_showPreview->setToolTip(tr("在检测预览窗口画黄圈 + 中心十字 + 置信度标签。"));
+    m_showPreview->setToolTip(tr("在检测预览窗口画圈 + 中心十字 + 置信度标签(绿=接受,红=拒绝)。"));
     connect(m_showPreview, &ToggleSwitch::toggled,
             this, [](bool v) {
                 ConfigManager::instance().setFlashlightShowPreview(v);
@@ -85,109 +86,57 @@ FlashlightPage::FlashlightPage(QWidget* parent)
                 config.flashlight_show_preview = v;
             });
 
+    // 灵敏度 — 外观轴
     paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("亮度阈值"),
-                           0, 255, cfg.flashlightBrightnessThreshold(),
-                           m_thresholdSlider, m_threshold));
-    m_thresholdSlider->setToolTip(tr(
-        "越高越严格,仅检测超亮区域。手电筒眩光通常 200-240。基于 max(B,G,R)。"));
-    m_threshold->setToolTip(m_thresholdSlider->toolTip());
-    connect(m_threshold, QOverload<int>::of(&QSpinBox::valueChanged),
+        FormKit::sliderRow(QStringLiteral("灵敏度"),
+                           0, 100, cfg.flashlightSensitivity(),
+                           m_sensitivitySlider, m_sensitivity));
+    m_sensitivitySlider->setToolTip(tr(
+        "锁得勤 ↔ 锁得稳(外观轴)。\n"
+        "越高:更亮/更不圆/对比更低的光也收,锁得快但更易误锁;\n"
+        "越低:只收又亮又圆、明显贴在暗背景上的光,稳但可能漏。\n"
+        "内部自动驱动 亮度阈值 / 圆度 / 局部对比度 / 接受门槛。"));
+    m_sensitivity->setToolTip(m_sensitivitySlider->toolTip());
+    connect(m_sensitivity, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
-                ConfigManager::instance().setFlashlightBrightnessThreshold(v);
+                ConfigManager::instance().setFlashlightSensitivity(v);
                 std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_brightness_threshold = v;
+                config.flashlight_sensitivity = v;
             });
 
+    // 抗误锁 — 行为/环境轴
     paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("最小光斑半径"),
-                           1, 512, cfg.flashlightMinRadius(),
-                           m_minRadiusSlider, m_minRadius));
-    m_minRadiusSlider->setToolTip(tr(
-        "等价面积半径(检测像素)。小于此值的亮斑(枪口反光/远处灯点)忽略。"));
-    m_minRadius->setToolTip(m_minRadiusSlider->toolTip());
-    connect(m_minRadius, QOverload<int>::of(&QSpinBox::valueChanged),
+        FormKit::sliderRow(QStringLiteral("抗误锁强度"),
+                           0, 100, cfg.flashlightRejectStrength(),
+                           m_rejectSlider, m_reject));
+    m_rejectSlider->setToolTip(tr(
+        "信外观 ↔ 信判别。户外乱锁就往上调。\n"
+        "0 ≈ 旧行为(纯看外观);往上依次叠加:\n"
+        "  深度门(杀太阳/天空/远处泛光,需「深度」页开启深度推理)\n"
+        "  时间门(必须连续几帧稳定成轨迹,杀水面/玻璃闪烁反光)\n"
+        "  与模型框联动(有人形框=快速采信;孤儿光斑须过深度+时间门)。"));
+    m_reject->setToolTip(m_rejectSlider->toolTip());
+    connect(m_reject, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
-                ConfigManager::instance().setFlashlightMinRadius(v);
+                ConfigManager::instance().setFlashlightRejectStrength(v);
                 std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_min_radius = v;
+                config.flashlight_reject_strength = v;
             });
 
+    // 光斑大小 — 半径档(按分辨率自动)
     paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("最大光斑半径"),
-                           1, 512, cfg.flashlightMaxRadius(),
-                           m_maxRadiusSlider, m_maxRadius));
-    m_maxRadiusSlider->setToolTip(tr(
-        "大于此值的亮区(白墙/天空)忽略。贴脸眩光很大,可调到 100-200。"));
-    m_maxRadius->setToolTip(m_maxRadiusSlider->toolTip());
-    connect(m_maxRadius, QOverload<int>::of(&QSpinBox::valueChanged),
+        FormKit::sliderRow(QStringLiteral("光斑大小"),
+                           0, 100, cfg.flashlightSpotSize(),
+                           m_spotSizeSlider, m_spotSize));
+    m_spotSizeSlider->setToolTip(tr(
+        "可接受的光斑半径档,按检测分辨率自动换算(不用再填像素)。\n"
+        "越小:只收较小的光斑(远处/小光点);越大:贴脸的大片眩光也算。"));
+    m_spotSize->setToolTip(m_spotSizeSlider->toolTip());
+    connect(m_spotSize, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
-                ConfigManager::instance().setFlashlightMaxRadius(v);
+                ConfigManager::instance().setFlashlightSpotSize(v);
                 std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_max_radius = v;
-            });
-
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRowD(QStringLiteral("圆度要求"),
-                            0.0, 1.0, static_cast<double>(cfg.flashlightMinCircularity()),
-                            0.01, 2,
-                            m_circularitySlider, m_circularity));
-    m_circularitySlider->setToolTip(tr(
-        "1.0 为完美圆形,建议 0.5-0.8。越大越严格,挡掉 UI 长条/斜向反光。"));
-    m_circularity->setToolTip(m_circularitySlider->toolTip());
-    connect(m_circularity, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [](double v) {
-                ConfigManager::instance().setFlashlightMinCircularity(static_cast<float>(v));
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_min_circularity = static_cast<float>(v);
-            });
-
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("开运算半径(px)"),
-                           0, 9, cfg.flashlightOpenRadius(),
-                           m_openRadiusSlider, m_openRadius));
-    m_openRadiusSlider->setToolTip(tr(
-        "去掉单像素热点/镜面高光毛刺。0 = 关。1-2 通用。"));
-    m_openRadius->setToolTip(m_openRadiusSlider->toolTip());
-    connect(m_openRadius, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) {
-                ConfigManager::instance().setFlashlightOpenRadius(v);
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_open_radius = v;
-            });
-
-    // 局部对比度 — 抑制天空/大片亮区误识别的主开关
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("局部对比度"),
-                           0, 150, cfg.flashlightMinLocalContrast(),
-                           m_localContrastSlider, m_localContrast));
-    m_localContrastSlider->setToolTip(tr(
-        "光斑'内部平均亮度 − 紧邻外圈平均亮度' 至少要达到此值。\n"
-        "0 = 关(只看绝对亮度,远距离对着天空会有大量误识别)。\n"
-        "30 = 推荐(挡掉天空/云层,留下光晕)。80+ = 严格,只要明显贴在暗背景上的光斑。"));
-    m_localContrast->setToolTip(m_localContrastSlider->toolTip());
-    connect(m_localContrast, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) {
-                ConfigManager::instance().setFlashlightMinLocalContrast(v);
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_min_local_contrast = v;
-            });
-
-    // 最多识别数量 — 去重后最多保留几个光斑,封顶避免远处误识别成一片
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("最多识别数量"),
-                           1, 8, cfg.flashlightMaxSpots(),
-                           m_maxSpotsSlider, m_maxSpots));
-    m_maxSpots->setToolTip(tr(
-        "一帧最多上报几个光斑(按置信度排序、去重后截断)。\n"
-        "瞄准只会用其中最佳的一个 —— 这里主要是封顶:远距离误识别一大片时,"
-        "不会把一堆幻影目标塞给瞄准管线。默认 3。"));
-    m_maxSpotsSlider->setToolTip(m_maxSpots->toolTip());
-    connect(m_maxSpots, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) {
-                ConfigManager::instance().setFlashlightMaxSpots(v);
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.flashlight_max_spots = v;
+                config.flashlight_spot_size = v;
             });
 
     layout->addWidget(paramCard);
@@ -200,11 +149,7 @@ FlashlightPage::FlashlightPage(QWidget* parent)
 void FlashlightPage::loadConfig() {
     auto& cfg = ConfigManager::instance();
     m_showPreview->setChecked(cfg.flashlightShowPreview());
-    m_threshold->setValue(cfg.flashlightBrightnessThreshold());
-    m_minRadius->setValue(cfg.flashlightMinRadius());
-    m_maxRadius->setValue(cfg.flashlightMaxRadius());
-    m_circularity->setValue(static_cast<double>(cfg.flashlightMinCircularity()));
-    m_openRadius->setValue(cfg.flashlightOpenRadius());
-    m_localContrast->setValue(cfg.flashlightMinLocalContrast());
-    m_maxSpots->setValue(cfg.flashlightMaxSpots());
+    m_sensitivity->setValue(cfg.flashlightSensitivity());
+    m_reject->setValue(cfg.flashlightRejectStrength());
+    m_spotSize->setValue(cfg.flashlightSpotSize());
 }

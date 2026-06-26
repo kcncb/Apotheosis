@@ -19,7 +19,6 @@
 
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
-#include "depth/depth_anything_trt.h"
 #include "depth/depth_mask.h"
 #include "tensorrt/nvinf.h"
 #include "Apotheosis.h"
@@ -73,44 +72,6 @@ std::deque<cv::Mat> frameQueue;
 
 namespace
 {
-std::mutex g_detectionSuppressionMaskMutex;
-cv::Mat g_detectionSuppressionMask;
-// Fast-path flag: lets readers skip the lock entirely when no mask is live.
-// Common case (depth_inference disabled) hits this on every detection frame.
-std::atomic<bool> g_detectionSuppressionMaskHasData{false};
-}
-
-static void UpdateDetectionSuppressionMask(const cv::Mat& mask)
-{
-    std::lock_guard<std::mutex> lock(g_detectionSuppressionMaskMutex);
-    if (!mask.empty() && mask.type() == CV_8UC1)
-    {
-        g_detectionSuppressionMask = mask.clone();
-        g_detectionSuppressionMaskHasData.store(true, std::memory_order_release);
-    }
-    else
-    {
-        g_detectionSuppressionMask.release();
-        g_detectionSuppressionMaskHasData.store(false, std::memory_order_release);
-    }
-}
-
-cv::Mat getCurrentDetectionSuppressionMask()
-{
-    // Lock-free fast path: no mask, no work.
-    if (!g_detectionSuppressionMaskHasData.load(std::memory_order_acquire))
-        return cv::Mat();
-
-    // Shallow copy under the lock — cv::Mat is refcounted so the caller's
-    // reference keeps the pixel buffer alive even after the storage is
-    // replaced by the next UpdateDetectionSuppressionMask(). Saves a per-frame
-    // O(W*H) clone in the inference and mouse threads.
-    std::lock_guard<std::mutex> lock(g_detectionSuppressionMaskMutex);
-    return g_detectionSuppressionMask;
-}
-
-namespace
-{
 struct CaptureThreadConfig
 {
     std::string capture_method;
@@ -138,19 +99,11 @@ struct CaptureThreadConfig
     bool show_window = false;
     bool verbose = false;
     bool depth_inference_enabled = false;
-    bool depth_show_heatmap = false;
-    bool depth_mask_enabled = false;
     std::string depth_model_path;
     int depth_mask_fps = 0;
-    int depth_mask_near_percent = 0;
-    int depth_mask_expand = 0;
-    bool depth_mask_invert = false;
-    int depth_colormap = 18;
     int depth_opt_input_size = 224;
-    float depth_heatmap_gamma = 1.0f;
     float depth_norm_clip_low_pct = 0.0f;
     float depth_norm_clip_high_pct = 100.0f;
-    bool depth_show_bbox_distance = false;
 };
 
 CaptureThreadConfig SnapshotCaptureConfig()
@@ -182,19 +135,11 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.show_window = config.show_window;
     snapshot.verbose = config.verbose;
     snapshot.depth_inference_enabled = config.depth_inference_enabled;
-    snapshot.depth_show_heatmap = config.depth_show_heatmap;
-    snapshot.depth_mask_enabled = config.depth_mask_enabled;
     snapshot.depth_model_path = config.depth_model_path;
     snapshot.depth_mask_fps = config.depth_mask_fps;
-    snapshot.depth_mask_near_percent = config.depth_mask_near_percent;
-    snapshot.depth_mask_expand = config.depth_mask_expand;
-    snapshot.depth_mask_invert = config.depth_mask_invert;
-    snapshot.depth_colormap = config.depth_colormap;
     snapshot.depth_opt_input_size = config.depth_opt_input_size;
-    snapshot.depth_heatmap_gamma = config.depth_heatmap_gamma;
     snapshot.depth_norm_clip_low_pct  = config.depth_norm_clip_low_pct;
     snapshot.depth_norm_clip_high_pct = config.depth_norm_clip_high_pct;
-    snapshot.depth_show_bbox_distance = config.depth_show_bbox_distance;
     return snapshot;
 }
 
@@ -532,9 +477,6 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             captureWidth = currentCfg.detection_resolution;
             captureHeight = currentCfg.detection_resolution;
         }
-
-        depth_anything::DepthAnythingTrt depthMaskFallbackModel;
-        std::string depthMaskFallbackModelPath;
 
         auto createCapturer = [&](const CaptureThreadConfig& cfg, int width, int height) -> std::unique_ptr<IScreenCapture>
         {
@@ -879,17 +821,12 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             cv::Mat screenshotCpu;
             cv::Mat detectionFrame;
 
-            // Threat scoring (set by the mouse thread) also consumes the
-            // normalized depth map, so it must keep depth inference alive even
-            // when no depth display option is on — otherwise the depth term in
-            // compute_threat_score silently falls back to a neutral score.
-            const bool threatDepthRequired = g_threat_depth_required.load();
+            // Depth inference now serves only the flashlight feature, which
+            // consumes the normalized depth map. It stays alive iff depth
+            // inference is enabled AND the flashlight gate requests depth.
+            const bool flashlightDepthRequired = g_flashlight_depth_required.load();
             const bool depthNeeded =
-                currentCfg.depth_inference_enabled
-                && (currentCfg.depth_mask_enabled
-                    || currentCfg.depth_show_heatmap
-                    || currentCfg.depth_show_bbox_distance
-                    || threatDepthRequired);
+                currentCfg.depth_inference_enabled && flashlightDepthRequired;
 
             static bool lastDepthInferenceEnabled = true;
             if (!depthNeeded)
@@ -898,10 +835,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 {
                     auto& depthMask = depth_anything::GetDepthMaskGenerator();
                     depthMask.reset();
-                    depthMaskFallbackModel.reset();
-                    depthMaskFallbackModelPath.clear();
                 }
-                UpdateDetectionSuppressionMask(cv::Mat());
                 lastDepthInferenceEnabled = false;
             }
             else
@@ -1011,134 +945,26 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             detectionFrame = screenshotCpu;
             if (depthNeeded)
             {
-                cv::Mat mask;
+                // Depth inference now produces only the normalized depth map
+                // (consumed by the flashlight feature). No suppression mask,
+                // colormap, or detection-frame rewrite happens here anymore.
                 depth_anything::DepthMaskOptions maskOptions;
-                maskOptions.enabled = currentCfg.depth_mask_enabled;
                 maskOptions.fps = currentCfg.depth_mask_fps;
-                maskOptions.near_percent = currentCfg.depth_mask_near_percent;
-                maskOptions.expand = currentCfg.depth_mask_expand;
-                maskOptions.invert = currentCfg.depth_mask_invert;
-                maskOptions.produce_colormap = currentCfg.depth_show_heatmap;
-                maskOptions.produce_normalized = currentCfg.depth_show_bbox_distance
-                    || threatDepthRequired;
-                maskOptions.colormap_type = currentCfg.depth_colormap;
                 maskOptions.opt_input_size = currentCfg.depth_opt_input_size;
-                maskOptions.heatmap_gamma = currentCfg.depth_heatmap_gamma;
+                maskOptions.produce_normalized = flashlightDepthRequired;
                 maskOptions.norm_low_pct  = currentCfg.depth_norm_clip_low_pct;
                 maskOptions.norm_high_pct = currentCfg.depth_norm_clip_high_pct;
 
                 auto& depthMask = depth_anything::GetDepthMaskGenerator();
                 depthMask.update(screenshotCpu, maskOptions, currentCfg.depth_model_path, gLogger);
-                mask = currentCfg.depth_mask_enabled ? depthMask.getMask() : cv::Mat();
-
-                if (!mask.empty() && mask.size() != screenshotCpu.size())
-                    mask.release();
-
-                if (mask.empty() && currentCfg.depth_mask_enabled)
-                {
-                    if (currentCfg.depth_model_path.empty())
-                    {
-                        if (depthMaskFallbackModel.ready())
-                            depthMaskFallbackModel.reset();
-                        depthMaskFallbackModelPath.clear();
-                    }
-                    else if (depthMaskFallbackModelPath != currentCfg.depth_model_path || !depthMaskFallbackModel.ready())
-                    {
-                        depthMaskFallbackModel.setOptInputSize(currentCfg.depth_opt_input_size);
-                        depthMaskFallbackModel.setNormPercentiles(
-                            currentCfg.depth_norm_clip_low_pct,
-                            currentCfg.depth_norm_clip_high_pct);
-                        if (depthMaskFallbackModel.initialize(currentCfg.depth_model_path, gLogger))
-                        {
-                            depthMaskFallbackModelPath = currentCfg.depth_model_path;
-                        }
-                    }
-
-                    if (depthMaskFallbackModel.ready())
-                    {
-                        depthMaskFallbackModel.setNormPercentiles(
-                            currentCfg.depth_norm_clip_low_pct,
-                            currentCfg.depth_norm_clip_high_pct);
-                        cv::Mat depthLocal = depthMaskFallbackModel.predictDepth(screenshotCpu);
-                        if (!depthLocal.empty())
-                        {
-                            const int nearPercent = std::clamp(currentCfg.depth_mask_near_percent, 1, 100);
-                            const bool invertMask = currentCfg.depth_mask_invert;
-                            const int total = depthLocal.rows * depthLocal.cols;
-                            if (total > 0)
-                            {
-                                int hist[256] = {};
-                                for (int y = 0; y < depthLocal.rows; ++y)
-                                {
-                                    const uint8_t* row = depthLocal.ptr<uint8_t>(y);
-                                    for (int x = 0; x < depthLocal.cols; ++x)
-                                        hist[row[x]]++;
-                                }
-
-                                const int target = std::max(1, (total * nearPercent) / 100);
-                                int threshold = 0;
-                                if (!invertMask)
-                                {
-                                    int count = 0;
-                                    for (int i = 0; i < 256; ++i)
-                                    {
-                                        count += hist[i];
-                                        if (count >= target)
-                                        {
-                                            threshold = i;
-                                            break;
-                                        }
-                                    }
-                                    cv::compare(depthLocal, threshold, mask, cv::CMP_LE);
-                                }
-                                else
-                                {
-                                    int count = 0;
-                                    for (int i = 255; i >= 0; --i)
-                                    {
-                                        count += hist[i];
-                                        if (count >= target)
-                                        {
-                                            threshold = i;
-                                            break;
-                                        }
-                                    }
-                                    cv::compare(depthLocal, threshold, mask, cv::CMP_GE);
-                                }
-
-                                const int expand = std::clamp(currentCfg.depth_mask_expand, 0, 128);
-                                if (expand > 0)
-                                {
-                                    const int kernelSize = 2 * expand + 1;
-                                    cv::Mat kernel = cv::getStructuringElement(
-                                        cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
-                                    cv::dilate(mask, mask, kernel);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                UpdateDetectionSuppressionMask(mask);
-                if (!mask.empty() && mask.size() == screenshotCpu.size())
-                {
-                    detectionFrame = screenshotCpu.clone();
-                    detectionFrame.setTo(cv::Scalar(0, 0, 0), mask);
-                }
-            }
-            else
-            {
-                UpdateDetectionSuppressionMask(cv::Mat());
             }
 
             if (g_detector)
             {
-                // Zero-copy GPU path when nvJPEG produced a GpuMat and no
-                // CPU-only transform (depth mask suppression) has rewritten
-                // detectionFrame on the host.
-                const bool usedCpuDetectionOverride =
-                    currentCfg.depth_inference_enabled && currentCfg.depth_mask_enabled
-                    && !detectionFrame.empty();
+                // Zero-copy GPU path when nvJPEG produced a GpuMat. Depth no
+                // longer rewrites detectionFrame on the host (suppression was
+                // removed), so nothing forces the CPU detection path anymore.
+                const bool usedCpuDetectionOverride = false;
                 const bool detectorAcceptsGpu =
                     g_detector->backend() == DetectorBackend::TensorRT;
                 if (!screenshotGpu.empty() && !usedCpuDetectionOverride && detectorAcceptsGpu)

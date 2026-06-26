@@ -3,9 +3,12 @@
 #include "Apotheosis.h"
 #include "config/ConfigManager.h"
 #include "config/config.h"
+#include "crosshair/color_picker.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
+
+#include <algorithm>
 
 #include <QCheckBox>
 #include <QDoubleSpinBox>
@@ -18,6 +21,7 @@
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <mutex>
@@ -89,50 +93,20 @@ GlassFilterPage::GlassFilterPage(QWidget* parent)
             });
 
     paramCard->contentLayout()->addWidget(
-        FormKit::sliderRowD(QStringLiteral("边缘环厚度"),
-                            0.05, 0.45, static_cast<double>(cfg.glassEdgeRingFrac()),
-                            0.01, 2,
-                            m_edgeRingFracSlider, m_edgeRingFrac));
-    m_edgeRingFracSlider->setToolTip(tr(
-        "环厚 = 框短边 × 此值。\n"
-        "0.10 ~ 0.20 推荐。太薄信号点少噪声主导;太厚吃进框中心人物,稀释命中率。"));
-    m_edgeRingFrac->setToolTip(m_edgeRingFracSlider->toolTip());
-    connect(m_edgeRingFrac, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [](double v) {
-                ConfigManager::instance().setGlassEdgeRingFrac(static_cast<float>(v));
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.glass_edge_ring_frac = static_cast<float>(v);
-            });
-
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRowD(QStringLiteral("命中率阈值"),
-                            0.05, 0.95, static_cast<double>(cfg.glassCoverageThreshold()),
-                            0.01, 2,
-                            m_coverageThresholdSlider, m_coverageThreshold));
-    m_coverageThresholdSlider->setToolTip(tr(
-        "环内命中色带的像素 ÷ 环总像素 ≥ 此值 → 判玻璃。\n"
-        "0.45 推荐。误伤多了往上调,玻璃漏过多往下调。"));
-    m_coverageThreshold->setToolTip(m_coverageThresholdSlider->toolTip());
-    connect(m_coverageThreshold, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [](double v) {
-                ConfigManager::instance().setGlassCoverageThreshold(static_cast<float>(v));
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.glass_coverage_threshold = static_cast<float>(v);
-            });
-
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("最小框短边"),
-                           4, 200, cfg.glassMinBoxShortSide(),
-                           m_minBoxShortSideSlider, m_minBoxShortSide));
-    m_minBoxShortSideSlider->setToolTip(tr(
-        "框短边小于此值不参与过滤(信号不可靠,容易把远处真目标误杀)。\n"
-        "检测图像素;detection_resolution=320 时 20 ~ 30 较合理。"));
-    m_minBoxShortSide->setToolTip(m_minBoxShortSideSlider->toolTip());
-    connect(m_minBoxShortSide, QOverload<int>::of(&QSpinBox::valueChanged),
+        FormKit::sliderRow(QStringLiteral("过滤强度"),
+                           0, 100, cfg.glassFilterStrength(),
+                           m_filterStrengthSlider, m_filterStrength));
+    m_filterStrengthSlider->setToolTip(tr(
+        "玻璃过滤的激进程度(0 ~ 100)。\n"
+        "低 = 保守,只剔除边缘几乎全是玻璃膜色的框;高 = 激进,薄淡玻璃也判、剔得更狠。\n"
+        "50 ≈ 旧默认表现。误杀真人往下调,玻璃后的人漏过太多往上调。\n"
+        "(环厚已固定 0.15、最小框按分辨率自动,无需再单独调。)"));
+    m_filterStrength->setToolTip(m_filterStrengthSlider->toolTip());
+    connect(m_filterStrength, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
-                ConfigManager::instance().setGlassMinBoxShortSide(v);
+                ConfigManager::instance().setGlassFilterStrength(v);
                 std::lock_guard<std::recursive_mutex> lk(configMutex);
-                config.glass_min_box_short_side = v;
+                config.glass_filter_strength = v;
             });
 
     layout->addWidget(paramCard);
@@ -158,15 +132,27 @@ GlassFilterPage::GlassFilterPage(QWidget* parent)
     colorCard->contentLayout()->addWidget(m_colorTable);
 
     auto* btnRow = new QHBoxLayout;
+    m_pickColorBtn = new QPushButton(QStringLiteral("取色"));
+    m_pickColorBtn->setToolTip(QStringLiteral(
+        "点击后切到「检测预览」窗口,在玻璃膜上单击一下:\n"
+        "自动取该处 5×5 区域的 HSV(中位数)并按宽容差加一行到下面的色带"
+        "(跨 0/179 接缝自动拆两行)。\n"
+        "预览里右键、或再点一次本按钮可取消;预览窗口没开时会自动打开。\n"
+        "取到的颜色会立即生效(自动应用)。"));
     auto* addBtn   = new QPushButton(QStringLiteral("+ 新增空白"));
     auto* delBtn   = new QPushButton(QStringLiteral("- 删除选中"));
     auto* applyBtn = new QPushButton(QStringLiteral("应用色带"));
+    btnRow->addWidget(m_pickColorBtn);
     btnRow->addWidget(addBtn);
     btnRow->addWidget(delBtn);
     btnRow->addStretch();
     btnRow->addWidget(applyBtn);
     colorCard->contentLayout()->addLayout(btnRow);
 
+    m_pickTimer = new QTimer(this);
+    m_pickTimer->setInterval(120);
+    connect(m_pickTimer, &QTimer::timeout, this, &GlassFilterPage::pollPickedColor);
+    connect(m_pickColorBtn, &QPushButton::clicked, this, &GlassFilterPage::toggleColorPick);
     connect(addBtn,   &QPushButton::clicked, this, &GlassFilterPage::addEmptyColor);
     connect(delBtn,   &QPushButton::clicked, this, &GlassFilterPage::removeSelectedRows);
     connect(applyBtn, &QPushButton::clicked, this, &GlassFilterPage::saveGlassColors);
@@ -181,9 +167,7 @@ GlassFilterPage::GlassFilterPage(QWidget* parent)
 void GlassFilterPage::loadConfig() {
     auto& cfg = ConfigManager::instance();
     m_showPreview->setChecked(cfg.glassFilterShowPreview());
-    m_edgeRingFrac->setValue(static_cast<double>(cfg.glassEdgeRingFrac()));
-    m_coverageThreshold->setValue(static_cast<double>(cfg.glassCoverageThreshold()));
-    m_minBoxShortSide->setValue(cfg.glassMinBoxShortSide());
+    m_filterStrength->setValue(cfg.glassFilterStrength());
 
     m_colorTable->blockSignals(true);
     m_colorTable->setRowCount(0);
@@ -250,4 +234,71 @@ void GlassFilterPage::removeSelectedRows() {
             m_colorTable->removeRow(row);
         }
     }
+}
+
+// ---- Glass colour eyedropper (mirrors CrosshairPage; shares color_picker) ----
+
+void GlassFilterPage::toggleColorPick() {
+    if (m_pickToken != 0) {
+        crosshair::CancelColorPick();
+        finishPicking();
+        return;
+    }
+    auto& cm = ConfigManager::instance();
+    if (!cm.showWindow())
+        cm.setShowWindow(true);
+
+    m_pickToken = crosshair::ArmColorPick();
+    m_pickColorBtn->setText(QStringLiteral("取消取色"));
+    m_pickColorBtn->setStyleSheet(QStringLiteral("color:#D23B3B; font-weight:600;"));
+    m_pickTimer->start();
+}
+
+void GlassFilterPage::pollPickedColor() {
+    int h = 0, s = 0, v = 0;
+    if (crosshair::TakePickedColor(m_pickToken, h, s, v)) {
+        applyPickedColor(h, s, v);
+        finishPicking();
+    } else if (crosshair::ArmedToken() != m_pickToken) {
+        // Superseded by another page's 取色, or cancelled in the preview.
+        finishPicking();
+    }
+}
+
+void GlassFilterPage::applyPickedColor(int h, int s, int v) {
+    // "宽" tolerance: H ±15, S/V lower = sample − 70 (clamped to 0), upper 255.
+    constexpr int kHueHalf = 15;
+    constexpr int kSvMargin = 70;
+    const int sLo = std::max(0, s - kSvMargin);
+    const int vLo = std::max(0, v - kSvMargin);
+    const QString base = QStringLiteral("取色 H%1 S%2 V%3").arg(h).arg(s).arg(v);
+
+    const int lo = h - kHueHalf;
+    const int hi = h + kHueHalf;
+
+    m_colorTable->blockSignals(true);
+    if (lo < 0) {
+        // Hue band wraps below 0: [0, hi] + [180+lo, 179].
+        insertGlassRow(m_colorTable, base + QStringLiteral(" 低"), true, 0, hi, sLo, 255, vLo, 255);
+        insertGlassRow(m_colorTable, base + QStringLiteral(" 高"), true, 180 + lo, 179, sLo, 255, vLo, 255);
+    } else if (hi > 179) {
+        // Hue band wraps above 179: [0, hi-180] + [lo, 179].
+        insertGlassRow(m_colorTable, base + QStringLiteral(" 低"), true, 0, hi - 180, sLo, 255, vLo, 255);
+        insertGlassRow(m_colorTable, base + QStringLiteral(" 高"), true, lo, 179, sLo, 255, vLo, 255);
+    } else {
+        insertGlassRow(m_colorTable, base, true, lo, hi, sLo, 255, vLo, 255);
+    }
+    m_colorTable->blockSignals(false);
+
+    // Apply immediately so the picked band takes effect without also having to
+    // click 应用色带 (easy to forget in the pick workflow).
+    saveGlassColors();
+}
+
+void GlassFilterPage::finishPicking() {
+    m_pickToken = 0;
+    if (m_pickTimer)
+        m_pickTimer->stop();
+    m_pickColorBtn->setText(QStringLiteral("取色"));
+    m_pickColorBtn->setStyleSheet(QString());
 }

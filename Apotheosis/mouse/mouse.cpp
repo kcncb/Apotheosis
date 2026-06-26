@@ -41,7 +41,6 @@ std::atomic<float>  g_smart_trigger_recent_variance_px{ 0.0f };
 // Flick / Track telemetry (kept for overlay compat).
 std::atomic<float> g_pid_last_err_px{ 0.0f };
 std::atomic<bool>  g_pid_mode_track{ false };
-std::atomic<bool>  g_threat_depth_required{ false };
 
 // Dynamic-FOV telemetry.
 std::atomic<float> g_dynamic_fov_radius_x_px{ 0.0f };

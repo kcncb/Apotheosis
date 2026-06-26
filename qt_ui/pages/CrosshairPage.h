@@ -62,7 +62,7 @@ private:
     // ---- Crosshair colour eyedropper ----
     QPushButton* m_pickColorBtn{};
     QTimer* m_pickTimer{};
-    bool m_picking = false;
+    int m_pickToken = 0;   // 0 = not picking; else this page's color_picker token
 
     // ---- Laser sampling region & params ----
     QSpinBox* m_laserRectW{};

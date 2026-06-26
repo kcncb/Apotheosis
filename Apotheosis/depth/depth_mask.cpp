@@ -11,8 +11,6 @@ namespace depth_anything
     void DepthMaskGenerator::reset()
     {
         std::lock_guard<std::mutex> lk(state_mutex);
-        mask_binary.release();
-        colormap_bgr.release();
         depth_normalized.release();
         last_error.clear();
         last_model_path.clear();
@@ -63,34 +61,10 @@ namespace depth_anything
         return state;
     }
 
-    cv::Mat DepthMaskGenerator::getMask() const
-    {
-        std::lock_guard<std::mutex> lk(state_mutex);
-        return mask_binary.clone();
-    }
-
-    cv::Mat DepthMaskGenerator::getColormap() const
-    {
-        std::lock_guard<std::mutex> lk(state_mutex);
-        return colormap_bgr.clone();
-    }
-
-    bool DepthMaskGenerator::hasColormap() const
-    {
-        std::lock_guard<std::mutex> lk(state_mutex);
-        return !colormap_bgr.empty();
-    }
-
     cv::Mat DepthMaskGenerator::getDepthNormalized() const
     {
         std::lock_guard<std::mutex> lk(state_mutex);
         return depth_normalized.clone();
-    }
-
-    int DepthMaskGenerator::colormapProducedCount() const
-    {
-        std::lock_guard<std::mutex> lk(state_mutex);
-        return colormap_produced_count;
     }
 
     int DepthMaskGenerator::updateEnteredCount() const
@@ -108,7 +82,7 @@ namespace depth_anything
     void DepthMaskGenerator::update(const cv::Mat& frame, const DepthMaskOptions& options,
         const std::string& modelPath, nvinfer1::ILogger& logger)
     {
-        if (!options.enabled && !options.produce_colormap && !options.produce_normalized)
+        if (!options.produce_normalized)
             return;
         const auto now = std::chrono::steady_clock::now();
         if (frame.empty())
@@ -174,111 +148,6 @@ namespace depth_anything
         }
         ++depth_succeeded_count;
         depth_normalized = depth_norm.clone();
-
-        if (options.produce_colormap)
-        {
-            // Gamma 曲线只作用于热力图显示,不动 depth_norm 本身(后面的
-            // 直方图阈值是百分位的,对单调变换不变,但保持显示和遮罩解耦更
-            // 干净)。gamma < 1 把暗端拉亮,gamma > 1 反之。
-            const float gamma = std::clamp(options.heatmap_gamma, 0.1f, 5.0f);
-            cv::Mat depth_for_color;
-            if (std::abs(gamma - 1.0f) < 1e-3f)
-            {
-                depth_for_color = depth_norm;
-            }
-            else
-            {
-                cv::Mat depth_f;
-                depth_norm.convertTo(depth_f, CV_32F, 1.0 / 255.0);
-                cv::pow(depth_f, gamma, depth_f);
-                depth_f.convertTo(depth_for_color, CV_8U, 255.0);
-            }
-            cv::applyColorMap(depth_for_color, colormap_bgr, options.colormap_type);
-            ++colormap_produced_count;
-        }
-
-        if (!options.enabled)
-            return;
-
-        int near_percent = std::clamp(options.near_percent, 1, 100);
-
-        const int total = depth_norm.rows * depth_norm.cols;
-        if (total <= 0)
-        {
-            return;
-        }
-
-        const int target = std::max(1, (total * near_percent) / 100);
-        int hist[256] = {};
-        for (int y = 0; y < depth_norm.rows; ++y)
-        {
-            const uint8_t* row = depth_norm.ptr<uint8_t>(y);
-            for (int x = 0; x < depth_norm.cols; ++x)
-            {
-                hist[row[x]]++;
-            }
-        }
-
-        int threshold = 0;
-        if (!options.invert)
-        {
-            int count = 0;
-            for (int i = 0; i < 256; ++i)
-            {
-                count += hist[i];
-                if (count >= target)
-                {
-                    threshold = i;
-                    break;
-                }
-            }
-        }
-        else
-        {
-            int count = 0;
-            for (int i = 255; i >= 0; --i)
-            {
-                count += hist[i];
-                if (count >= target)
-                {
-                    threshold = i;
-                    break;
-                }
-            }
-        }
-
-        cv::Mat mask;
-        if (!options.invert)
-            cv::compare(depth_norm, threshold, mask, cv::CMP_LE);
-        else
-            cv::compare(depth_norm, threshold, mask, cv::CMP_GE);
-
-        const int expand = std::clamp(options.expand, 0, 128);
-        if (expand > 0)
-        {
-            const int kernelSize = 2 * expand + 1;
-            cv::Mat kernel = cv::getStructuringElement(
-                cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
-            cv::dilate(mask, mask, kernel);
-        }
-
-        const int nonZero = cv::countNonZero(mask);
-        const bool hasPreviousMask = !mask_binary.empty();
-        if (total > 0)
-        {
-            if (hasPreviousMask && near_percent < 100 && nonZero >= total)
-            {
-                last_error = "Depth mask became full-frame; keeping previous mask.";
-                return;
-            }
-            if (hasPreviousMask && near_percent > 1 && nonZero <= 0)
-            {
-                last_error = "Depth mask became empty; keeping previous mask.";
-                return;
-            }
-        }
-
-        mask_binary = std::move(mask);
     }
 
     DepthMaskGenerator& GetDepthMaskGenerator()

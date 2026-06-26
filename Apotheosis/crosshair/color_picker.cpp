@@ -12,50 +12,65 @@ namespace crosshair
 {
 namespace
 {
-std::atomic<bool> g_armed{ false };
+std::atomic<int> g_armed_token{ 0 }; // 0 = idle; else current owner token
 
-std::mutex g_result_mutex;
+std::mutex g_result_mutex;           // guards everything below
+int  g_next_token   = 0;
 bool g_result_ready = false;
+int  g_result_token = 0;
 int  g_result_h = 0;
 int  g_result_s = 0;
 int  g_result_v = 0;
 } // namespace
 
-void ArmColorPick()
+int ArmColorPick()
 {
+    int token;
     {
         std::lock_guard<std::mutex> lk(g_result_mutex);
         g_result_ready = false;
+        token = ++g_next_token;
+        if (token == 0) token = ++g_next_token; // never hand out 0
     }
-    g_armed.store(true);
+    g_armed_token.store(token);
+    return token;
 }
 
 void CancelColorPick()
 {
-    g_armed.store(false);
+    g_armed_token.store(0);
 }
 
 bool IsColorPickArmed()
 {
-    return g_armed.load();
+    return g_armed_token.load() != 0;
+}
+
+int ArmedToken()
+{
+    return g_armed_token.load();
 }
 
 void SubmitPickedColor(int h, int s, int v)
 {
+    const int token = g_armed_token.load();
+    if (token == 0)
+        return; // nobody armed — ignore stray click
     {
         std::lock_guard<std::mutex> lk(g_result_mutex);
         g_result_h = h;
         g_result_s = s;
         g_result_v = v;
+        g_result_token = token;
         g_result_ready = true;
     }
-    g_armed.store(false);
+    g_armed_token.store(0); // result now carries the token; session done
 }
 
-bool TakePickedColor(int& h, int& s, int& v)
+bool TakePickedColor(int token, int& h, int& s, int& v)
 {
     std::lock_guard<std::mutex> lk(g_result_mutex);
-    if (!g_result_ready)
+    if (!g_result_ready || g_result_token != token)
         return false;
     h = g_result_h;
     s = g_result_s;

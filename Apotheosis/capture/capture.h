@@ -76,6 +76,4 @@ public:
     virtual int GetPcapIfDroppedFps()       const { return 0; }
 };
 
-cv::Mat getCurrentDetectionSuppressionMask();
-
 #endif // CAPTURE_H

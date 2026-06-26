@@ -100,22 +100,10 @@ void ConfigBridge::syncToRuntime() {
     // --- Depth ---
     config.depth_inference_enabled = cm.depthInferenceEnabled();
     config.depth_model_path        = qs(cm.depthModelPath());
-    config.depth_fps               = cm.depthFps();
-    config.depth_mask_enabled      = cm.depthMaskEnabled();
-    config.depth_mask_near_percent = cm.depthMaskNearPercent();
-    config.depth_mask_alpha        = cm.depthMaskAlpha();
     config.depth_mask_fps          = cm.depthMaskFps();
     config.depth_opt_input_size    = cm.depthOptInputSize();
     config.depth_norm_clip_low_pct = cm.depthNormClipLowPct();
     config.depth_norm_clip_high_pct = cm.depthNormClipHighPct();
-    config.depth_show_heatmap      = cm.depthShowHeatmap();
-    config.depth_heatmap_gamma     = cm.depthHeatmapGamma();
-    config.depth_show_bbox_distance = cm.depthShowBboxDistance();
-    config.depth_mask_expand       = cm.depthMaskExpand();
-    config.depth_mask_hold_frames  = cm.depthMaskHoldFrames();
-    config.depth_mask_suppression_ratio = cm.depthMaskSuppressionRatio();
-    config.depth_mask_invert       = cm.depthMaskInvert();
-    config.depth_colormap          = cm.depthColormap();
 
     // --- Overlay ---
     config.overlay_opacity  = cm.overlayOpacity();
@@ -165,20 +153,14 @@ void ConfigBridge::syncToRuntime() {
     config.laser_smooth         = cm.laserSmooth();
 
     // --- Flashlight halo ---
-    config.flashlight_show_preview         = cm.flashlightShowPreview();
-    config.flashlight_brightness_threshold = cm.flashlightBrightnessThreshold();
-    config.flashlight_min_radius           = cm.flashlightMinRadius();
-    config.flashlight_max_radius           = cm.flashlightMaxRadius();
-    config.flashlight_min_circularity      = cm.flashlightMinCircularity();
-    config.flashlight_open_radius          = cm.flashlightOpenRadius();
-    config.flashlight_min_local_contrast   = cm.flashlightMinLocalContrast();
-    config.flashlight_max_spots            = cm.flashlightMaxSpots();
+    config.flashlight_show_preview     = cm.flashlightShowPreview();
+    config.flashlight_sensitivity      = cm.flashlightSensitivity();
+    config.flashlight_reject_strength  = cm.flashlightRejectStrength();
+    config.flashlight_spot_size        = cm.flashlightSpotSize();
 
     // --- Glass filter ---
     config.glass_filter_show_preview = cm.glassFilterShowPreview();
-    config.glass_edge_ring_frac      = cm.glassEdgeRingFrac();
-    config.glass_coverage_threshold  = cm.glassCoverageThreshold();
-    config.glass_min_box_short_side  = cm.glassMinBoxShortSide();
+    config.glass_filter_strength     = cm.glassFilterStrength();
 
     {
         auto qcolors = cm.glassColors();
@@ -305,22 +287,10 @@ void ConfigBridge::syncFromRuntime()
     // --- Depth ---
     cm.setDepthInferenceEnabled(config.depth_inference_enabled);
     cm.setDepthModelPath(qstr(config.depth_model_path));
-    cm.setDepthFps(config.depth_fps);
-    cm.setDepthMaskEnabled(config.depth_mask_enabled);
-    cm.setDepthMaskNearPercent(config.depth_mask_near_percent);
-    cm.setDepthMaskAlpha(config.depth_mask_alpha);
     cm.setDepthMaskFps(config.depth_mask_fps);
     cm.setDepthOptInputSize(config.depth_opt_input_size);
     cm.setDepthNormClipLowPct(config.depth_norm_clip_low_pct);
     cm.setDepthNormClipHighPct(config.depth_norm_clip_high_pct);
-    cm.setDepthShowHeatmap(config.depth_show_heatmap);
-    cm.setDepthHeatmapGamma(config.depth_heatmap_gamma);
-    cm.setDepthShowBboxDistance(config.depth_show_bbox_distance);
-    cm.setDepthMaskExpand(config.depth_mask_expand);
-    cm.setDepthMaskHoldFrames(config.depth_mask_hold_frames);
-    cm.setDepthMaskSuppressionRatio(config.depth_mask_suppression_ratio);
-    cm.setDepthMaskInvert(config.depth_mask_invert);
-    cm.setDepthColormap(config.depth_colormap);
 
     // --- Overlay ---
     cm.setOverlayOpacity(config.overlay_opacity);
@@ -354,19 +324,13 @@ void ConfigBridge::syncFromRuntime()
 
     // --- Flashlight halo ---
     cm.setFlashlightShowPreview(config.flashlight_show_preview);
-    cm.setFlashlightBrightnessThreshold(config.flashlight_brightness_threshold);
-    cm.setFlashlightMinRadius(config.flashlight_min_radius);
-    cm.setFlashlightMaxRadius(config.flashlight_max_radius);
-    cm.setFlashlightMinCircularity(config.flashlight_min_circularity);
-    cm.setFlashlightOpenRadius(config.flashlight_open_radius);
-    cm.setFlashlightMinLocalContrast(config.flashlight_min_local_contrast);
-    cm.setFlashlightMaxSpots(config.flashlight_max_spots);
+    cm.setFlashlightSensitivity(config.flashlight_sensitivity);
+    cm.setFlashlightRejectStrength(config.flashlight_reject_strength);
+    cm.setFlashlightSpotSize(config.flashlight_spot_size);
 
     // --- Glass filter ---
     cm.setGlassFilterShowPreview(config.glass_filter_show_preview);
-    cm.setGlassEdgeRingFrac(config.glass_edge_ring_frac);
-    cm.setGlassCoverageThreshold(config.glass_coverage_threshold);
-    cm.setGlassMinBoxShortSide(config.glass_min_box_short_side);
+    cm.setGlassFilterStrength(config.glass_filter_strength);
     {
         QList<ConfigManager::ColorProfile> qcolors;
         for (const auto& c : config.glass_colors) {

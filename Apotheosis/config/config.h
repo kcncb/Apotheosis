@@ -193,19 +193,6 @@ struct HotkeyProfile
     bool  dynamic_fov_enabled  = false;
     float dynamic_fov_strength = 0.60f;
 
-    // Threat-weighted target priority. The threat score is a [0,1] blend of
-    // (a) normalized depth at the track pivot (closer = higher threat) and
-    // (b) head-class detection confidence (higher conf = higher threat).
-    // `threat_depth_head_ratio` linearly mixes the two: 0 = full depth, 1 =
-    // full head-conf. The result multiplies into the lock-candidate score
-    // via `threat_weight` (0 = disable, 1 = full multiplicative effect).
-    // `threat_head_class_id` may be -1 when no head class is selected — the
-    // head-conf term then falls back to neutral 0.5.
-    // 威胁权重 + 头部类别;depth/head 混合比内部硬编 0.5(各占一半)。
-    bool  threat_priority_enabled = false;
-    float threat_weight           = 0.50f;
-    int   threat_head_class_id    = -1;
-
     // 近距离瞄头(body→head pivot 吸附)。当一个 body(非 head)目标框够大(近距离,
     // 框高 / 检测高 ≥ close_range_trigger_height_frac),且其内部上半区存在一个
     // close_range_head_class_id 的 head 检测时,把该目标的瞄准点吸附到 head 框,让贴脸
@@ -329,36 +316,15 @@ public:
     // Depth
     bool depth_inference_enabled = true;
     std::string depth_model_path = "depth_anything_v2.engine";
-    int depth_fps = 100;
-    int depth_colormap = 18;
     // TRT OptimizationProfile 的 OPT 档输入边长(方形)。只在导出 .engine 时被用作
     // kernel autotune 最优尺寸,改完必须删旧 .engine 重新导出才生效。范围 [160, 640]。
     int depth_opt_input_size = 224;
-    bool depth_show_heatmap = false;
-    // 热力图 gamma 曲线。pow(d_normalized, gamma) 后再着色。
-    // < 1 把暗端(远景)拉亮、亮端(近景)轻微压暗;> 1 反之。1 = 不变。
-    // 只影响显示,不影响深度遮罩。范围 [0.1, 5.0]。
-    float depth_heatmap_gamma = 1.0f;
-    // 在独立检测预览窗口里给每个 bbox 标注相对深度(每帧 0..1)。
-    bool depth_show_bbox_distance = false;
     // 深度归一化时裁掉的低/高百分位。0/100 = 纯 MIN-MAX(传统行为);
     // 把上限调到 95 可以裁掉极近离群值(贴脸的枪/手),避免远景
     // 被压扁到 depth_norm≈0、和敌人一起被遮罩误伤。范围 [0, 50] / [50, 100]。
     float depth_norm_clip_low_pct  = 0.0f;
     float depth_norm_clip_high_pct = 100.0f;
-    bool depth_mask_enabled = false;
     int depth_mask_fps = 5;
-    int depth_mask_near_percent = 20;
-    int depth_mask_expand = 0;
-    int depth_mask_hold_frames = 0;
-    int depth_mask_alpha = 90;
-    bool depth_mask_invert = false;
-    // Fraction of bbox pixels (0..1) that must fall under the depth-derived
-    // suppression mask before the detection is dropped. 0 means "suppress on
-    // any single pixel" (legacy behaviour); 1 means "never suppress". 0.30
-    // is a good default — drops detections that are >30% on a wall but
-    // ignores edge grazing.
-    float depth_mask_suppression_ratio = 0.30f;
 
     // Debug
     bool show_window = true;
@@ -460,18 +426,14 @@ public:
     // the geometry of the search. Per-hotkey opt-in lives on
     // HotkeyProfile::flashlight_detect_enabled.
     bool  flashlight_show_preview = false;     // overlay debug toggle
-    int   flashlight_brightness_threshold = 220; // grey-level on max(B,G,R) [0,255]
-    int   flashlight_min_radius = 5;           // min equiv-area radius (det px)
-    int   flashlight_max_radius = 200;         // max equiv-area radius (det px); wide so near halos pass — falloff gate handles selectivity
-    float flashlight_min_circularity = 0.60f;  // 4πA/P² floor (1.0 = perfect circle)
-    int   flashlight_open_radius = 1;          // MORPH_OPEN px before CC (0=off)
-    int   flashlight_min_local_contrast = 30;  // sky-rejection: core_mean − ring_mean floor, radius-proportional (0=off)
-    // Hard cap on simultaneously reported halos (after dedup, by descending
-    // confidence). Bounds the "tuned for near flood → swarm of phantoms at
-    // distance" failure. The mouse loop still injects only the single best one,
-    // filed under the fixed `shoudiantong` aim class (kFlashlightClassId);
-    // route its priority from the aim-class UI like any model class.
-    int   flashlight_max_spots = 3;
+    // Three behaviour-level macro knobs (each 0..100). ALL internal detection /
+    // discrimination constants (brightness, radius band, circularity, contrast,
+    // depth-gate, temporal tracker, colocation) are derived from these by
+    // crosshair::flashlight_derive_tuning() — the seven old raw parameters no
+    // longer exist as config. See crosshair/flashlight_tuning.h.
+    int   flashlight_sensitivity     = 50; // 灵敏度: 锁得勤 ↔ 锁得稳 (外观轴)
+    int   flashlight_reject_strength = 50; // 抗误锁: 信外观 ↔ 信判别 (深度/时间/联动)
+    int   flashlight_spot_size       = 50; // 光斑大小: 可接受半径档 (按分辨率自动)
 
     // ---- Glass filter (穿不透玻璃后的人形抑制) ----------------------------
     // 三角洲里有打不穿的玻璃,模型只看轮廓也会识别出后面的人,锁过去白浪
@@ -479,11 +441,11 @@ public:
     // 的"边缘环"采样玻璃膜特征色,命中率超过阈值的 box 直接抹掉。所有
     // 工作在 CPU 完成、对每框 < 0.2 ms,延迟开销可忽略。
     //
-    // 全局色带 / 环厚 / 命中阈值,启用与否在 HotkeyProfile::glass_filter_enabled。
+    // 全局色带 + 一个宏观旋钮「过滤强度」,启用与否在 HotkeyProfile::glass_filter_enabled。
+    // 旧的环厚 / 命中阈值 / 最小框三个原始参数已收进单旋钮,环厚固定 0.15、最小框
+    // 按分辨率自动,命中阈值由强度反推。映射唯一来源:crosshair/glass_tuning.h。
     bool  glass_filter_show_preview = false;     // 预览叠图(框边缘画环)
-    float glass_edge_ring_frac      = 0.15f;     // 环厚 ÷ 框短边 [0.05, 0.45]
-    float glass_coverage_threshold  = 0.45f;     // 环内命中率 ≥ 此值 → 判玻璃
-    int   glass_min_box_short_side  = 20;        // 框短边 < 此值不参与过滤
+    int   glass_filter_strength     = 50;        // 过滤强度 0..100: 保守 ↔ 激进
     std::vector<CrosshairColorProfileConfig> glass_colors; // 默认浅蓝 + 浅绿薄膜双带
 
     // Aim hotkeys. Must contain at least one entry so the UI always has

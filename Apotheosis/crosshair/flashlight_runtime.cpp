@@ -1,21 +1,30 @@
 #include "flashlight_runtime.h"
 
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 
 #include "Apotheosis.h"
 #include "config.h"
+#include "depth/depth_mask.h"
 #include "flashlight_detector.h"
+#include "flashlight_tracker.h"
+#include "flashlight_tuning.h"
 #include "runtime/active_hotkey.h"
+
+// Defined here; declared in Apotheosis.h. Tells the capture thread to produce the
+// normalized depth map while the 寻光 depth-gate is active (depth.mode > 0).
+std::atomic<bool> g_flashlight_depth_required{false};
 
 namespace flashlight_runtime
 {
 
 namespace
 {
-std::mutex g_mtx;
-Snapshot   g_snap{};
+std::mutex                    g_mtx;
+Snapshot                      g_snap{};
 crosshair::FlashlightDetector g_detector;
+crosshair::FlashlightTracker  g_tracker; // capture-thread only (process_frame)
 } // namespace
 
 Snapshot read()
@@ -32,87 +41,174 @@ void publish(const Snapshot& snap)
 
 void process_frame(const cv::Mat& bgrFrame)
 {
+    // Default: don't request depth. Set true below once we know the gate engages.
+    ::g_flashlight_depth_required.store(false);
+
     if (bgrFrame.empty() || bgrFrame.type() != CV_8UC3)
     {
+        g_tracker.reset();
         publish(Snapshot{});
         return;
     }
 
-    // Active-hotkey gate. The flashlight halo is a per-hotkey opt-in so it
-    // can't steal focus on hotkeys that shouldn't be aiming at lights (e.g.
-    // a melee profile). When no hotkey is active or the active one has the
-    // flag off, clear the snapshot and bail.
+    // Active-hotkey gate (per-hotkey opt-in). Clear + reset tracks when off so
+    // stale tracks never bleed across an enable/disable.
     const int active_idx = runtime::g_active_hotkey_index.load();
     if (active_idx < 0)
     {
+        g_tracker.reset();
         publish(Snapshot{});
         return;
     }
 
-    crosshair::FlashlightDetectorSettings settings;
-    bool enabled = false;
+    int sensitivity = 50;
+    int reject      = 50;
+    int spot_size   = 50;
     {
         std::lock_guard<std::recursive_mutex> cfg(configMutex);
         if (active_idx >= static_cast<int>(config.hotkeys.size()))
         {
+            g_tracker.reset();
             publish(Snapshot{});
             return;
         }
         const auto& hk = config.hotkeys[active_idx];
         if (!hk.flashlight_detect_enabled)
         {
+            g_tracker.reset();
             publish(Snapshot{});
             return;
         }
-        enabled = true;
-        settings.enabled              = true;
-        settings.brightness_threshold = config.flashlight_brightness_threshold;
-        settings.min_radius           = config.flashlight_min_radius;
-        settings.max_radius           = config.flashlight_max_radius;
-        settings.min_circularity      = config.flashlight_min_circularity;
-        settings.open_radius          = config.flashlight_open_radius;
-        settings.min_local_contrast   = config.flashlight_min_local_contrast;
-        settings.max_spots            = config.flashlight_max_spots;
+        sensitivity = config.flashlight_sensitivity;
+        reject      = config.flashlight_reject_strength;
+        spot_size   = config.flashlight_spot_size;
     }
-    if (!enabled)
+
+    const crosshair::FlashlightTuning tuning =
+        crosshair::flashlight_derive_tuning(sensitivity, reject, spot_size, bgrFrame.size());
+
+    // Request normalized depth from the capture thread iff the depth-gate engages.
+    ::g_flashlight_depth_required.store(tuning.depth.mode > 0);
+
+    const auto raw = g_detector.detectAll(bgrFrame, tuning.det);
+    if (raw.empty())
     {
+        // Tick the tracker with no spots so ages decay and dead tracks drop.
+        g_tracker.update({}, {}, tuning.temporal);
         publish(Snapshot{});
         return;
     }
 
-    const auto spots = g_detector.detectAll(bgrFrame, settings);
+    // ---- Depth-gate prep (杀太阳/天空/远处泛光) ----
+    cv::Mat depthN;
+    bool    depth_map_ok = false;
+    bool    sky_present  = false;
+    if (tuning.depth.mode > 0)
+    {
+        depthN = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
+        depth_map_ok = !depthN.empty() && depthN.type() == CV_8UC1 &&
+                       depthN.size() == bgrFrame.size();
+        if (depth_map_ok)
+        {
+            // depthN: 255 = nearest, 0 = farthest (per-frame relative). A large
+            // far-cluster means open sky is in view → safe to HARD-reject far
+            // spots; without it we only soft-penalize (avoids killing a real
+            // enemy at the far end of an indoor corridor).
+            const cv::Mat farMask = depthN <= tuning.depth.far_level;
+            const double frac = static_cast<double>(cv::countNonZero(farMask)) /
+                                static_cast<double>(depthN.rows * depthN.cols);
+            sky_present = frac >= tuning.depth.sky_cluster_frac;
+        }
+    }
+
+    // ---- Temporal tracker (杀水面/玻璃闪烁反光) ----
+    std::vector<cv::Point2f> centers;
+    std::vector<float>       radii;
+    centers.reserve(raw.size());
+    radii.reserve(raw.size());
+    for (const auto& s : raw)
+    {
+        centers.push_back(s.center);
+        radii.push_back(s.radius);
+    }
+    const auto verdicts = g_tracker.update(centers, radii, tuning.temporal);
+
+    // ---- Score + gate each spot ----
+    const cv::Rect frame_rect(0, 0, bgrFrame.cols, bgrFrame.rows);
+    std::vector<Spot> spots;
+    spots.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i)
+    {
+        const auto& s = raw[i];
+        const crosshair::FlashlightTrackVerdict v =
+            (i < verdicts.size()) ? verdicts[i] : crosshair::FlashlightTrackVerdict{};
+
+        bool  passed_depth = true;
+        float penalty      = 0.0f;
+        if (tuning.depth.mode > 0)
+        {
+            if (depth_map_ok)
+            {
+                const int cx = std::clamp(static_cast<int>(std::lround(s.center.x)), 0, depthN.cols - 1);
+                const int cy = std::clamp(static_cast<int>(std::lround(s.center.y)), 0, depthN.rows - 1);
+                const bool far = depthN.at<uint8_t>(cy, cx) <= tuning.depth.far_level;
+                if (far)
+                {
+                    if (tuning.depth.mode == 2 && sky_present)
+                        passed_depth = false; // hard-reject sun/sky (loop can still
+                                              // rescue via colocation)
+                    else
+                        penalty += tuning.depth.soft_penalty;
+                }
+            }
+            else if (tuning.depth.top_band_penalty > 0.0f)
+            {
+                // No usable depth map → positional fallback: sun/sky sit high in
+                // the frame, so penalize the top band.
+                if (s.center.y < bgrFrame.rows * 0.30f)
+                    penalty += tuning.depth.top_band_penalty;
+            }
+        }
+
+        float conf = s.confidence - penalty;
+        if (v.onset)     conf += tuning.temporal.onset_bonus;
+        if (v.confirmed) conf += tuning.temporal.confirmed_bonus;
+        conf = std::clamp(conf, 0.0f, 1.0f);
+
+        if (conf < tuning.accept_conf_floor)
+            continue;
+
+        const int diameter = std::max(2, static_cast<int>(std::lround(s.radius * 2.0f)));
+        const int bx = static_cast<int>(std::lround(s.center.x)) - diameter / 2;
+        const int by = static_cast<int>(std::lround(s.center.y)) - diameter / 2;
+        const cv::Rect clipped = cv::Rect(bx, by, diameter, diameter) & frame_rect;
+        if (clipped.area() <= 0)
+            continue;
+
+        Spot out;
+        out.box          = clipped;
+        out.center       = s.center;
+        out.radius       = s.radius;
+        out.confidence   = conf;
+        out.passed_depth = passed_depth;
+        out.confirmed    = v.confirmed;
+        out.onset        = v.onset;
+        spots.push_back(out);
+    }
+
     if (spots.empty())
     {
         publish(Snapshot{});
         return;
     }
 
-    const auto& s = spots.front();
-
-    // Synthesize a bbox: a square of side 2*radius centred on the halo,
-    // clamped into the frame so downstream box-arithmetic never sees
-    // negative offsets.
-    const int diameter = std::max(2, static_cast<int>(std::lround(s.radius * 2.0f)));
-    int bx = static_cast<int>(std::lround(s.center.x)) - diameter / 2;
-    int by = static_cast<int>(std::lround(s.center.y)) - diameter / 2;
-    int bw = diameter;
-    int bh = diameter;
-    cv::Rect raw(bx, by, bw, bh);
-    const cv::Rect frame_rect(0, 0, bgrFrame.cols, bgrFrame.rows);
-    cv::Rect clipped = raw & frame_rect;
-    if (clipped.area() <= 0)
-    {
-        publish(Snapshot{});
-        return;
-    }
+    std::sort(spots.begin(), spots.end(),
+              [](const Spot& a, const Spot& b) { return a.confidence > b.confidence; });
 
     Snapshot snap;
-    snap.valid      = true;
-    snap.box        = clipped;
-    snap.center     = s.center;
-    snap.radius     = s.radius;
-    snap.confidence = s.confidence;
-    snap.ts         = std::chrono::steady_clock::now();
+    snap.valid = true;
+    snap.spots = std::move(spots);
+    snap.ts    = std::chrono::steady_clock::now();
     publish(snap);
 }
 

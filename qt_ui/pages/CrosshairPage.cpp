@@ -683,7 +683,7 @@ void CrosshairPage::saveCrosshairColors() {
 // ---- Crosshair colour eyedropper ----
 
 void CrosshairPage::toggleColorPick() {
-    if (m_picking) {
+    if (m_pickToken != 0) {
         crosshair::CancelColorPick();
         finishPicking();
         return;
@@ -694,8 +694,7 @@ void CrosshairPage::toggleColorPick() {
     if (!cm.showWindow())
         cm.setShowWindow(true);
 
-    crosshair::ArmColorPick();
-    m_picking = true;
+    m_pickToken = crosshair::ArmColorPick();
     m_pickColorBtn->setText(QStringLiteral("取消取色"));
     m_pickColorBtn->setStyleSheet(QStringLiteral("color:#D23B3B; font-weight:600;"));
     m_pickTimer->start();
@@ -703,11 +702,11 @@ void CrosshairPage::toggleColorPick() {
 
 void CrosshairPage::pollPickedColor() {
     int h = 0, s = 0, v = 0;
-    if (crosshair::TakePickedColor(h, s, v)) {
+    if (crosshair::TakePickedColor(m_pickToken, h, s, v)) {
         applyPickedColor(h, s, v);
         finishPicking();
-    } else if (!crosshair::IsColorPickArmed()) {
-        // Disarmed without a result (e.g. right-click cancel inside the preview).
+    } else if (crosshair::ArmedToken() != m_pickToken) {
+        // Superseded by another page's 取色, or cancelled in the preview.
         finishPicking();
     }
 }
@@ -745,7 +744,7 @@ void CrosshairPage::applyPickedColor(int h, int s, int v) {
 }
 
 void CrosshairPage::finishPicking() {
-    m_picking = false;
+    m_pickToken = 0;
     if (m_pickTimer)
         m_pickTimer->stop();
     m_pickColorBtn->setText(QStringLiteral("取色"));

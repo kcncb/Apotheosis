@@ -27,7 +27,6 @@
 #include "model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "cuda_preprocess.h"
-#include "depth/depth_mask.h"
 #include "capture.h"
 #include "runtime/active_hotkey.h"
 
@@ -232,91 +231,6 @@ std::string hex64(uint64_t value)
     std::ostringstream oss;
     oss << std::hex << value;
     return oss.str();
-}
-
-// See dml_detector.cpp:intersectsDepthMask for the rationale. Both detectors
-// keep their own copies because they live behind a runtime polymorphic
-// boundary and we don't want to drag a shared utility into the public
-// detector header just for this one helper.
-bool intersectsDepthMask(const cv::Rect& box, const cv::Mat& mask, float ratio_threshold)
-{
-    if (box.width <= 0 || box.height <= 0 || mask.empty() || mask.type() != CV_8UC1)
-        return false;
-
-    const cv::Rect imageBounds(0, 0, mask.cols, mask.rows);
-    const cv::Rect clipped = box & imageBounds;
-    if (clipped.width <= 0 || clipped.height <= 0)
-        return false;
-
-    const cv::Mat roi = mask(clipped);
-    const int occluded = cv::countNonZero(roi);
-    if (occluded <= 0)
-        return false;
-
-    const int total = clipped.area();
-    if (total <= 0)
-        return false;
-
-    const float ratio = static_cast<float>(occluded) / static_cast<float>(total);
-    const float threshold = std::clamp(ratio_threshold, 0.0f, 1.0f);
-    return ratio >= threshold;
-}
-
-void filterDetectionsByDepthMask(std::vector<Detection>& detections)
-{
-    static cv::Mat holdTtl;
-
-    if (detections.empty())
-        return;
-
-    if (!config.depth_inference_enabled || !config.depth_mask_enabled)
-    {
-        holdTtl.release();
-        return;
-    }
-
-    const int holdFrames = std::clamp(config.depth_mask_hold_frames, 0, 120);
-    cv::Mat currentMask = getCurrentDetectionSuppressionMask();
-    cv::Mat suppressionMask;
-
-    if (holdFrames <= 0)
-    {
-        holdTtl.release();
-        suppressionMask = currentMask;
-    }
-    else
-    {
-        if (!currentMask.empty() && currentMask.type() == CV_8UC1)
-        {
-            if (holdTtl.empty() || holdTtl.size() != currentMask.size())
-                holdTtl = cv::Mat::zeros(currentMask.size(), CV_16UC1);
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-            holdTtl.setTo(cv::Scalar(static_cast<uint16_t>(holdFrames)), currentMask);
-        }
-        else if (!holdTtl.empty())
-        {
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-        }
-
-        if (!holdTtl.empty() && cv::countNonZero(holdTtl) > 0)
-        {
-            cv::compare(holdTtl, cv::Scalar(0), suppressionMask, cv::CMP_GT);
-        }
-        else
-        {
-            suppressionMask.release();
-        }
-    }
-
-    if (suppressionMask.empty() || suppressionMask.type() != CV_8UC1)
-        return;
-
-    const float ratio = std::clamp(config.depth_mask_suppression_ratio, 0.0f, 1.0f);
-
-    detections.erase(
-        std::remove_if(detections.begin(), detections.end(),
-            [&suppressionMask, ratio](const Detection& det) { return intersectsDepthMask(det.box, suppressionMask, ratio); }),
-        detections.end());
 }
 } // namespace
 
@@ -1732,7 +1646,6 @@ void TrtDetector::inferenceThread()
                                 &lastNmsTimeValue,
                                 -1.0f, 0.0
                             );
-                            filterDetectionsByDepthMask(detections);
                             capDetectionsToMax(detections, config.max_detections);
 
                             {
@@ -1894,7 +1807,6 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
         nmsTime,
         st.baseConf, st.areaThreshPx
     );
-    filterDetectionsByDepthMask(detections);
     capDetectionsToMax(detections, config.max_detections);
 
     {

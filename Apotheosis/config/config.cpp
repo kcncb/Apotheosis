@@ -172,22 +172,10 @@ void Config::writeDefaultsInPlace()
 
     depth_inference_enabled = true;
     depth_model_path = "depth_anything_v2.engine";
-    depth_fps = 100;
-    depth_colormap = 18;
     depth_opt_input_size = 224;
-    depth_show_heatmap = false;
-    depth_heatmap_gamma = 1.0f;
-    depth_show_bbox_distance = false;
     depth_norm_clip_low_pct = 0.0f;
     depth_norm_clip_high_pct = 100.0f;
-    depth_mask_enabled = false;
     depth_mask_fps = 5;
-    depth_mask_near_percent = 20;
-    depth_mask_expand = 0;
-    depth_mask_hold_frames = 0;
-    depth_mask_alpha = 90;
-    depth_mask_invert = false;
-    depth_mask_suppression_ratio = 0.30f;
 
     screenshot_button = splitString("None");
     screenshot_delay = 500;
@@ -338,32 +326,14 @@ bool Config::loadConfig(const std::string& filename)
     // ---------- Depth ----------
     depth_inference_enabled = get_bool("", "depth_inference_enabled", true);
     depth_model_path = get_string("", "depth_model_path", "depth_anything_v2.engine");
-    depth_fps = get_long("", "depth_fps", 100);
-    if (depth_fps < 0) depth_fps = 0;
-    depth_colormap = get_long("", "depth_colormap", 18);
-    if (depth_colormap < 0 || depth_colormap > 21) depth_colormap = 18;
     depth_opt_input_size = std::clamp(get_long("", "depth_opt_input_size", 224), 160, 640);
-    depth_show_heatmap = get_bool("", "depth_show_heatmap", false);
-    depth_heatmap_gamma = std::clamp(
-        static_cast<float>(get_double("", "depth_heatmap_gamma", 1.0)),
-        0.1f, 5.0f);
-    depth_show_bbox_distance = get_bool("", "depth_show_bbox_distance", false);
     depth_norm_clip_low_pct = std::clamp(
         static_cast<float>(get_double("", "depth_norm_clip_low_pct", 0.0)),
         0.0f, 50.0f);
     depth_norm_clip_high_pct = std::clamp(
         static_cast<float>(get_double("", "depth_norm_clip_high_pct", 100.0)),
         50.0f, 100.0f);
-    depth_mask_enabled = get_bool("", "depth_mask_enabled", false);
     depth_mask_fps = std::max(0, get_long("", "depth_mask_fps", 5));
-    depth_mask_near_percent = std::clamp(get_long("", "depth_mask_near_percent", 20), 1, 100);
-    depth_mask_expand = std::clamp(get_long("", "depth_mask_expand", 0), 0, 128);
-    depth_mask_hold_frames = std::clamp(get_long("", "depth_mask_hold_frames", 0), 0, 120);
-    depth_mask_alpha = std::clamp(get_long("", "depth_mask_alpha", 90), 0, 255);
-    depth_mask_invert = get_bool("", "depth_mask_invert", false);
-    depth_mask_suppression_ratio = std::clamp(
-        static_cast<float>(get_double("", "depth_mask_suppression_ratio", 0.30)),
-        0.0f, 1.0f);
 
     // ---------- Debug ----------
     show_window = get_bool("", "show_window", true);
@@ -414,22 +384,14 @@ bool Config::loadConfig(const std::string& filename)
     laser_target_rect_h        = std::clamp(get_long("", "laser_target_rect_h",    60), 4, 4096);
 
     // ---- Flashlight halo detector ----
-    flashlight_show_preview         = get_bool("",   "flashlight_show_preview", false);
-    flashlight_brightness_threshold = std::clamp(get_long("", "flashlight_brightness_threshold", 220), 0, 255);
-    flashlight_min_radius           = std::clamp(get_long("", "flashlight_min_radius", 5),   1, 4096);
-    flashlight_max_radius           = std::clamp(get_long("", "flashlight_max_radius", 200), 1, 4096);
-    if (flashlight_max_radius < flashlight_min_radius)
-        flashlight_max_radius = flashlight_min_radius;
-    flashlight_min_circularity      = std::clamp(static_cast<float>(get_double("", "flashlight_min_circularity", 0.60)), 0.0f, 1.0f);
-    flashlight_open_radius          = std::clamp(get_long("", "flashlight_open_radius", 1), 0, 9);
-    flashlight_min_local_contrast   = std::clamp(get_long("", "flashlight_min_local_contrast", 30), 0, 255);
-    flashlight_max_spots            = std::clamp(get_long("", "flashlight_max_spots", 3), 1, 16);
+    flashlight_show_preview      = get_bool("",   "flashlight_show_preview", false);
+    flashlight_sensitivity       = std::clamp(get_long("", "flashlight_sensitivity",     50), 0, 100);
+    flashlight_reject_strength   = std::clamp(get_long("", "flashlight_reject_strength", 50), 0, 100);
+    flashlight_spot_size         = std::clamp(get_long("", "flashlight_spot_size",       50), 0, 100);
 
     // ---- Glass filter ----
     glass_filter_show_preview  = get_bool("",   "glass_filter_show_preview", false);
-    glass_edge_ring_frac       = std::clamp(static_cast<float>(get_double("", "glass_edge_ring_frac",      0.15)), 0.05f, 0.45f);
-    glass_coverage_threshold   = std::clamp(static_cast<float>(get_double("", "glass_coverage_threshold",  0.45)), 0.05f, 0.95f);
-    glass_min_box_short_side   = std::clamp(get_long("", "glass_min_box_short_side", 20), 4, 4096);
+    glass_filter_strength      = std::clamp(static_cast<int>(get_long("", "glass_filter_strength", 50)), 0, 100);
 
     crosshair_colors.clear();
     {
@@ -711,10 +673,6 @@ bool Config::loadConfig(const std::string& filename)
                     get_long(sec, "smart_trigger_cooldown_ms", legacy_cool));
             }
 
-            hk.threat_priority_enabled  = get_bool(sec, "threat_priority_enabled", hk.threat_priority_enabled);
-            hk.threat_weight            = static_cast<float>(get_double(sec, "threat_weight", hk.threat_weight));
-            hk.threat_head_class_id     = get_long(sec, "threat_head_class_id", hk.threat_head_class_id);
-
             // 动态 FOV:优先读 strength;否则从旧 margin_frac 反推算。
             {
                 hk.dynamic_fov_enabled = get_bool(sec, "dynamic_fov_enabled", hk.dynamic_fov_enabled);
@@ -803,9 +761,6 @@ bool Config::loadConfig(const std::string& filename)
         hk.smart_trigger_cooldown_ms  = std::clamp(hk.smart_trigger_cooldown_ms,  0, 5000);
         hk.dynamic_fov_strength       = std::clamp(hk.dynamic_fov_strength,       0.0f, 1.0f);
 
-        hk.threat_weight = std::clamp(hk.threat_weight, 0.0f, 1.0f);
-        if (hk.threat_head_class_id < -1)
-            hk.threat_head_class_id = -1;
         if (hk.close_range_head_class_id < -1)
             hk.close_range_head_class_id = -1;
     };
@@ -935,24 +890,12 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Depth\n"
         << "depth_inference_enabled = " << to_bool_str(depth_inference_enabled) << "\n"
         << "depth_model_path = " << depth_model_path << "\n"
-        << "depth_fps = " << depth_fps << "\n"
-        << "depth_colormap = " << depth_colormap << "\n"
         << "depth_opt_input_size = " << depth_opt_input_size << "\n"
-        << "depth_show_heatmap = " << to_bool_str(depth_show_heatmap) << "\n"
         << std::fixed << std::setprecision(3)
-        << "depth_heatmap_gamma = " << depth_heatmap_gamma << "\n"
-        << "depth_show_bbox_distance = " << to_bool_str(depth_show_bbox_distance) << "\n"
         << "depth_norm_clip_low_pct = " << depth_norm_clip_low_pct << "\n"
         << "depth_norm_clip_high_pct = " << depth_norm_clip_high_pct << "\n"
-        << "depth_mask_enabled = " << to_bool_str(depth_mask_enabled) << "\n"
-        << "depth_mask_fps = " << depth_mask_fps << "\n"
-        << "depth_mask_near_percent = " << depth_mask_near_percent << "\n"
-        << "depth_mask_expand = " << depth_mask_expand << "\n"
-        << "depth_mask_hold_frames = " << depth_mask_hold_frames << "\n"
-        << "depth_mask_alpha = " << depth_mask_alpha << "\n"
-        << "depth_mask_invert = " << to_bool_str(depth_mask_invert) << "\n"
-        << std::fixed << std::setprecision(3)
-        << "depth_mask_suppression_ratio = " << depth_mask_suppression_ratio << "\n\n"
+        << std::setprecision(0)
+        << "depth_mask_fps = " << depth_mask_fps << "\n\n"
         << "replay_record_enabled = " << to_bool_str(replay_record_enabled) << "\n"
         << "replay_seconds = " << replay_seconds << "\n"
         << "replay_playback_speed = " << replay_playback_speed << "\n\n";
@@ -975,18 +918,12 @@ bool Config::saveConfig(const std::string& filename)
         << "laser_target_center_y = "     << laser_target_center_y     << "\n"
         << "laser_target_rect_w = "       << laser_target_rect_w       << "\n"
         << "laser_target_rect_h = "       << laser_target_rect_h       << "\n"
-        << "flashlight_show_preview = "         << to_bool_str(flashlight_show_preview)         << "\n"
-        << "flashlight_brightness_threshold = " << flashlight_brightness_threshold              << "\n"
-        << "flashlight_min_radius = "           << flashlight_min_radius                        << "\n"
-        << "flashlight_max_radius = "           << flashlight_max_radius                        << "\n"
-        << "flashlight_min_circularity = "      << flashlight_min_circularity                   << "\n"
-        << "flashlight_open_radius = "          << flashlight_open_radius                       << "\n"
-        << "flashlight_min_local_contrast = "   << flashlight_min_local_contrast                << "\n"
-        << "flashlight_max_spots = "            << flashlight_max_spots                         << "\n"
+        << "flashlight_show_preview = "    << to_bool_str(flashlight_show_preview) << "\n"
+        << "flashlight_sensitivity = "     << flashlight_sensitivity               << "\n"
+        << "flashlight_reject_strength = " << flashlight_reject_strength           << "\n"
+        << "flashlight_spot_size = "       << flashlight_spot_size                 << "\n"
         << "glass_filter_show_preview = "       << to_bool_str(glass_filter_show_preview)       << "\n"
-        << "glass_edge_ring_frac = "            << glass_edge_ring_frac                         << "\n"
-        << "glass_coverage_threshold = "        << glass_coverage_threshold                     << "\n"
-        << "glass_min_box_short_side = "        << glass_min_box_short_side                     << "\n\n";
+        << "glass_filter_strength = "           << glass_filter_strength                        << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -1062,11 +999,6 @@ bool Config::saveConfig(const std::string& filename)
              << std::setprecision(0)
              << "smart_trigger_hold_ms = " << hk.smart_trigger_hold_ms << "\n"
              << "smart_trigger_cooldown_ms = " << hk.smart_trigger_cooldown_ms << "\n"
-             << "threat_priority_enabled = " << to_bool_str(hk.threat_priority_enabled) << "\n"
-             << std::fixed << std::setprecision(3)
-             << "threat_weight = " << hk.threat_weight << "\n"
-             << std::setprecision(0)
-             << "threat_head_class_id = " << hk.threat_head_class_id << "\n"
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"

@@ -19,8 +19,8 @@
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
 #include "crosshair/flashlight_detector.h"
+#include "crosshair/flashlight_tuning.h"
 #include "crosshair/laser_detector.h"
-#include "depth/depth_mask.h"
 #include "detection_buffer.h"
 #include "i_detector.h"
 #include "preview_window.h"
@@ -112,23 +112,15 @@ struct PreviewConfigSnapshot
     // matching halo (the mouse loop separately consumes the runtime-side
     // snapshot, so what's drawn here is purely diagnostic).
     bool   flashlight_show_preview = false;
-    int    flashlight_brightness_threshold = 220;
-    int    flashlight_min_radius = 5;
-    int    flashlight_max_radius = 100;
-    float  flashlight_min_circularity = 0.60f;
-    int    flashlight_open_radius = 1;
-    int    flashlight_min_local_contrast = 30;
+    int    flashlight_sensitivity = 50;
+    int    flashlight_reject_strength = 50;
+    int    flashlight_spot_size = 50;
 
     // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
     int    fov_base_y = 0;
     bool   dynamic_fov_enabled = false;
     bool   hotkey_active = false;
-
-    // Depth heatmap overlay.
-    bool   depth_inference_enabled = false;
-    bool   depth_show_heatmap = false;
-    bool   depth_show_bbox_distance = false;
 };
 
 PreviewConfigSnapshot snapshot_config()
@@ -141,9 +133,6 @@ PreviewConfigSnapshot snapshot_config()
     s.crosshair_rect_h         = config.crosshair_rect_h;
     s.crosshair_min_pixel_count = config.crosshair_min_pixel_count;
     s.crosshair_close_radius   = config.crosshair_close_radius;
-    s.depth_inference_enabled  = config.depth_inference_enabled;
-    s.depth_show_heatmap       = config.depth_show_heatmap;
-    s.depth_show_bbox_distance = config.depth_show_bbox_distance;
     s.crosshair_colors.reserve(config.crosshair_colors.size());
     for (const auto& c : config.crosshair_colors)
     {
@@ -169,13 +158,10 @@ PreviewConfigSnapshot snapshot_config()
     s.laser_target_rect_w   = config.laser_target_rect_w;
     s.laser_target_rect_h   = config.laser_target_rect_h;
 
-    s.flashlight_show_preview         = config.flashlight_show_preview;
-    s.flashlight_brightness_threshold = config.flashlight_brightness_threshold;
-    s.flashlight_min_radius           = config.flashlight_min_radius;
-    s.flashlight_max_radius           = config.flashlight_max_radius;
-    s.flashlight_min_circularity      = config.flashlight_min_circularity;
-    s.flashlight_open_radius          = config.flashlight_open_radius;
-    s.flashlight_min_local_contrast   = config.flashlight_min_local_contrast;
+    s.flashlight_show_preview      = config.flashlight_show_preview;
+    s.flashlight_sensitivity       = config.flashlight_sensitivity;
+    s.flashlight_reject_strength   = config.flashlight_reject_strength;
+    s.flashlight_spot_size         = config.flashlight_spot_size;
     s.laser_colors.reserve(config.laser_colors.size());
     for (const auto& c : config.laser_colors)
     {
@@ -208,20 +194,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 {
     if (canvas.empty()) return;
 
-    // 0. Optional depth heatmap replacement. Done first so boxes/FOV/banner
-    //    are drawn on top of it.
-    if (cfg.depth_show_heatmap && cfg.depth_inference_enabled && canvas.type() == CV_8UC3)
-    {
-        cv::Mat heat = depth_anything::GetDepthMaskGenerator().getColormap();
-        if (!heat.empty())
-        {
-            if (heat.size() != canvas.size())
-                cv::resize(heat, heat, canvas.size(), 0, 0, cv::INTER_LINEAR);
-            if (heat.type() == canvas.type())
-                heat.copyTo(canvas);
-        }
-    }
-
     // 1. Detection boxes and class labels.
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
@@ -237,13 +209,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     const cv::Scalar textFg   = bgr(250, 245, 240);
     const cv::Scalar textBg   = bgr(0, 0, 0);
 
-    // Snapshot the latest normalized depth once for per-bbox sampling.
-    cv::Mat depthForBbox;
-    if (cfg.depth_show_bbox_distance && cfg.depth_inference_enabled)
-    {
-        depthForBbox = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
-    }
-
     for (size_t i = 0; i < boxes.size(); ++i)
     {
         const cv::Rect& r = boxes[i];
@@ -253,22 +218,7 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 
         const int cls = (i < classes.size()) ? classes[i] : -1;
         char label[64];
-        if (!depthForBbox.empty()
-            && depthForBbox.type() == CV_8UC1
-            && depthForBbox.size() == canvas.size())
-        {
-            // Sample depth at the box centre. 255 = nearest in frame, 0 =
-            // farthest. Show as 0..1 with 1 = nearest so users intuit
-            // "bigger = closer".
-            const cv::Point pc(clipped.x + clipped.width / 2,
-                               clipped.y + clipped.height / 2);
-            const uint8_t d = depthForBbox.at<uint8_t>(pc);
-            std::snprintf(label, sizeof(label), "#%d  d=%.2f", cls, d / 255.0f);
-        }
-        else
-        {
-            std::snprintf(label, sizeof(label), "#%d", cls);
-        }
+        std::snprintf(label, sizeof(label), "#%d", cls);
         draw_text_with_bg(canvas, label,
                           cv::Point(clipped.x, std::max(12, clipped.y)),
                           textFg, textBg);
@@ -412,14 +362,15 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     //     diagnostics; the runtime path consumes its own snapshot.
     if (cfg.flashlight_show_preview && canvas.type() == CV_8UC3)
     {
-        crosshair::FlashlightDetectorSettings fs;
-        fs.enabled              = true;
-        fs.brightness_threshold = cfg.flashlight_brightness_threshold;
-        fs.min_radius           = cfg.flashlight_min_radius;
-        fs.max_radius           = cfg.flashlight_max_radius;
-        fs.min_circularity      = cfg.flashlight_min_circularity;
-        fs.open_radius          = cfg.flashlight_open_radius;
-        fs.min_local_contrast   = cfg.flashlight_min_local_contrast;
+        // Derive appearance settings from the three macro knobs exactly like the
+        // runtime, so the preview's accept/reject matches what gets aimed. (The
+        // depth / temporal / colocation gates run only in the runtime; the
+        // preview shows the single-frame appearance verdict.)
+        const crosshair::FlashlightTuning ft = crosshair::flashlight_derive_tuning(
+            cfg.flashlight_sensitivity, cfg.flashlight_reject_strength,
+            cfg.flashlight_spot_size, canvas.size());
+        crosshair::FlashlightDetectorSettings fs = ft.det;
+        fs.enabled = true;
 
         static crosshair::FlashlightDetector flashlight_detector;
         const auto cands = flashlight_detector.detectVerbose(canvas, fs);

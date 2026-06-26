@@ -123,14 +123,6 @@ public:
     void setDepthInferenceEnabled(bool v);
     QString depthModelPath() const;
     void setDepthModelPath(const QString& v);
-    int depthFps() const;
-    void setDepthFps(int v);
-    bool depthMaskEnabled() const;
-    void setDepthMaskEnabled(bool v);
-    int depthMaskNearPercent() const;
-    void setDepthMaskNearPercent(int v);
-    int depthMaskAlpha() const;
-    void setDepthMaskAlpha(int v);
     int depthMaskFps() const;
     void setDepthMaskFps(int v);
     int depthOptInputSize() const;
@@ -139,22 +131,6 @@ public:
     void setDepthNormClipLowPct(float v);
     float depthNormClipHighPct() const;
     void setDepthNormClipHighPct(float v);
-    bool depthShowHeatmap() const;
-    void setDepthShowHeatmap(bool v);
-    float depthHeatmapGamma() const;
-    void setDepthHeatmapGamma(float v);
-    bool depthShowBboxDistance() const;
-    void setDepthShowBboxDistance(bool v);
-    int depthMaskExpand() const;
-    void setDepthMaskExpand(int v);
-    int depthMaskHoldFrames() const;
-    void setDepthMaskHoldFrames(int v);
-    float depthMaskSuppressionRatio() const;
-    void setDepthMaskSuppressionRatio(float v);
-    bool depthMaskInvert() const;
-    void setDepthMaskInvert(bool v);
-    int depthColormap() const;
-    void setDepthColormap(int v);
 
     // Overlay
     int overlayOpacity() const;
@@ -223,33 +199,22 @@ public:
     QList<ColorProfile> laserColors() const;
     void setLaserColors(const QList<ColorProfile>& colors);
 
-    // Flashlight halo (whole-frame brightness-based)
+    // Flashlight halo (寻光). Three macro knobs (0..100); all internals derived
+    // by crosshair::flashlight_derive_tuning().
     bool flashlightShowPreview() const;
     void setFlashlightShowPreview(bool v);
-    int flashlightBrightnessThreshold() const;
-    void setFlashlightBrightnessThreshold(int v);
-    int flashlightMinRadius() const;
-    void setFlashlightMinRadius(int v);
-    int flashlightMaxRadius() const;
-    void setFlashlightMaxRadius(int v);
-    float flashlightMinCircularity() const;
-    void setFlashlightMinCircularity(float v);
-    int flashlightOpenRadius() const;
-    void setFlashlightOpenRadius(int v);
-    int flashlightMinLocalContrast() const;
-    void setFlashlightMinLocalContrast(int v);
-    int flashlightMaxSpots() const;
-    void setFlashlightMaxSpots(int v);
+    int flashlightSensitivity() const;       // 灵敏度
+    void setFlashlightSensitivity(int v);
+    int flashlightRejectStrength() const;    // 抗误锁
+    void setFlashlightRejectStrength(int v);
+    int flashlightSpotSize() const;          // 光斑大小
+    void setFlashlightSpotSize(int v);
 
     // Glass filter (玻璃后目标抑制)
     bool glassFilterShowPreview() const;
     void setGlassFilterShowPreview(bool v);
-    float glassEdgeRingFrac() const;
-    void setGlassEdgeRingFrac(float v);
-    float glassCoverageThreshold() const;
-    void setGlassCoverageThreshold(float v);
-    int glassMinBoxShortSide() const;
-    void setGlassMinBoxShortSide(int v);
+    int glassFilterStrength() const;        // 过滤强度 0..100 (replaces ring/coverage/min-box)
+    void setGlassFilterStrength(int v);
 
     // Glass film color profiles (reuses ColorProfile struct)
     QList<ColorProfile> glassColors() const;

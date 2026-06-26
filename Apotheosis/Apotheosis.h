@@ -54,11 +54,13 @@ extern std::atomic<float> g_smart_trigger_recent_variance_px;
 extern std::atomic<float> g_pid_last_err_px;
 // Flick/Track telemetry: false = Flick gains active, true = Track gains active.
 extern std::atomic<bool>  g_pid_mode_track;
-// Set by the mouse thread when the active hotkey profile needs the normalized
-// depth map for threat scoring. The capture thread reads it to decide whether
-// to run depth inference / produce the normalized map even when no depth
-// display option is on.
-extern std::atomic<bool>  g_threat_depth_required;
+
+// Set by flashlight_runtime each frame: true when the 寻光 depth-gate is active
+// (an active hotkey has flashlight detection on AND 抗误锁 is high enough that
+// depth.mode > 0). The capture thread ORs it into depthNeeded / produce_normalized
+// so the normalized depth map exists for the gate to sample. Still gated by the
+// master depth_inference_enabled switch.
+extern std::atomic<bool>  g_flashlight_depth_required;
 
 void createInputDevices();
 void assignInputDevices();
