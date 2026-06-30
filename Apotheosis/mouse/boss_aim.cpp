@@ -1,7 +1,6 @@
 #include "boss_aim.h"
 
 #include <algorithm>
-#include <climits>
 #include <cmath>
 #include <limits>
 
@@ -14,27 +13,11 @@ void AimEngine::reset()
     next_id_ = 1;
     current_id_ = -1;
     prev_current_id_ = -1;
-    lock_age_frames_ = 0;
     art_.reset();
     path_.reset();
     predictive_mover_.reset();
+    classic_mover_.reset();
     last_mover_kind_ = mover::Kind::Smooth;
-}
-
-cv::Point2f AimEngine::compute_anchor(const cv::Rect& bbox,
-                                      int class_id,
-                                      const std::unordered_map<int, float>* y_offsets) const
-{
-    float y_frac = kDefaultHeadFrac;
-    if (y_offsets)
-    {
-        auto it = y_offsets->find(class_id);
-        if (it != y_offsets->end())
-            y_frac = std::clamp(it->second, 0.0f, 1.0f);
-    }
-    return cv::Point2f(
-        static_cast<float>(bbox.x) + static_cast<float>(bbox.width)  * 0.5f,
-        static_cast<float>(bbox.y) + static_cast<float>(bbox.height) * y_frac);
 }
 
 void AimEngine::assignDetections(const EngineInput& in)
@@ -68,9 +51,12 @@ void AimEngine::assignDetections(const EngineInput& in)
     {
         const cv::Rect& box = boxes[di];
         const int class_id = classes[di];
-        if (in.eligible_classes
-            && in.eligible_classes->find(class_id) == in.eligible_classes->end())
-            continue;
+        {
+            bool slot_match = false;
+            for (int si = 0; si < 3; ++si)
+                if (in.target_slots[si].class_id == class_id) { slot_match = true; break; }
+            if (!slot_match) continue;
+        }
         if (box.width <= 0 || box.height <= 0)
             continue;
 
@@ -108,7 +94,9 @@ void AimEngine::assignDetections(const EngineInput& in)
             static_cast<double>(kMatchMinPx));
         const bool can_match = best_idx >= 0 && best_d2 < match_thresh * match_thresh;
 
-        const cv::Point2f new_anchor = compute_anchor(box, class_id, in.y_offsets);
+        const cv::Point2f new_anchor(
+            static_cast<float>(box.x) + static_cast<float>(box.width)  * 0.5f,
+            static_cast<float>(box.y) + static_cast<float>(box.height) * 0.5f);
         const float conf = (confs && di < confs->size()) ? (*confs)[di] : 0.f;
 
         if (can_match)
@@ -169,173 +157,108 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     assignDetections(in);
     purgeLost();
 
-    // Snapshot the lock at tick entry so we can correctly age / reset
-    // lock_age_frames_ at the end (after any rank / hysteresis switch).
-    const int locked_before = current_id_;
+    // ─── 目标选择: 3 槽位 × 优先级优先 × 距离次之 ───
+    Track* selected = nullptr;
+    int  best_pri  = 999;
+    double best_dist = static_cast<double>(in.target_aim_range) + 1.0;
+    float sel_y_top = 0.0f, sel_y_bot = 1.0f;
 
-    auto rank_of = [&](int class_id) -> int {
-        if (!in.class_priority) return 0;            // no priority info -> all equal
-        auto it = in.class_priority->find(class_id);
-        return (it != in.class_priority->end()) ? it->second : INT_MAX;
-    };
-
-    // Best (lowest) rank present among ALL alive tracks — we keep coasting
-    // tracks (missed > 0 but <= kMDrop) in the pool so a head briefly missed
-    // for 1–2 frames doesn't lose lock to a body that's still observed.
-    int best_rank = INT_MAX;
-    for (const auto& t : tracks_)
-    {
-        if (!t.alive) continue;
-        const int r = rank_of(t.class_id);
-        if (r < best_rank) best_rank = r;
-    }
-
-    if (best_rank == INT_MAX)
-    {
-        current_id_ = -1;
-        prev_current_id_ = -1;
-        lock_age_frames_ = 0;
-        return out;
-    }
-
-    // Lock pool = alive tracks at the best rank. Within the pool we prefer
-    // tracks observed THIS frame for distance / hysteresis decisions; only
-    // when no priority-rank track is observed do we fall back to coasting
-    // ones (keeps the lock identity stable through brief detection drops).
-    std::vector<Track*> pool;
-    std::vector<Track*> observed_pool;
-    pool.reserve(tracks_.size());
-    observed_pool.reserve(tracks_.size());
     for (auto& t : tracks_)
     {
         if (!t.alive) continue;
-        if (rank_of(t.class_id) != best_rank) continue;
-        pool.push_back(&t);
-        if (t.missed == 0) observed_pool.push_back(&t);
+
+        int   pri = -1;
+        float y_top = 0.0f, y_bot = 1.0f;
+        float min_conf = 0.0f;
+        for (int si = 0; si < 3; ++si)
+        {
+            if (in.target_slots[si].class_id == t.class_id)
+            {
+                pri      = si;
+                y_top    = in.target_slots[si].y_top;
+                y_bot    = in.target_slots[si].y_bot;
+                min_conf = in.target_slots[si].min_conf;
+                break;
+            }
+        }
+        if (pri < 0) continue;
+        if (min_conf > 0.0f && t.confidence < min_conf) continue;
+
+        const float bx  = t.bbox.x + t.bbox.width * 0.5f;
+        const float ya  = t.bbox.y + t.bbox.height * y_top;
+        const float yb  = t.bbox.y + t.bbox.height * y_bot;
+        float aim_y     = (ya + yb) * 0.5f;
+        const float cy  = static_cast<float>(in.crosshair_y);
+        if (cy >= ya && cy <= yb) aim_y = cy;
+
+        const double dx = static_cast<double>(bx) - in.crosshair_x;
+        const double dy = static_cast<double>(aim_y) - in.crosshair_y;
+        const double dist = std::hypot(dx, dy);
+
+        if (dist > static_cast<double>(in.target_aim_range)) continue;
+
+        if (pri < best_pri || (pri == best_pri && dist < best_dist))
+        {
+            best_pri  = pri;
+            best_dist = dist;
+            selected  = &t;
+            sel_y_top = y_top;
+            sel_y_bot = y_bot;
+        }
     }
 
-    if (pool.empty())
+    if (!selected)
     {
         current_id_ = -1;
         prev_current_id_ = -1;
-        lock_age_frames_ = 0;
         return out;
     }
 
-    // Base pool: prefer fresh observations; fall back to coasting if none.
-    std::vector<Track*> selection_pool = observed_pool.empty() ? pool : observed_pool;
-
-    // Splice in the current lock when it's alive but missed THIS frame.
-    // Without this, a 1-frame detection drop on the locked target sends
-    // control through the no-hysteresis "current == nullptr" branch, where
-    // any nearby observed track silently steals the lock — exactly the
-    // far-distance "I just looked away and it switched" failure mode.
-    if (current_id_ >= 0)
+    // Recompute anchor with Y-zone clamping for the chosen target.
     {
-        bool already_in = false;
-        for (auto* t : selection_pool)
-            if (t->id == current_id_) { already_in = true; break; }
-        if (!already_in)
-        {
-            for (auto* t : pool)
-                if (t->id == current_id_) { selection_pool.push_back(t); break; }
-        }
+        const float bx  = selected->bbox.x + selected->bbox.width * 0.5f;
+        const float ya  = selected->bbox.y + selected->bbox.height * sel_y_top;
+        const float yb  = selected->bbox.y + selected->bbox.height * sel_y_bot;
+        float aim_y     = (ya + yb) * 0.5f;
+        const float cy  = static_cast<float>(in.crosshair_y);
+        if (cy >= ya && cy <= yb) aim_y = cy;
+        selected->anchor = cv::Point2f(bx, aim_y);
     }
 
-    auto dist_to_cross = [&](const Track* t) -> double {
-        const double dx = static_cast<double>(t->anchor.x) - in.crosshair_x;
-        const double dy = static_cast<double>(t->anchor.y) - in.crosshair_y;
-        return std::hypot(dx, dy);
-    };
+    current_id_ = selected->id;
 
-    // Confidence-weighted "effective" distance.  Used for ALL lock
-    // decisions inside the pool (initial pick, contender vs current).
-    // A higher-confidence detection looks closer; a flickering 0.2-conf
-    // ghost at the model's range cannot out-bid a solid 0.6-conf lock
-    // just by being a handful of px nearer the crosshair.
-    auto eff_dist = [&](const Track* t) -> double {
-        const double d = dist_to_cross(t);
-        const double w = std::max(static_cast<double>(t->confidence),
-                                  static_cast<double>(kMinConfWeight));
-        return d / w;
-    };
+    out.have_target      = true;
+    out.current_track_id = selected->id;
+    out.anchor           = selected->anchor;
+    out.bbox             = selected->bbox;
 
-    // Locate the previously-locked track inside the current pool.  If the
-    // old lock died entirely (purged after kMDrop misses, or its class
-    // got demoted by a higher-priority appearance) we drop it and
-    // re-pick — that's the head-priority cross-rank fast path.
-    Track* current = nullptr;
-    for (Track* t : selection_pool)
-        if (t->id == current_id_) { current = t; break; }
-
-    if (!current)
-    {
-        double best = std::numeric_limits<double>::infinity();
-        for (Track* t : selection_pool)
-        {
-            const double d = eff_dist(t);
-            if (d < best) { best = d; current = t; }
-        }
-        current_id_ = current->id;
-    }
-    else
-    {
-        Track* contender = nullptr;
-        double best = std::numeric_limits<double>::infinity();
-        for (Track* t : selection_pool)
-        {
-            if (t == current) continue;
-            const double d = eff_dist(t);
-            if (d < best) { best = d; contender = t; }
-        }
-        if (contender && lock_age_frames_ >= kMinFramesLocked)
-        {
-            // Min-frames gate: just-locked targets get a few frames of
-            // grace.  Combined with kAlphaHyst (contender must be 60%
-            // closer in effective distance) and the splice-in above
-            // (coasting current is always a hysteresis baseline, never a
-            // free-for-all), this kills the lock_aggression=0 leak.
-            const double cur_d = eff_dist(current);
-            if (best < static_cast<double>(kAlphaHyst) * cur_d)
-            {
-                current = contender;
-                current_id_ = current->id;
-            }
-        }
-    }
-
-    // Age the lock counter exactly once per tick.  Reset whenever the lock
-    // identity moved this tick (forced re-pick from empty `current`, cross-
-    // rank promotion, or hysteresis-driven swap).
-    if (current_id_ == locked_before)
-        ++lock_age_frames_;
-    else
-        lock_age_frames_ = 0;
-
-    // ─── Layer B: Adaptive Reactive Tracker ───
-    out.have_target = true;
-    out.current_track_id = current->id;
-    out.anchor = current->anchor;
-    out.bbox   = current->bbox;
-
-    // Coasting frame: the locked track wasn't observed this tick (we kept
-    // it as `current` via the splice-in to defend against contender
-    // hijack).  Its anchor is STALE — pushing it through ART would (a)
-    // contaminate the position filter with a duplicate sample, (b) drive
-    // the cursor toward the last-known spot, and (c) cause a snap-back when
-    // the target reappears a few pixels off.  All three show up as jitter
-    // even in Linear mode, which is exactly the symptom: hold cursor still
-    // until a fresh observation arrives, lock identity preserved.
-    if (current->missed > 0)
+    // Coasting frame: target is tracked but wasn't observed this tick.
+    // Hold position — stale anchor would contaminate filters.
+    if (selected->missed > 0)
     {
         out.dx = 0;
         out.dy = 0;
-        prev_current_id_ = current->id;
+        prev_current_id_ = selected->id;
         return out;
     }
 
-    const int bbox_w = static_cast<int>(std::lround(current->bbox.width));
-    const int bbox_h = static_cast<int>(std::lround(current->bbox.height));
+    // ─── 共享死区 ───
+    if (in.deadzone_enabled && selected->bbox.width > 0.f && selected->bbox.height > 0.f)
+    {
+        const double dz_w = static_cast<double>(selected->bbox.width)  * in.deadzone_percent * 0.01;
+        const double dz_h = static_cast<double>(selected->bbox.height) * in.deadzone_percent * 0.01;
+        if (std::abs(in.crosshair_x - static_cast<double>(selected->anchor.x)) < dz_w &&
+            std::abs(in.crosshair_y - static_cast<double>(selected->anchor.y)) < dz_h)
+        {
+            out.dx = 0;
+            out.dy = 0;
+            prev_current_id_ = selected->id;
+            return out;
+        }
+    }
+
+    const int bbox_w = static_cast<int>(std::lround(selected->bbox.width));
+    const int bbox_h = static_cast<int>(std::lround(selected->bbox.height));
 
     // 移动控制器路由 — 微澜与疾风是两套独立的 Layer B,共享上面的 Layer A 选目标。
     // 切换 mover 时复位被切入那一套的内部状态,避免上一套的残留窜进来。
@@ -351,19 +274,41 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
             predictive_mover_.reset();
         predictive_mover_.configure(in.predictive_params);
         const mover::Move m = predictive_mover_.step(
-            static_cast<double>(current->anchor.x),
-            static_cast<double>(current->anchor.y),
+            static_cast<double>(selected->anchor.x),
+            static_cast<double>(selected->anchor.y),
             in.crosshair_x, in.crosshair_y,
-            static_cast<double>(current->bbox.width),
-            static_cast<double>(current->bbox.height),
-            in.image_size, dt, current->id);
+            static_cast<double>(selected->bbox.width),
+            static_cast<double>(selected->bbox.height),
+            in.image_size, dt, selected->id);
         out.dx = m.dx;
         out.dy = m.dy;
         // 疾风没有 ART 诊断量 → 留中性,不覆盖面板旧值。
         out.cutoff_hz   = 0.0;
         out.consistency = 0.0;
         out.snapped     = false;
-        prev_current_id_ = current->id;
+        prev_current_id_ = selected->id;
+        return out;
+    }
+
+    if (in.mover_kind == mover::Kind::Classic)
+    {
+        // ── 天枢:经典全参 PID + 动态 KP + EMA/Kalman 预测。旁路 ART。 ──
+        if (mover_changed)
+            classic_mover_.reset();
+        classic_mover_.configure(in.classic_params);
+        const mover::Move m = classic_mover_.step(
+            static_cast<double>(selected->anchor.x),
+            static_cast<double>(selected->anchor.y),
+            in.crosshair_x, in.crosshair_y,
+            static_cast<double>(selected->bbox.width),
+            static_cast<double>(selected->bbox.height),
+            in.image_size, dt, selected->id);
+        out.dx = m.dx;
+        out.dy = m.dy;
+        out.cutoff_hz   = 0.0;
+        out.consistency = 0.0;
+        out.snapped     = false;
+        prev_current_id_ = selected->id;
         return out;
     }
 
@@ -374,10 +319,10 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     art_.configure(in.aim);
 
     ArtResult r = art_.step(
-        static_cast<double>(current->anchor.x),
-        static_cast<double>(current->anchor.y),
+        static_cast<double>(selected->anchor.x),
+        static_cast<double>(selected->anchor.y),
         in.crosshair_x, in.crosshair_y,
-        dt, bbox_w, bbox_h, current->id);
+        dt, bbox_w, bbox_h, selected->id);
 
     if (in.path.mode == AimPathDriver::Mode::Linear)
     {
@@ -390,7 +335,7 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         AimPathDriver::Result pr = path_.step(
             r.aim_x, r.aim_y,
             in.crosshair_x, in.crosshair_y,
-            dt, current->id);
+            dt, selected->id);
         out.dx = pr.move_x;
         out.dy = pr.move_y;
     }
@@ -398,7 +343,7 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     out.consistency = r.consistency;
     out.snapped = r.snapped;
 
-    prev_current_id_ = current->id;
+    prev_current_id_ = selected->id;
 
     return out;
 }

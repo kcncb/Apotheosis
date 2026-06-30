@@ -33,17 +33,6 @@ struct ClassFilterState
 inline constexpr int         kFlashlightClassId   = 9000;
 inline constexpr const char* kFlashlightClassName = "shoudiantong";
 
-// Per-hotkey class selection: a class the user has enabled for THIS hotkey,
-// with an optional per-class Y offset (0.0 = top of the detection box,
-// 1.0 = bottom). X is always box center.
-struct HotkeyAimClass
-{
-    int class_id = 0;
-    float y_offset = 0.5f;
-
-    // 已精简:不再有每类别卡尔曼覆盖。卡尔曼参数统一在热键级(平滑度/预测提前量)。
-};
-
 // A single aim hotkey. Multiple HotkeyProfiles can exist; whichever one has
 // any of its keys pressed wins. If several are pressed simultaneously, the
 // one earlier in Config::hotkeys wins. Every hotkey carries its own full set
@@ -51,12 +40,8 @@ struct HotkeyAimClass
 struct HotkeyProfile
 {
     std::string name = "Aim";
-    // Hotkey 所属"组"。同名的热键在 UI 里会聚成一段方便管理(预设/职业/武器)。
-    // 运行时仍按 Config::hotkeys 的扁平顺序匹配,组名只影响展示和拷贝粘贴范围,
-    // 留空时归入"默认"组。
     std::string group = u8"默认";
-    std::vector<std::string> keys;                    // any-of: pressing any triggers the profile
-    std::vector<HotkeyAimClass> aim_classes;          // priority-ordered
+    std::vector<std::string> keys;
 
     int fovX = 106;
     int fovY = 74;
@@ -75,6 +60,8 @@ struct HotkeyProfile
     //   0 = 微澜 (Smooth)     — 默认,boss::AimEngine 走 ART/path 原路径,
     //                           speed_x/y/dead_zone_px 直接喂 ART::drive。
     //   1 = 疾风 (Predictive) — 位置式 PID + 导数估计预测器,参数完全暴露。
+    //   2 = 天枢 (Classic)    — 动态 KP + 全参 PID + EMA/Kalman 预测,
+    //                           移植自 zimumodule,参数完全暴露。
     // 不为 0 时,engine 旁路 AimPathDriver,把 (filtered aim − crosshair) 喂给
     // PID 直接出 dx/dy(此时 aim_path_mode 被忽略)。
     // ─────────────────────────────────────────────────────────────────────
@@ -86,6 +73,52 @@ struct HotkeyProfile
     float predictive_kp_y       = 0.6f;
     float predictive_kd         = 0.10f;
     float predictive_pred_weight= 0.5f;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 天枢 (Classic) — 经典全参 PID + 动态 KP + EMA/Kalman 预测。
+    //   aim_mode 0 = 简单(对称 KP + 共用 KI/KD);
+    //   aim_mode 1 = 高级(独立 XY 全 PID + 距离/时间 KP 调度)。
+    //   prediction_mode 0 = 无; 1 = EMA 速度外推; 2 = Kalman + lookahead。
+    // ─────────────────────────────────────────────────────────────────────
+    int   classic_aim_mode = 0;
+
+    // 简单模式
+    float classic_simple_start_speed = 0.3f;
+    float classic_simple_end_speed   = 0.8f;
+    int   classic_simple_transition_ms = 0;
+    float classic_simple_ki = 0.0f;
+    float classic_simple_kd = 0.0f;
+
+    // 高级模式 X
+    float classic_adv_kpmin_x = 0.3f;
+    float classic_adv_kpmax_x = 0.8f;
+    float classic_adv_ki_x = 0.0f;
+    float classic_adv_kd_x = 0.0f;
+    float classic_adv_imax_x = 0.0f;
+    float classic_adv_pfactor_x = 1.0f;
+    int   classic_adv_time_x = 0;
+    bool  classic_adv_time_dynamic_x = false;
+
+    // 高级模式 Y
+    float classic_adv_kpmin_y = 0.3f;
+    float classic_adv_kpmax_y = 0.8f;
+    float classic_adv_ki_y = 0.0f;
+    float classic_adv_kd_y = 0.0f;
+    float classic_adv_imax_y = 0.0f;
+    float classic_adv_pfactor_y = 1.0f;
+    int   classic_adv_time_y = 0;
+    bool  classic_adv_time_dynamic_y = false;
+
+    // 预测
+    int   classic_prediction_mode = 0;
+    float classic_velocity_lead_frames = 1.0f;
+    bool  classic_independent_y = false;
+
+    // Kalman
+    float classic_kalman_q_pos = 1.0f;
+    float classic_kalman_q_vel = 1.0f;
+    float classic_kalman_r_obs = 1.0f;
+    float classic_kalman_lookahead = 2.0f;
 
     // ─────────────────────────────────────────────────────────────────────
     // 瞄准轨迹曲线 (aim path).
@@ -104,34 +137,50 @@ struct HotkeyProfile
     static constexpr int kAimPathSampleCount = 32;
     std::vector<float> aim_path_custom_samples; // 留空 = 全 0 (= 直线)
 
-    // Smart trigger — automatic fire, rewritten as a pure geometric
-    // triggerbot decoupled from the aim controller. The crosshair (visible
-    // reticle when crosshair-colour is on, otherwise detection centre) is
-    // tested against the locked target's bounding box scaled per-axis by
-    // `hit_scale_x` / `hit_scale_y` about the target's aim anchor. The test
-    // is rectangular and uses the OBSERVED target position (never the Kalman
-    // prediction) so lead/prediction never desyncs the fire decision.
-    //
-    // State machine: the crosshair must stay inside that region for
-    // `reaction_ms` (human-like dwell) before the first press; the button is
-    // then held for `hold_ms`, released, and a `cooldown_ms` refractory is
-    // enforced before the next tap. Holding the aim hotkey is implicit (the
-    // trigger only runs while a hotkey is active). Hotkey release, toggle
-    // off, target loss, or session end all force-release the button so it can
-    // never get stuck down.
-    // 智能扳机参数:
-    //   smart_trigger_hit_scale:命中容差(占 bbox 半轴,X / Y 共用)
-    //   smart_trigger_aggression [0,1]:仅控制反应延迟 reaction_ms 档位(由
-    //     mouse_thread_loop 反算: 0 → 80ms, 1 → 0ms)。
-    //   smart_trigger_hold_ms / smart_trigger_cooldown_ms:用户直接控制的
-    //     按住时长与两次按住之间的延迟(ms),分别透传给 MouseThread。
-    bool  smart_trigger_enabled = false;
-    float smart_trigger_hit_scale = 0.60f;
-    float smart_trigger_aggression = 0.50f;
-    int   smart_trigger_hold_ms = 45;
-    int   smart_trigger_cooldown_ms = 55;
+    // ─────────────────────────────────────────────────────────────────────
+    // 死区 (shared, 三套 mover 通用):准星在目标框 N% 内时停止移动。
+    // 在 engine tick() 层检查,mover dispatch 之前生效。
+    // ─────────────────────────────────────────────────────────────────────
+    bool  deadzone_enabled = false;
+    float deadzone_percent = 0.0f;
 
-    // (legacy prediction fields removed — adaptive aim handles prediction internally)
+    // ─────────────────────────────────────────────────────────────────────
+    // 扳机 — 4 态状态机 (idle/delay/pressed/cooldown)。
+    //   trigger_fire_delay:    进入命中区后延迟 N ms 才按下(0=立即)
+    //   trigger_fire_duration: 每次按住持续 N ms
+    //   trigger_fire_interval: 松手后冷却 N ms 才能再次触发
+    //   trigger_y_percent:     命中区占 bbox 的百分比(100=整框)
+    // ─────────────────────────────────────────────────────────────────────
+    bool  trigger_enabled = false;
+    int   trigger_fire_delay = 0;
+    int   trigger_fire_duration = 100;
+    int   trigger_fire_interval = 200;
+    int   trigger_y_percent = 100;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 目标选择 — 3 个类别槽位,各带隐式优先级(1 > 2 > 3)。
+    //   target_class_N:     该槽位匹配的 class_id
+    //   target_y_top/bot_N: Y 轴瞄准区间 (0.0=框顶, 1.0=框底)
+    //   target_min_conf_N:  最低置信度(0=不过滤)
+    //   target_aim_range:   最大瞄准像素距离
+    // 优先级优先,距离次之;未命中任何槽位的 class 被忽略。
+    // ─────────────────────────────────────────────────────────────────────
+    int   target_class_1 = 0;
+    float target_y_top_1 = 0.0f;
+    float target_y_bot_1 = 1.0f;
+    float target_min_conf_1 = 0.0f;
+
+    int   target_class_2 = 1;
+    float target_y_top_2 = 0.0f;
+    float target_y_bot_2 = 0.4f;
+    float target_min_conf_2 = 0.0f;
+
+    int   target_class_3 = 2;
+    float target_y_top_3 = 0.0f;
+    float target_y_bot_3 = 0.3f;
+    float target_min_conf_3 = 0.0f;
+
+    int   target_aim_range = 150;
 
     // Per-hotkey crosshair color detection toggle. Global config still owns
     // the ROI size / color palette / area filters; each hotkey just opts in.
@@ -159,24 +208,6 @@ struct HotkeyProfile
     // 这里只是热键级 opt-in。
     bool glass_filter_enabled = false;
 
-    // 锁定灵活度 lock_aggression。**一个 knob 同时控制"切换迟滞"与"击杀检测"两套
-    // 逻辑**(原本是两个对立 knob,会互相打架产生切换乒乓,已合并)。
-    //   0 = 死锁:hold/min_frames/coast_grace 全拉满,kill_detect 关闭。锁定后基本
-    //       不可能切换,适合单人对枪。
-    //   1 = 灵活:hold=0、margin=0、min_frames=1、coast_grace=1,kill_detect 满激进。
-    //       任何更好目标立即夺锁,适合团战换人头。
-    // 高优先级类别仍可立即抢锁,不受此值影响。内部反算见 mouse_thread_loop.cpp。
-    float lock_aggression = 0.30f;
-
-    // y_offset distance/size decay. When enabled, large bboxes (close
-    // targets) blend the per-class y_offset toward 0.5 (geometric centre)
-    // because the same fractional offset maps to many more pixels at close
-    // range, amplifying jitter. Disabled by default to preserve legacy
-    // behaviour for users who tuned y_offset around close-range play.
-    // 大目标(框高占检测高 ≥ 40%)瞄点向中心衰减、小目标(< 10%)保留原 y_offset。
-    // 上下两个边界内部硬编(10% / 40%),只暴露开关。
-    bool  y_offset_size_decay_enabled = false;
-
     // Dynamic FOV — applied live every frame. `fovX`/`fovY` above become
     // the BASE (max) aim-region diameters in detection pixels around the
     // crosshair. While a target is locked the effective FOV interpolates
@@ -192,25 +223,6 @@ struct HotkeyProfile
     // 内部反算:margin_frac = 2.0 - strength; min_radius_frac = 0.50 - 0.40 * strength。
     bool  dynamic_fov_enabled  = false;
     float dynamic_fov_strength = 0.60f;
-
-    // 近距离瞄头(body→head pivot 吸附)。当一个 body(非 head)目标框够大(近距离,
-    // 框高 / 检测高 ≥ close_range_trigger_height_frac),且其内部上半区存在一个
-    // close_range_head_class_id 的 head 检测时,把该目标的瞄准点吸附到 head 框,让贴脸
-    // 大目标优先瞄头 / 上半身。只移动 pivot、不改变锁定的 track 身份,因此不会触发锁切换
-    // 或卡尔曼重置。head 类别无需加入瞄准类别列表。与 y_offset_size_decay(把大框拉向
-    // 中心)方向相反,建议二选一。默认关闭以保持旧行为。
-    // 近距离瞄头:框高占检测高 ≥ 30%(硬编)触发 body→head pivot 吸附。
-    bool  close_range_head_aim_enabled = false;
-    int   close_range_head_class_id    = -1;
-
-    // 多人锁切（kill-detect）。开火期间锁定目标突然消失（失观帧数 ≥
-    // kill_suspicion_missed_frames 且最后一次观测到的 bbox 面积 ≤ kill_suspicion_bbox_shrink）
-    // 视为击杀，绕过 lock_hold_min_frames 立即把锁切到下一个可见目标。
-    // kill_followup_grace_frames：击杀后短时间内允许同 rank 立即夺锁，让连杀更顺滑。
-    // kill_trigger_fresh_ms：trigger 击发"新鲜度"窗口（毫秒），超时不再触发 kill 判定。
-    // 默认 enable，三角洲组队对枪场景受益明显。
-    // (kill_detect 已并入 lock_aggression;此处保留空注释,旧 ini 字段会被读取并
-    //  迁移为 lock_aggression。)
 
 };
 

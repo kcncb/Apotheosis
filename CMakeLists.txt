@@ -149,6 +149,7 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
     "${SRC_DIR}/mouse/movers.cpp"
+    "${SRC_DIR}/mouse/movers_classic.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
     "${SRC_DIR}/mouse/KmboxAConnection.cpp"

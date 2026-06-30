@@ -7,8 +7,6 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "AimbotTarget.h"
@@ -55,8 +53,6 @@ extern std::atomic<float> g_pid_last_err_px;
 extern std::atomic<bool>  g_pid_mode_track;
 extern std::atomic<float> g_dynamic_fov_radius_x_px;
 extern std::atomic<float> g_dynamic_fov_radius_y_px;
-extern std::atomic<float> g_smart_trigger_hit_prob;
-extern std::atomic<float> g_smart_trigger_recent_variance_px;
 
 void createInputDevices();
 void assignInputDevices();
@@ -78,12 +74,9 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     PivotResolved out;
     out.x = centre;
     out.y = centre;
-    // 智能扳机默认接入准星找色:启用 smart_trigger 的热键自动消费 pivot
-    // 快照(crosshair_runtime 那侧已经在 smart_trigger_enabled 时隐式开启
-    // crosshair 通路),无需用户额外勾选 crosshair/laser detect。
     if (!profile || !(profile->crosshair_detect_enabled
                       || profile->laser_detect_enabled
-                      || profile->smart_trigger_enabled))
+                      || profile->trigger_enabled))
         return out;
 
     const auto snap = crosshair_runtime::read();
@@ -101,56 +94,14 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     return out;
 }
 
-struct AimSelection
+enum class TriggerPhase { Idle, Delay, Pressed, Cooldown };
+
+struct TriggerState
 {
-    std::unordered_set<int> aim_class_ids;
-    std::unordered_map<int, float> y_offsets;
-    // class_id -> priority rank; 0 = top of aim_classes list, 1 = second, ...
-    // Same class_id appearing twice keeps the FIRST (highest-priority) rank.
-    std::unordered_map<int, int> class_priority;
+    TriggerPhase phase = TriggerPhase::Idle;
+    int64_t phase_time_ms = 0;
+    void reset() { *this = {}; }
 };
-
-AimSelection build_selection(const HotkeyProfile* profile)
-{
-    AimSelection sel;
-    if (!profile)
-        return sel;
-    int rank = 0;
-    for (const auto& ac : profile->aim_classes)
-    {
-        sel.aim_class_ids.insert(ac.class_id);
-        sel.y_offsets[ac.class_id] = std::clamp(ac.y_offset, 0.0f, 1.0f);
-        // first occurrence wins — preserves the head-first ordering even if
-        // the user added the head class twice by mistake.
-        sel.class_priority.emplace(ac.class_id, rank);
-        ++rank;
-    }
-    return sel;
-}
-
-MouseRuntimeParams build_params(const HotkeyProfile* profile)
-{
-    MouseRuntimeParams p;
-    p.detection_resolution = config.detection_resolution;
-
-    if (!profile)
-        return p;
-
-    // Smart trigger:
-    //   enable + hit_scale (X/Y 共用) 直接拷贝。
-    //   reaction_ms 仍按 aggression [0..1] 反算: 0 → 80 ms, 1 → 0 ms。
-    //   hold_ms / cooldown_ms 直接透传 (用户在 UI 里独立调)。
-    p.smart_trigger_enabled     = profile->smart_trigger_enabled;
-    p.smart_trigger_hit_scale_x = profile->smart_trigger_hit_scale;
-    p.smart_trigger_hit_scale_y = profile->smart_trigger_hit_scale;
-
-    const float a = std::clamp(profile->smart_trigger_aggression, 0.0f, 1.0f);
-    p.smart_trigger_reaction_ms = static_cast<int>(std::lround(80.0f * (1.0f - a)));
-    p.smart_trigger_hold_ms     = profile->smart_trigger_hold_ms;
-    p.smart_trigger_cooldown_ms = profile->smart_trigger_cooldown_ms;
-
-    return p;
-}
 
 void publish_boss_debug(const boss::AimEngine& engine)
 {
@@ -196,24 +147,13 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
     int last_hotkey_index_seen = -2;
     int last_resolution_seen = -1;
-    // Smart trigger params we last pushed to MouseThread. Compared every
-    // tick so UI edits take effect immediately (build_params is otherwise
-    // only re-called on hotkey switch / resolution change). Updating
-    // MouseRuntimeParams forces a trigger reset, so we GATE the call on
-    // an actual value change to avoid killing an in-flight burst.
-    bool  last_st_enabled   = false;
-    float last_st_hit_scale = -1.0f;
-    float last_st_aggression = -1.0f;
-    int   last_st_hold_ms = -1;
-    int   last_st_cooldown_ms = -1;
 
     auto last_tick_ts = std::chrono::steady_clock::time_point::min();
 
-    // Legacy telemetry — boss loop leaves these neutral.
+    TriggerState trigger;
+
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
-    g_smart_trigger_hit_prob.store(0.0f);
-    g_smart_trigger_recent_variance_px.store(0.0f);
 
     while (!shouldExit && !session_stop_requested.load())
     {
@@ -332,7 +272,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // best accepted halo is spliced in under the fixed `shoudiantong` class
         // (kFlashlightClassId) so the tracker / FOV / smart-trigger treat it like
         // a real model detection. Whether it is actually aimed still depends on
-        // the user routing `shoudiantong` into this hotkey's aim_classes.
+        // the user routing `shoudiantong` into a target slot.
         {
             constexpr float kColocateOverlapFrac = 0.10f; // halo∩box / halo-area
             constexpr float kColocateBoost       = 0.25f; // confidence bump when colocated
@@ -418,35 +358,21 @@ void mouseThreadFunction(MouseThread& mouseThread)
         const bool hotkey_changed = (active_idx != last_hotkey_index_seen);
         const bool resolution_changed = (config.detection_resolution != last_resolution_seen);
 
-        bool st_changed = false;
-        if (profile_ptr)
+        if (hotkey_changed || resolution_changed || detection_resolution_changed.load())
         {
-            st_changed =
-                (profile_ptr->smart_trigger_enabled     != last_st_enabled) ||
-                (profile_ptr->smart_trigger_hit_scale   != last_st_hit_scale) ||
-                (profile_ptr->smart_trigger_aggression  != last_st_aggression) ||
-                (profile_ptr->smart_trigger_hold_ms     != last_st_hold_ms) ||
-                (profile_ptr->smart_trigger_cooldown_ms != last_st_cooldown_ms);
-        }
-
-        if (hotkey_changed || resolution_changed || st_changed || detection_resolution_changed.load())
-        {
-            mouseThread.updateParams(build_params(profile_ptr));
+            MouseRuntimeParams rp;
+            rp.detection_resolution = config.detection_resolution;
+            mouseThread.updateParams(rp);
             last_hotkey_index_seen = active_idx;
             last_resolution_seen = config.detection_resolution;
             detection_resolution_changed.store(false);
-            if (profile_ptr)
-            {
-                last_st_enabled     = profile_ptr->smart_trigger_enabled;
-                last_st_hit_scale   = profile_ptr->smart_trigger_hit_scale;
-                last_st_aggression  = profile_ptr->smart_trigger_aggression;
-                last_st_hold_ms     = profile_ptr->smart_trigger_hold_ms;
-                last_st_cooldown_ms = profile_ptr->smart_trigger_cooldown_ms;
-            }
 
             if (resolution_changed || hotkey_changed)
             {
                 engine.reset();
+                if (trigger.phase == TriggerPhase::Pressed)
+                    mouseThread.releaseLeftButton();
+                trigger.reset();
                 last_tick_ts = std::chrono::steady_clock::time_point::min();
                 publish_boss_debug(engine);
             }
@@ -457,19 +383,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // the trigger.
         if (!profile_ptr)
         {
-            mouseThread.forceTriggerRelease();
+            if (trigger.phase == TriggerPhase::Pressed)
+                mouseThread.releaseLeftButton();
+            trigger.reset();
             mouseThread.clearQueuedMoves();
-            mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
-            // Decay engine tracks gradually (still call tick with empty input
-            // so the doc's miss-count purge runs).
             if (hasNewDetection)
             {
                 boss::EngineInput in;
                 in.boxes = &boxes;
                 in.classes = &classes;
                 in.confidences = &confidences;
-                static const std::unordered_set<int> kNoClasses;
-                in.eligible_classes = &kNoClasses;
                 in.crosshair_x = config.detection_resolution * 0.5;
                 in.crosshair_y = config.detection_resolution * 0.5;
                 const auto now = std::chrono::steady_clock::now();
@@ -489,10 +412,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         if (!hasNewDetection)
             continue;
 
-        const AimSelection selection = build_selection(profile_ptr);
-
-        // Resolve live crosshair pivot (crosshair-color / laser-tip when the
-        // hotkey opted in, otherwise detection-image centre).
         const auto pivot = resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
 
         // FOV ellipse radii: half of the user's fovX / fovY. The engine drops
@@ -506,9 +425,15 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.boxes = &boxes;
         in.classes = &classes;
         in.confidences = &confidences;
-        in.eligible_classes = &selection.aim_class_ids;
-        in.y_offsets = &selection.y_offsets;
-        in.class_priority = &selection.class_priority;
+        in.target_slots[0] = { profile_ptr->target_class_1, profile_ptr->target_y_top_1,
+                               profile_ptr->target_y_bot_1, profile_ptr->target_min_conf_1 };
+        in.target_slots[1] = { profile_ptr->target_class_2, profile_ptr->target_y_top_2,
+                               profile_ptr->target_y_bot_2, profile_ptr->target_min_conf_2 };
+        in.target_slots[2] = { profile_ptr->target_class_3, profile_ptr->target_y_top_3,
+                               profile_ptr->target_y_bot_3, profile_ptr->target_min_conf_3 };
+        in.target_aim_range = profile_ptr->target_aim_range;
+        in.deadzone_enabled = profile_ptr->deadzone_enabled;
+        in.deadzone_percent = profile_ptr->deadzone_percent;
         in.crosshair_x = pivot.x;
         in.crosshair_y = pivot.y;
         in.fov_radius_x = fov_rx;
@@ -518,15 +443,48 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.aim.speed_y        = static_cast<double>(profile_ptr->speed_y);
         in.aim.dead_zone_px   = static_cast<double>(profile_ptr->dead_zone_px);
 
-        // 移动控制器选择 (0=微澜/Smooth, 1=疾风/Predictive)。
-        // 疾风的 PID 参数与 ART 的 speed_x/y/dead_zone 互不影响。
+        // 移动控制器选择 (0=微澜/Smooth, 1=疾风/Predictive, 2=天枢/Classic)。
         in.mover_kind = static_cast<mover::Kind>(
-            std::clamp(profile_ptr->mover_kind, 0, 1));
+            std::clamp(profile_ptr->mover_kind, 0, 2));
 
         in.predictive_params.kp_x        = static_cast<double>(profile_ptr->predictive_kp_x);
         in.predictive_params.kp_y        = static_cast<double>(profile_ptr->predictive_kp_y);
         in.predictive_params.kd          = static_cast<double>(profile_ptr->predictive_kd);
         in.predictive_params.pred_weight = static_cast<double>(profile_ptr->predictive_pred_weight);
+
+        // 天枢参数
+        {
+            auto& cp = in.classic_params;
+            cp.aim_mode              = profile_ptr->classic_aim_mode;
+            cp.simple_start_speed    = static_cast<double>(profile_ptr->classic_simple_start_speed);
+            cp.simple_end_speed      = static_cast<double>(profile_ptr->classic_simple_end_speed);
+            cp.simple_transition_ms  = profile_ptr->classic_simple_transition_ms;
+            cp.simple_ki             = static_cast<double>(profile_ptr->classic_simple_ki);
+            cp.simple_kd             = static_cast<double>(profile_ptr->classic_simple_kd);
+            cp.adv_kpmin_x   = static_cast<double>(profile_ptr->classic_adv_kpmin_x);
+            cp.adv_kpmax_x   = static_cast<double>(profile_ptr->classic_adv_kpmax_x);
+            cp.adv_ki_x      = static_cast<double>(profile_ptr->classic_adv_ki_x);
+            cp.adv_kd_x      = static_cast<double>(profile_ptr->classic_adv_kd_x);
+            cp.adv_imax_x    = static_cast<double>(profile_ptr->classic_adv_imax_x);
+            cp.adv_pfactor_x = static_cast<double>(profile_ptr->classic_adv_pfactor_x);
+            cp.adv_time_x    = profile_ptr->classic_adv_time_x;
+            cp.adv_time_dynamic_x = profile_ptr->classic_adv_time_dynamic_x;
+            cp.adv_kpmin_y   = static_cast<double>(profile_ptr->classic_adv_kpmin_y);
+            cp.adv_kpmax_y   = static_cast<double>(profile_ptr->classic_adv_kpmax_y);
+            cp.adv_ki_y      = static_cast<double>(profile_ptr->classic_adv_ki_y);
+            cp.adv_kd_y      = static_cast<double>(profile_ptr->classic_adv_kd_y);
+            cp.adv_imax_y    = static_cast<double>(profile_ptr->classic_adv_imax_y);
+            cp.adv_pfactor_y = static_cast<double>(profile_ptr->classic_adv_pfactor_y);
+            cp.adv_time_y    = profile_ptr->classic_adv_time_y;
+            cp.adv_time_dynamic_y = profile_ptr->classic_adv_time_dynamic_y;
+            cp.prediction_mode       = profile_ptr->classic_prediction_mode;
+            cp.velocity_lead_frames  = static_cast<double>(profile_ptr->classic_velocity_lead_frames);
+            cp.independent_y         = profile_ptr->classic_independent_y;
+            cp.kalman_q_pos      = static_cast<double>(profile_ptr->classic_kalman_q_pos);
+            cp.kalman_q_vel      = static_cast<double>(profile_ptr->classic_kalman_q_vel);
+            cp.kalman_r_obs      = static_cast<double>(profile_ptr->classic_kalman_r_obs);
+            cp.kalman_lookahead  = static_cast<double>(profile_ptr->classic_kalman_lookahead);
+        }
 
         // Trajectory shaper: forward the user's chosen mode + parameters.
         // Bezier / Custom build on the same speed_x/y/dead_zone knobs but
@@ -568,19 +526,65 @@ void mouseThreadFunction(MouseThread& mouseThread)
         {
             mouseThread.sendRawMove(out.dx, out.dy);
 
-            // Smart trigger: hand the locked bbox (OBSERVED anchor + half
-            // extents, in detection pixels) to the mouse thread, then run
-            // the dwell/hold/cooldown state machine against the live
-            // crosshair pivot. The trigger writes the LMB itself — there's
-            // no separate boss "fire when close" path any more.
-            mouseThread.setLockedTargetBox(
-                out.anchor.x, out.anchor.y,
-                out.bbox.width  * 0.5, out.bbox.height * 0.5);
-            mouseThread.updateSmartTrigger(pivot.x, pivot.y);
+            // ─── 扳机 FSM ───
+            if (profile_ptr->trigger_enabled)
+            {
+                const double tx_range = out.bbox.width  * profile_ptr->trigger_y_percent / 100.0 * 0.5;
+                const double ty_range = out.bbox.height * profile_ptr->trigger_y_percent / 100.0 * 0.5;
+                const bool in_zone = std::abs(pivot.x - static_cast<double>(out.anchor.x)) <= tx_range &&
+                                     std::abs(pivot.y - static_cast<double>(out.anchor.y)) <= ty_range;
 
-            // Error telemetry for the legacy "real-time" indicator on the
-            // PID/Track panel. Boss has a single control regime so the mode
-            // flag stays at "Track" (always).
+                const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()).count();
+
+                switch (trigger.phase)
+                {
+                case TriggerPhase::Idle:
+                    if (in_zone)
+                    {
+                        if (profile_ptr->trigger_fire_delay > 0)
+                        {
+                            trigger.phase = TriggerPhase::Delay;
+                            trigger.phase_time_ms = now_ms;
+                        }
+                        else
+                        {
+                            mouseThread.pressLeftButton();
+                            trigger.phase = TriggerPhase::Pressed;
+                            trigger.phase_time_ms = now_ms;
+                        }
+                    }
+                    break;
+                case TriggerPhase::Delay:
+                    if (!in_zone) { trigger.phase = TriggerPhase::Idle; break; }
+                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_delay)
+                    {
+                        mouseThread.pressLeftButton();
+                        trigger.phase = TriggerPhase::Pressed;
+                        trigger.phase_time_ms = now_ms;
+                    }
+                    break;
+                case TriggerPhase::Pressed:
+                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_duration)
+                    {
+                        mouseThread.releaseLeftButton();
+                        trigger.phase = TriggerPhase::Cooldown;
+                        trigger.phase_time_ms = now_ms;
+                    }
+                    break;
+                case TriggerPhase::Cooldown:
+                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_interval)
+                        trigger.phase = TriggerPhase::Idle;
+                    break;
+                }
+            }
+            else
+            {
+                if (trigger.phase == TriggerPhase::Pressed)
+                    mouseThread.releaseLeftButton();
+                trigger.reset();
+            }
+
             const float err = static_cast<float>(std::hypot(
                 out.anchor.x - pivot.x, out.anchor.y - pivot.y));
             g_pid_last_err_px.store(err);
@@ -588,10 +592,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
         else
         {
-            // No target this frame → release the trigger but do not enqueue a
-            // counter-move; the boss algo is "do nothing when no target".
-            mouseThread.setLockedTargetBox(0.0, 0.0, 0.0, 0.0);
-            mouseThread.forceTriggerRelease();
+            if (trigger.phase == TriggerPhase::Pressed)
+                mouseThread.releaseLeftButton();
+            trigger.reset();
             mouseThread.clearQueuedMoves();
             g_pid_last_err_px.store(0.0f);
         }

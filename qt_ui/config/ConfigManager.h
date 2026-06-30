@@ -251,15 +251,21 @@ public:
         float speedX = 0.6f;
         float speedY = 0.6f;
         float deadZonePx = 2.0f;
-        bool smartTriggerEnabled = false;
-        float smartTriggerHitScale = 0.60f;
-        float smartTriggerAggression = 0.50f;
+        bool deadzoneEnabled = false;
+        float deadzonePercent = 0.0f;
+        bool triggerEnabled = false;
+        int triggerFireDelay = 0;
+        int triggerFireDuration = 100;
+        int triggerFireInterval = 200;
+        int triggerYPercent = 100;
+        int targetClass1 = 0;   float targetYTop1 = 0.0f; float targetYBot1 = 1.0f; float targetMinConf1 = 0.0f;
+        int targetClass2 = 1;   float targetYTop2 = 0.0f; float targetYBot2 = 0.4f; float targetMinConf2 = 0.0f;
+        int targetClass3 = 2;   float targetYTop3 = 0.0f; float targetYBot3 = 0.3f; float targetMinConf3 = 0.0f;
+        int targetAimRange = 150;
         bool laserDetectEnabled = false;
         bool crosshairDetectEnabled = false;
         bool flashlightDetectEnabled = false;
         bool glassFilterEnabled = false;
-        float lockAggression = 0.30f;
-        bool yOffsetSizeDecayEnabled = false;
         bool dynamicFovEnabled = false;
         float dynamicFovStrength = 0.60f;
         // Aim trajectory curve. 0=Linear, 1=Bezier, 2=Custom.

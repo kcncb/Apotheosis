@@ -185,11 +185,7 @@ void process_frame(const cv::Mat& bgrFrame)
         const auto& hk = config.hotkeys[active_idx];
         cross_enabled = hk.crosshair_detect_enabled;
         laser_enabled = hk.laser_detect_enabled;
-        // 智能扳机默认接入准星找色:启用 smart_trigger 时即使用户未在 UI
-        // 中显式打开 crosshair_detect_enabled,也隐式开启 crosshair 通路。
-        // 这样扳机判定能用真实准星色点而不是几何中心,无需新增 UI 开关。
-        // (镭射通路 laser_detect_enabled 仍需用户显式打开,不被扳机隐式启用。)
-        if (hk.smart_trigger_enabled)
+        if (hk.trigger_enabled)
             cross_enabled = true;
         if (!cross_enabled && !laser_enabled)
         {

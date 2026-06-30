@@ -25,6 +25,7 @@ enum class Kind : int
 {
     Smooth     = 0,
     Predictive = 1,
+    Classic    = 2,   // 天枢 — 经典 PID + 动态 KP + EMA/Kalman 预测
 };
 
 struct Move
@@ -138,6 +139,98 @@ private:
     double out_hist_x_[kHistN] = {};           // 自身输出历史(按假定延迟还原已生效平移)
     double out_hist_y_[kHistN] = {};
     int    hist_w_ = 0;                          // 历史环写指针
+};
+
+// =============================================================================
+// 天枢 — 经典全参 PID + 动态 KP + EMA/Kalman 预测。
+//
+// 从 zimumodule 原样移植,算法逻辑与参数名一一对应,不做任何重新设计。
+// 两种瞄准模式:
+//   aim_mode 0 (简单): 对称 KP(时间渐变),共用 KI/KD。
+//   aim_mode 1 (高级): X/Y 独立全 PID,KP 按距离或时间两种调度。
+// 预测三档: 0=无, 1=EMA 速度外推, 2=Kalman 滤波 + lookahead。
+// =============================================================================
+
+struct ClassicPidParams
+{
+    int    aim_mode = 0;                // 0=简单, 1=高级(独立XY)
+
+    // 简单模式
+    double simple_start_speed = 0.3;
+    double simple_end_speed   = 0.8;
+    int    simple_transition_ms = 0;
+    double simple_ki = 0.0;
+    double simple_kd = 0.0;
+
+    // 高级模式 X
+    double adv_kpmin_x = 0.3,  adv_kpmax_x = 0.8;
+    double adv_ki_x = 0.0,     adv_kd_x = 0.0;
+    double adv_imax_x = 0.0;
+    double adv_pfactor_x = 1.0;
+    int    adv_time_x = 0;
+    bool   adv_time_dynamic_x = false;
+
+    // 高级模式 Y
+    double adv_kpmin_y = 0.3,  adv_kpmax_y = 0.8;
+    double adv_ki_y = 0.0,     adv_kd_y = 0.0;
+    double adv_imax_y = 0.0;
+    double adv_pfactor_y = 1.0;
+    int    adv_time_y = 0;
+    bool   adv_time_dynamic_y = false;
+
+    // 预测
+    int    prediction_mode = 0;         // 0=无, 1=EMA, 2=Kalman
+    double velocity_lead_frames = 1.0;
+    bool   independent_y = false;
+
+    // Kalman
+    double kalman_q_pos = 1.0;
+    double kalman_q_vel = 1.0;
+    double kalman_r_obs = 1.0;
+    double kalman_lookahead = 2.0;      // ms
+};
+
+class ClassicPidMover
+{
+public:
+    void reset();
+    void configure(const ClassicPidParams& p);
+
+    Move step(double anchor_x, double anchor_y,
+              double cross_x,  double cross_y,
+              double bbox_w,   double bbox_h,
+              double image_size, double dt, int track_id);
+
+private:
+    static double clampd(double v, double lo, double hi)
+    { return v < lo ? lo : (v > hi ? hi : v); }
+
+    ClassicPidParams params_{};
+
+    // PID 状态
+    double integral_x_ = 0, integral_y_ = 0;
+    double prev_err_x_ = 0, prev_err_y_ = 0;
+    double velocity_ema_ = 0;
+    bool   first_frame_ = true;
+
+    // EMA 预测状态
+    double ema_vx_ = 0, ema_vy_ = 0;
+    double prev_target_x_ = 0, prev_target_y_ = 0;
+    bool   ema_init_ = false;
+
+    // Kalman 状态
+    double kf_x_ = 0, kf_y_ = 0;
+    double kf_vx_ = 0, kf_vy_ = 0;
+    double kf_px_ = 1, kf_py_ = 1;
+    double kf_pvx_ = 1, kf_pvy_ = 1;
+    bool   kf_init_ = false;
+    double accum_x_ = 0, accum_y_ = 0;
+
+    // 瞄准计时
+    double elapsed_sec_ = 0;
+    bool   aim_timing_ = false;
+
+    int    prev_track_id_ = -1;
 };
 
 } // namespace mover

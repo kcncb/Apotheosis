@@ -46,52 +46,11 @@ ClassBucket bucket_from_str(const std::string& s, ClassBucket fallback = ClassBu
     return fallback;
 }
 
-// Aim classes serialized as a semicolon-separated list; each entry is
-// "class_id:y_offset". Example: "0:0.45;2:0.50;5:0.30".
-std::string serialize_aim_classes(const std::vector<HotkeyAimClass>& classes)
-{
-    std::ostringstream oss;
-    for (size_t i = 0; i < classes.size(); ++i)
-    {
-        if (i) oss << ';';
-        oss << classes[i].class_id << ':' << std::fixed << std::setprecision(3) << classes[i].y_offset;
-    }
-    return oss.str();
-}
-
-std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
-{
-    std::vector<HotkeyAimClass> out;
-    std::stringstream ss(raw);
-    std::string tok;
-    while (std::getline(ss, tok, ';'))
-    {
-        auto colon = tok.find(':');
-        if (colon == std::string::npos)
-            continue;
-        try
-        {
-            HotkeyAimClass c;
-            c.class_id = std::stoi(tok.substr(0, colon));
-            c.y_offset = std::stof(tok.substr(colon + 1));
-            if (c.y_offset < 0.0f) c.y_offset = 0.0f;
-            if (c.y_offset > 1.0f) c.y_offset = 1.0f;
-            out.push_back(c);
-        }
-        catch (...)
-        {
-            // skip malformed entry
-        }
-    }
-    return out;
-}
-
 void apply_default_hotkey(HotkeyProfile& hk)
 {
     hk.name = "Aim";
     hk.group = u8"默认";
     hk.keys = { "RightMouseButton" };
-    hk.aim_classes.clear();
 }
 
 } // namespace
@@ -602,7 +561,6 @@ bool Config::loadConfig(const std::string& filename)
             if (hk.group.empty())
                 hk.group = u8"默认";
             hk.keys = splitString(get_string(sec, "keys", "RightMouseButton"));
-            hk.aim_classes = parse_aim_classes(get_string(sec, "aim_classes", ""));
 
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
@@ -621,57 +579,67 @@ bool Config::loadConfig(const std::string& filename)
                 get_double(sec, "predictive_pred_weight",
                            get_double(sec, "predictive_pred_weight_x", hk.predictive_pred_weight)));
 
+            // 天枢 (Classic)
+            hk.classic_aim_mode = static_cast<int>(get_long(sec, "classic_aim_mode", hk.classic_aim_mode));
+            hk.classic_simple_start_speed  = static_cast<float>(get_double(sec, "classic_simple_start_speed",  hk.classic_simple_start_speed));
+            hk.classic_simple_end_speed    = static_cast<float>(get_double(sec, "classic_simple_end_speed",    hk.classic_simple_end_speed));
+            hk.classic_simple_transition_ms= static_cast<int>(get_long(sec, "classic_simple_transition_ms",    hk.classic_simple_transition_ms));
+            hk.classic_simple_ki           = static_cast<float>(get_double(sec, "classic_simple_ki",           hk.classic_simple_ki));
+            hk.classic_simple_kd           = static_cast<float>(get_double(sec, "classic_simple_kd",           hk.classic_simple_kd));
+            hk.classic_adv_kpmin_x   = static_cast<float>(get_double(sec, "classic_adv_kpmin_x",   hk.classic_adv_kpmin_x));
+            hk.classic_adv_kpmax_x   = static_cast<float>(get_double(sec, "classic_adv_kpmax_x",   hk.classic_adv_kpmax_x));
+            hk.classic_adv_ki_x      = static_cast<float>(get_double(sec, "classic_adv_ki_x",      hk.classic_adv_ki_x));
+            hk.classic_adv_kd_x      = static_cast<float>(get_double(sec, "classic_adv_kd_x",      hk.classic_adv_kd_x));
+            hk.classic_adv_imax_x    = static_cast<float>(get_double(sec, "classic_adv_imax_x",    hk.classic_adv_imax_x));
+            hk.classic_adv_pfactor_x = static_cast<float>(get_double(sec, "classic_adv_pfactor_x", hk.classic_adv_pfactor_x));
+            hk.classic_adv_time_x    = static_cast<int>(get_long(sec, "classic_adv_time_x",        hk.classic_adv_time_x));
+            hk.classic_adv_time_dynamic_x = get_bool(sec, "classic_adv_time_dynamic_x",            hk.classic_adv_time_dynamic_x);
+            hk.classic_adv_kpmin_y   = static_cast<float>(get_double(sec, "classic_adv_kpmin_y",   hk.classic_adv_kpmin_y));
+            hk.classic_adv_kpmax_y   = static_cast<float>(get_double(sec, "classic_adv_kpmax_y",   hk.classic_adv_kpmax_y));
+            hk.classic_adv_ki_y      = static_cast<float>(get_double(sec, "classic_adv_ki_y",      hk.classic_adv_ki_y));
+            hk.classic_adv_kd_y      = static_cast<float>(get_double(sec, "classic_adv_kd_y",      hk.classic_adv_kd_y));
+            hk.classic_adv_imax_y    = static_cast<float>(get_double(sec, "classic_adv_imax_y",    hk.classic_adv_imax_y));
+            hk.classic_adv_pfactor_y = static_cast<float>(get_double(sec, "classic_adv_pfactor_y", hk.classic_adv_pfactor_y));
+            hk.classic_adv_time_y    = static_cast<int>(get_long(sec, "classic_adv_time_y",        hk.classic_adv_time_y));
+            hk.classic_adv_time_dynamic_y = get_bool(sec, "classic_adv_time_dynamic_y",            hk.classic_adv_time_dynamic_y);
+            hk.classic_prediction_mode       = static_cast<int>(get_long(sec, "classic_prediction_mode",       hk.classic_prediction_mode));
+            hk.classic_velocity_lead_frames  = static_cast<float>(get_double(sec, "classic_velocity_lead_frames",  hk.classic_velocity_lead_frames));
+            hk.classic_independent_y         = get_bool(sec, "classic_independent_y",                              hk.classic_independent_y);
+            hk.classic_kalman_q_pos      = static_cast<float>(get_double(sec, "classic_kalman_q_pos",      hk.classic_kalman_q_pos));
+            hk.classic_kalman_q_vel      = static_cast<float>(get_double(sec, "classic_kalman_q_vel",      hk.classic_kalman_q_vel));
+            hk.classic_kalman_r_obs      = static_cast<float>(get_double(sec, "classic_kalman_r_obs",      hk.classic_kalman_r_obs));
+            hk.classic_kalman_lookahead  = static_cast<float>(get_double(sec, "classic_kalman_lookahead",  hk.classic_kalman_lookahead));
+
+            // 死区 (shared)
+            hk.deadzone_enabled  = get_bool(sec, "deadzone_enabled",  hk.deadzone_enabled);
+            hk.deadzone_percent  = static_cast<float>(get_double(sec, "deadzone_percent",  hk.deadzone_percent));
+
+            // 扳机
+            hk.trigger_enabled        = get_bool(sec, "trigger_enabled",        hk.trigger_enabled);
+            hk.trigger_fire_delay     = static_cast<int>(get_long(sec, "trigger_fire_delay",     hk.trigger_fire_delay));
+            hk.trigger_fire_duration  = static_cast<int>(get_long(sec, "trigger_fire_duration",  hk.trigger_fire_duration));
+            hk.trigger_fire_interval  = static_cast<int>(get_long(sec, "trigger_fire_interval",  hk.trigger_fire_interval));
+            hk.trigger_y_percent      = static_cast<int>(get_long(sec, "trigger_y_percent",      hk.trigger_y_percent));
+
+            // 目标选择 3 槽位
+            hk.target_class_1    = static_cast<int>(get_long(sec, "target_class_1",    hk.target_class_1));
+            hk.target_y_top_1    = static_cast<float>(get_double(sec, "target_y_top_1",    hk.target_y_top_1));
+            hk.target_y_bot_1    = static_cast<float>(get_double(sec, "target_y_bot_1",    hk.target_y_bot_1));
+            hk.target_min_conf_1 = static_cast<float>(get_double(sec, "target_min_conf_1", hk.target_min_conf_1));
+            hk.target_class_2    = static_cast<int>(get_long(sec, "target_class_2",    hk.target_class_2));
+            hk.target_y_top_2    = static_cast<float>(get_double(sec, "target_y_top_2",    hk.target_y_top_2));
+            hk.target_y_bot_2    = static_cast<float>(get_double(sec, "target_y_bot_2",    hk.target_y_bot_2));
+            hk.target_min_conf_2 = static_cast<float>(get_double(sec, "target_min_conf_2", hk.target_min_conf_2));
+            hk.target_class_3    = static_cast<int>(get_long(sec, "target_class_3",    hk.target_class_3));
+            hk.target_y_top_3    = static_cast<float>(get_double(sec, "target_y_top_3",    hk.target_y_top_3));
+            hk.target_y_bot_3    = static_cast<float>(get_double(sec, "target_y_bot_3",    hk.target_y_bot_3));
+            hk.target_min_conf_3 = static_cast<float>(get_double(sec, "target_min_conf_3", hk.target_min_conf_3));
+            hk.target_aim_range  = static_cast<int>(get_long(sec, "target_aim_range",  hk.target_aim_range));
+
             hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
             hk.laser_detect_enabled      = get_bool(sec, "laser_detect_enabled", false);
             hk.flashlight_detect_enabled = get_bool(sec, "flashlight_detect_enabled", false);
             hk.glass_filter_enabled      = get_bool(sec, "glass_filter_enabled",      false);
-
-            // 锁定灵活度:优先读新字段;退化路径从旧 lock_stickiness / kill_detect_sensitivity
-            // / lock_switch_score_margin 任一字段反推算。
-            {
-                const float legacy_margin = static_cast<float>(
-                    get_double(sec, "lock_switch_score_margin", 0.40 * (1.0 - hk.lock_aggression)));
-                const float agg_from_margin = std::clamp(1.0f - legacy_margin / 0.40f, 0.0f, 1.0f);
-                const float legacy_sticky = static_cast<float>(
-                    get_double(sec, "lock_stickiness", 1.0 - hk.lock_aggression));
-                const float agg_from_sticky = std::clamp(1.0f - legacy_sticky, 0.0f, 1.0f);
-                const float legacy_sens = static_cast<float>(
-                    get_double(sec, "kill_detect_sensitivity", hk.lock_aggression));
-                // 取这三个旧字段反推算的中值作为兼容默认(用户调过任意一个都不会被忽略)。
-                float legacy_agg = 0.333f * (agg_from_margin + agg_from_sticky + legacy_sens);
-                legacy_agg = std::clamp(legacy_agg, 0.0f, 1.0f);
-                hk.lock_aggression = static_cast<float>(
-                    get_double(sec, "lock_aggression", legacy_agg));
-            }
-            hk.y_offset_size_decay_enabled = get_bool(sec, "y_offset_size_decay_enabled",
-                                                       hk.y_offset_size_decay_enabled);
-
-            // 智能扳机:优先读新字段;否则从旧 reaction_ms 反推算 aggression。
-            // hold_ms / cooldown_ms 现在是用户直接控制的字段(不再由 aggression
-            // 反算),缺省退化路径:旧 ini 没写就按 30+30*agg / 100-90*agg 反算。
-            {
-                const int legacy_react = static_cast<int>(
-                    get_long(sec, "smart_trigger_reaction_ms",
-                             static_cast<int>(std::lround(80.0 - 80.0 * hk.smart_trigger_aggression))));
-                const float legacy_agg = std::clamp((80.0f - legacy_react) / 80.0f, 0.0f, 1.0f);
-                const double legacy_scale_x = get_double(sec, "smart_trigger_hit_scale_x", hk.smart_trigger_hit_scale);
-                const double legacy_scale_y = get_double(sec, "smart_trigger_hit_scale_y", legacy_scale_x);
-                const double legacy_scale   = 0.5 * (legacy_scale_x + legacy_scale_y);
-                hk.smart_trigger_enabled    = get_bool(sec, "smart_trigger_enabled", hk.smart_trigger_enabled);
-                hk.smart_trigger_hit_scale  = static_cast<float>(
-                    get_double(sec, "smart_trigger_hit_scale", legacy_scale));
-                hk.smart_trigger_aggression = static_cast<float>(
-                    get_double(sec, "smart_trigger_aggression", legacy_agg));
-
-                const int legacy_hold = static_cast<int>(std::lround(
-                    30.0 + 30.0 * hk.smart_trigger_aggression));
-                const int legacy_cool = static_cast<int>(std::lround(
-                    100.0 - 90.0 * hk.smart_trigger_aggression));
-                hk.smart_trigger_hold_ms = static_cast<int>(
-                    get_long(sec, "smart_trigger_hold_ms", legacy_hold));
-                hk.smart_trigger_cooldown_ms = static_cast<int>(
-                    get_long(sec, "smart_trigger_cooldown_ms", legacy_cool));
-            }
 
             // 动态 FOV:优先读 strength;否则从旧 margin_frac 反推算。
             {
@@ -682,9 +650,6 @@ bool Config::loadConfig(const std::string& filename)
                 hk.dynamic_fov_strength = static_cast<float>(
                     get_double(sec, "dynamic_fov_strength", legacy_strength));
             }
-
-            hk.close_range_head_aim_enabled    = get_bool(sec, "close_range_head_aim_enabled", hk.close_range_head_aim_enabled);
-            hk.close_range_head_class_id       = get_long(sec, "close_range_head_class_id",    hk.close_range_head_class_id);
 
             // 瞄准轨迹曲线
             hk.aim_path_mode        = get_long(sec, "aim_path_mode", hk.aim_path_mode);
@@ -716,8 +681,6 @@ bool Config::loadConfig(const std::string& filename)
                 }
             }
 
-            // (kill_detect 已并入 lock_aggression,旧字段已在上方迁移)
-
             hotkeys.push_back(std::move(hk));
         }
 
@@ -746,7 +709,7 @@ bool Config::loadConfig(const std::string& filename)
         hk.speed_x        = std::clamp(hk.speed_x,        0.0f, 2.0f);
         hk.speed_y        = std::clamp(hk.speed_y,        0.0f, 2.0f);
         hk.dead_zone_px   = std::clamp(hk.dead_zone_px,   0.0f, 20.0f);
-        hk.mover_kind     = std::clamp(hk.mover_kind,     0, 1);
+        hk.mover_kind     = std::clamp(hk.mover_kind,     0, 2);
 
         // 疾风 clamp
         hk.predictive_kp_x        = std::clamp(hk.predictive_kp_x,        0.0f, 10.0f);
@@ -754,15 +717,55 @@ bool Config::loadConfig(const std::string& filename)
         hk.predictive_kd          = std::clamp(hk.predictive_kd,          0.0f, 5.0f);
         hk.predictive_pred_weight = std::clamp(hk.predictive_pred_weight, 0.0f, 3.0f);
 
-        hk.lock_aggression            = std::clamp(hk.lock_aggression,            0.0f, 1.0f);
-        hk.smart_trigger_hit_scale    = std::clamp(hk.smart_trigger_hit_scale,    0.05f, 1.0f);
-        hk.smart_trigger_aggression   = std::clamp(hk.smart_trigger_aggression,   0.0f, 1.0f);
-        hk.smart_trigger_hold_ms      = std::clamp(hk.smart_trigger_hold_ms,      5, 5000);
-        hk.smart_trigger_cooldown_ms  = std::clamp(hk.smart_trigger_cooldown_ms,  0, 5000);
-        hk.dynamic_fov_strength       = std::clamp(hk.dynamic_fov_strength,       0.0f, 1.0f);
+        // 天枢 clamp
+        hk.classic_aim_mode = std::clamp(hk.classic_aim_mode, 0, 1);
+        hk.classic_simple_start_speed  = std::clamp(hk.classic_simple_start_speed,  0.0f, 5.0f);
+        hk.classic_simple_end_speed    = std::clamp(hk.classic_simple_end_speed,    0.0f, 5.0f);
+        hk.classic_simple_transition_ms= std::clamp(hk.classic_simple_transition_ms, 0, 10000);
+        hk.classic_simple_ki           = std::clamp(hk.classic_simple_ki,           0.0f, 1.0f);
+        hk.classic_simple_kd           = std::clamp(hk.classic_simple_kd,           0.0f, 2.0f);
+        hk.classic_adv_kpmin_x   = std::clamp(hk.classic_adv_kpmin_x,   0.0f, 5.0f);
+        hk.classic_adv_kpmax_x   = std::clamp(hk.classic_adv_kpmax_x,   0.0f, 5.0f);
+        hk.classic_adv_ki_x      = std::clamp(hk.classic_adv_ki_x,      0.0f, 1.0f);
+        hk.classic_adv_kd_x      = std::clamp(hk.classic_adv_kd_x,      0.0f, 2.0f);
+        hk.classic_adv_imax_x    = std::clamp(hk.classic_adv_imax_x,    0.0f, 100.0f);
+        hk.classic_adv_pfactor_x = std::clamp(hk.classic_adv_pfactor_x, 0.1f, 5.0f);
+        hk.classic_adv_time_x    = std::clamp(hk.classic_adv_time_x,    0, 10000);
+        hk.classic_adv_kpmin_y   = std::clamp(hk.classic_adv_kpmin_y,   0.0f, 5.0f);
+        hk.classic_adv_kpmax_y   = std::clamp(hk.classic_adv_kpmax_y,   0.0f, 5.0f);
+        hk.classic_adv_ki_y      = std::clamp(hk.classic_adv_ki_y,      0.0f, 1.0f);
+        hk.classic_adv_kd_y      = std::clamp(hk.classic_adv_kd_y,      0.0f, 2.0f);
+        hk.classic_adv_imax_y    = std::clamp(hk.classic_adv_imax_y,    0.0f, 100.0f);
+        hk.classic_adv_pfactor_y = std::clamp(hk.classic_adv_pfactor_y, 0.1f, 5.0f);
+        hk.classic_adv_time_y    = std::clamp(hk.classic_adv_time_y,    0, 10000);
+        hk.classic_prediction_mode       = std::clamp(hk.classic_prediction_mode,       0, 2);
+        hk.classic_velocity_lead_frames  = std::clamp(hk.classic_velocity_lead_frames,  0.0f, 10.0f);
+        hk.classic_kalman_q_pos      = std::clamp(hk.classic_kalman_q_pos,      0.001f, 100.0f);
+        hk.classic_kalman_q_vel      = std::clamp(hk.classic_kalman_q_vel,      0.001f, 100.0f);
+        hk.classic_kalman_r_obs      = std::clamp(hk.classic_kalman_r_obs,      0.001f, 100.0f);
+        hk.classic_kalman_lookahead  = std::clamp(hk.classic_kalman_lookahead,  0.0f, 100.0f);
+        // 死区 clamp
+        hk.deadzone_percent = std::clamp(hk.deadzone_percent, 0.0f, 100.0f);
 
-        if (hk.close_range_head_class_id < -1)
-            hk.close_range_head_class_id = -1;
+        // 扳机 clamp
+        hk.trigger_fire_delay    = std::clamp(hk.trigger_fire_delay,    0, 5000);
+        hk.trigger_fire_duration = std::clamp(hk.trigger_fire_duration, 1, 5000);
+        hk.trigger_fire_interval = std::clamp(hk.trigger_fire_interval, 0, 5000);
+        hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 100);
+
+        // 目标选择 clamp
+        hk.target_y_top_1    = std::clamp(hk.target_y_top_1,    0.0f, 1.0f);
+        hk.target_y_bot_1    = std::clamp(hk.target_y_bot_1,    0.0f, 1.0f);
+        hk.target_min_conf_1 = std::clamp(hk.target_min_conf_1, 0.0f, 1.0f);
+        hk.target_y_top_2    = std::clamp(hk.target_y_top_2,    0.0f, 1.0f);
+        hk.target_y_bot_2    = std::clamp(hk.target_y_bot_2,    0.0f, 1.0f);
+        hk.target_min_conf_2 = std::clamp(hk.target_min_conf_2, 0.0f, 1.0f);
+        hk.target_y_top_3    = std::clamp(hk.target_y_top_3,    0.0f, 1.0f);
+        hk.target_y_bot_3    = std::clamp(hk.target_y_bot_3,    0.0f, 1.0f);
+        hk.target_min_conf_3 = std::clamp(hk.target_min_conf_3, 0.0f, 1.0f);
+        hk.target_aim_range  = std::clamp(hk.target_aim_range,  1, 9999);
+
+        hk.dynamic_fov_strength = std::clamp(hk.dynamic_fov_strength, 0.0f, 1.0f);
     };
     for (auto& hk : hotkeys)
         clamp_aim_fields(hk);
@@ -974,7 +977,6 @@ bool Config::saveConfig(const std::string& filename)
         file << "name = " << hk.name << "\n";
         file << "group = " << hk.group << "\n";
         file << "keys = " << joinStrings(hk.keys) << "\n";
-        file << "aim_classes = " << serialize_aim_classes(hk.aim_classes) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
         file << std::fixed << std::setprecision(4)
@@ -986,25 +988,77 @@ bool Config::saveConfig(const std::string& filename)
              << "predictive_kp_y = "        << hk.predictive_kp_y        << "\n"
              << "predictive_kd = "          << hk.predictive_kd          << "\n"
              << "predictive_pred_weight = " << hk.predictive_pred_weight << "\n"
+             << "classic_aim_mode = " << hk.classic_aim_mode << "\n"
+             << std::setprecision(4)
+             << "classic_simple_start_speed = "  << hk.classic_simple_start_speed  << "\n"
+             << "classic_simple_end_speed = "    << hk.classic_simple_end_speed    << "\n"
+             << std::setprecision(0)
+             << "classic_simple_transition_ms = "<< hk.classic_simple_transition_ms << "\n"
+             << std::setprecision(4)
+             << "classic_simple_ki = "           << hk.classic_simple_ki           << "\n"
+             << "classic_simple_kd = "           << hk.classic_simple_kd           << "\n"
+             << "classic_adv_kpmin_x = "   << hk.classic_adv_kpmin_x   << "\n"
+             << "classic_adv_kpmax_x = "   << hk.classic_adv_kpmax_x   << "\n"
+             << "classic_adv_ki_x = "      << hk.classic_adv_ki_x      << "\n"
+             << "classic_adv_kd_x = "      << hk.classic_adv_kd_x      << "\n"
+             << "classic_adv_imax_x = "    << hk.classic_adv_imax_x    << "\n"
+             << "classic_adv_pfactor_x = " << hk.classic_adv_pfactor_x << "\n"
+             << std::setprecision(0)
+             << "classic_adv_time_x = "    << hk.classic_adv_time_x    << "\n"
+             << "classic_adv_time_dynamic_x = " << to_bool_str(hk.classic_adv_time_dynamic_x) << "\n"
+             << std::setprecision(4)
+             << "classic_adv_kpmin_y = "   << hk.classic_adv_kpmin_y   << "\n"
+             << "classic_adv_kpmax_y = "   << hk.classic_adv_kpmax_y   << "\n"
+             << "classic_adv_ki_y = "      << hk.classic_adv_ki_y      << "\n"
+             << "classic_adv_kd_y = "      << hk.classic_adv_kd_y      << "\n"
+             << "classic_adv_imax_y = "    << hk.classic_adv_imax_y    << "\n"
+             << "classic_adv_pfactor_y = " << hk.classic_adv_pfactor_y << "\n"
+             << std::setprecision(0)
+             << "classic_adv_time_y = "    << hk.classic_adv_time_y    << "\n"
+             << "classic_adv_time_dynamic_y = " << to_bool_str(hk.classic_adv_time_dynamic_y) << "\n"
+             << "classic_prediction_mode = "       << hk.classic_prediction_mode       << "\n"
+             << std::setprecision(4)
+             << "classic_velocity_lead_frames = "  << hk.classic_velocity_lead_frames  << "\n"
+             << "classic_independent_y = "         << to_bool_str(hk.classic_independent_y)         << "\n"
+             << "classic_kalman_q_pos = "      << hk.classic_kalman_q_pos      << "\n"
+             << "classic_kalman_q_vel = "      << hk.classic_kalman_q_vel      << "\n"
+             << "classic_kalman_r_obs = "      << hk.classic_kalman_r_obs      << "\n"
+             << "classic_kalman_lookahead = "  << hk.classic_kalman_lookahead  << "\n"
+             << "deadzone_enabled = "  << to_bool_str(hk.deadzone_enabled)  << "\n"
+             << std::setprecision(4)
+             << "deadzone_percent = "  << hk.deadzone_percent  << "\n"
+             << "trigger_enabled = "       << to_bool_str(hk.trigger_enabled)       << "\n"
+             << std::setprecision(0)
+             << "trigger_fire_delay = "    << hk.trigger_fire_delay    << "\n"
+             << "trigger_fire_duration = " << hk.trigger_fire_duration << "\n"
+             << "trigger_fire_interval = " << hk.trigger_fire_interval << "\n"
+             << "trigger_y_percent = "     << hk.trigger_y_percent     << "\n"
+             << "target_class_1 = "      << hk.target_class_1      << "\n"
+             << std::setprecision(4)
+             << "target_y_top_1 = "      << hk.target_y_top_1      << "\n"
+             << "target_y_bot_1 = "      << hk.target_y_bot_1      << "\n"
+             << "target_min_conf_1 = "   << hk.target_min_conf_1   << "\n"
+             << std::setprecision(0)
+             << "target_class_2 = "      << hk.target_class_2      << "\n"
+             << std::setprecision(4)
+             << "target_y_top_2 = "      << hk.target_y_top_2      << "\n"
+             << "target_y_bot_2 = "      << hk.target_y_bot_2      << "\n"
+             << "target_min_conf_2 = "   << hk.target_min_conf_2   << "\n"
+             << std::setprecision(0)
+             << "target_class_3 = "      << hk.target_class_3      << "\n"
+             << std::setprecision(4)
+             << "target_y_top_3 = "      << hk.target_y_top_3      << "\n"
+             << "target_y_bot_3 = "      << hk.target_y_bot_3      << "\n"
+             << "target_min_conf_3 = "   << hk.target_min_conf_3   << "\n"
+             << std::setprecision(0)
+             << "target_aim_range = "    << hk.target_aim_range    << "\n"
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
              << "laser_detect_enabled = "      << to_bool_str(hk.laser_detect_enabled)      << "\n"
              << "flashlight_detect_enabled = " << to_bool_str(hk.flashlight_detect_enabled) << "\n"
              << "glass_filter_enabled = "      << to_bool_str(hk.glass_filter_enabled)      << "\n"
-             << std::fixed << std::setprecision(4)
-             << "lock_aggression = " << hk.lock_aggression << "\n"
-             << "y_offset_size_decay_enabled = " << to_bool_str(hk.y_offset_size_decay_enabled) << "\n"
-             << "smart_trigger_enabled = "   << to_bool_str(hk.smart_trigger_enabled) << "\n"
-             << "smart_trigger_hit_scale = " << hk.smart_trigger_hit_scale << "\n"
-             << "smart_trigger_aggression = " << hk.smart_trigger_aggression << "\n"
-             << std::setprecision(0)
-             << "smart_trigger_hold_ms = " << hk.smart_trigger_hold_ms << "\n"
-             << "smart_trigger_cooldown_ms = " << hk.smart_trigger_cooldown_ms << "\n"
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
-             << "close_range_head_aim_enabled = " << to_bool_str(hk.close_range_head_aim_enabled) << "\n"
-             << std::setprecision(0)
-             << "close_range_head_class_id = " << hk.close_range_head_class_id << "\n"
              << "aim_path_mode = " << hk.aim_path_mode << "\n"
              << std::fixed << std::setprecision(4)
              << "aim_path_bezier_cx1 = " << hk.aim_path_bezier_cx1 << "\n"

@@ -208,8 +208,7 @@ void ConfigBridge::syncToRuntime() {
     // --- Active group & Hotkeys ---
     // Both are managed directly by HotkeyPage writing to config.hotkeys[]
     // and config.active_hotkey_group.  Syncing through ConfigManager risks
-    // double-encoding CJK group names and wiping aim_classes (which
-    // HotkeyData doesn't carry).  Do NOT overwrite here.
+    // double-encoding CJK group names.  Do NOT overwrite here.
 
     // --- Set change flags ---
     if (config.capture_method != oldMethod)
@@ -376,15 +375,30 @@ void ConfigBridge::syncFromRuntime()
         hd.speedX        = hp.speed_x;
         hd.speedY        = hp.speed_y;
         hd.deadZonePx    = hp.dead_zone_px;
-        hd.smartTriggerEnabled    = hp.smart_trigger_enabled;
-        hd.smartTriggerHitScale   = hp.smart_trigger_hit_scale;
-        hd.smartTriggerAggression = hp.smart_trigger_aggression;
+        hd.deadzoneEnabled     = hp.deadzone_enabled;
+        hd.deadzonePercent     = hp.deadzone_percent;
+        hd.triggerEnabled      = hp.trigger_enabled;
+        hd.triggerFireDelay    = hp.trigger_fire_delay;
+        hd.triggerFireDuration = hp.trigger_fire_duration;
+        hd.triggerFireInterval = hp.trigger_fire_interval;
+        hd.triggerYPercent     = hp.trigger_y_percent;
+        hd.targetClass1    = hp.target_class_1;
+        hd.targetYTop1     = hp.target_y_top_1;
+        hd.targetYBot1     = hp.target_y_bot_1;
+        hd.targetMinConf1  = hp.target_min_conf_1;
+        hd.targetClass2    = hp.target_class_2;
+        hd.targetYTop2     = hp.target_y_top_2;
+        hd.targetYBot2     = hp.target_y_bot_2;
+        hd.targetMinConf2  = hp.target_min_conf_2;
+        hd.targetClass3    = hp.target_class_3;
+        hd.targetYTop3     = hp.target_y_top_3;
+        hd.targetYBot3     = hp.target_y_bot_3;
+        hd.targetMinConf3  = hp.target_min_conf_3;
+        hd.targetAimRange  = hp.target_aim_range;
         hd.laserDetectEnabled      = hp.laser_detect_enabled;
         hd.crosshairDetectEnabled  = hp.crosshair_detect_enabled;
         hd.flashlightDetectEnabled = hp.flashlight_detect_enabled;
         hd.glassFilterEnabled      = hp.glass_filter_enabled;
-        hd.lockAggression         = hp.lock_aggression;
-        hd.yOffsetSizeDecayEnabled = hp.y_offset_size_decay_enabled;
         hd.dynamicFovEnabled  = hp.dynamic_fov_enabled;
         hd.dynamicFovStrength = hp.dynamic_fov_strength;
         hd.aimPathMode        = hp.aim_path_mode;

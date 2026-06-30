@@ -41,15 +41,6 @@ extern std::atomic<bool> aiming;
 extern std::atomic<bool> session_stop_requested;
 extern std::recursive_mutex configMutex;
 
-// Smart-trigger telemetry surfaced by MouseThread::updateSmartTrigger.
-//   g_smart_trigger_ready              -> true while the left button is held
-//   g_smart_trigger_hit_prob           -> on-target fraction [0,1] (1 = dead-centre)
-//   g_smart_trigger_recent_variance_px -> current on-target dwell time in ms
-// (the third name is kept for ABI/compat; it now carries dwell-ms, not RMS).
-extern std::atomic<bool>  g_smart_trigger_ready;
-extern std::atomic<float> g_smart_trigger_hit_prob;
-extern std::atomic<float> g_smart_trigger_recent_variance_px;
-
 // Aim telemetry: latest crosshair-to-target error (in detection pixels).
 extern std::atomic<float> g_pid_last_err_px;
 // Flick/Track telemetry: false = Flick gains active, true = Track gains active.
