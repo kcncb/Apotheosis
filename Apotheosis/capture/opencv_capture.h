@@ -46,11 +46,14 @@ public:
 
     cv::Mat GetNextFrameCpu() override;
     int GetSourceFpsEstimate() const override { return source_fps_.load(); }
+    bool WaitFrame(int timeoutMs) override;
+    bool SupportsEventWait() const override { return true; }
 
     bool IsOpen() const { return is_open_.load(); }
 
 private:
     void GrabLoop();
+    void TransformLoop();
     bool OpenDevice();
     void CloseDevice();
     void TickFps();
@@ -76,8 +79,19 @@ private:
     int source_frame_count_{ 0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 
+    // VideoCapture::read() must not share a thread with crop/resize.  At high
+    // source rates (240 Hz) even a sub-millisecond transform delays the next
+    // backend dequeue and makes DirectShow/MSMF drop frames before we see them.
     std::thread grab_thread_;
+    std::thread transform_thread_;
+
+    std::mutex raw_mutex_;
+    std::condition_variable raw_cv_;
+    cv::Mat raw_latest_;
+    bool has_raw_frame_{ false };
+
     std::mutex frame_mutex_;
+    std::condition_variable frame_cv_;
     cv::Mat latest_;
     bool has_frame_{ false };
 };

@@ -18,6 +18,7 @@
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
@@ -75,6 +76,13 @@ private:
     // 的隐藏阻塞,直接把接收吞吐压到了 180-190fps。
     CUdeviceptr     pending_unmap_devptr_{ 0 };
     bool            has_pending_unmap_{ false };
+
+    // Reuse BGR outputs instead of cudaMalloc/cudaFree on every decoded frame.
+    // Per-frame allocator calls synchronize the device and serialize NVDEC
+    // against TensorRT; a ring keeps capture and inference overlapped.
+    static constexpr size_t OUTPUT_POOL_SIZE = 8;
+    std::array<GpuImage, OUTPUT_POOL_SIZE> output_pool_{};
+    size_t output_pool_index_{ 0 };
 };
 
 } // namespace capture

@@ -144,6 +144,57 @@ void launch_nv12_to_bgr_u8(
         width, height);
 }
 
+// ---- YUV444 planar -> BGR8 -------------------------------------------------
+// NVDEC 4:4:4 surface layout: Y / U / V three independent full-resolution
+// planes, each at `stride` pitch. 1 thread per output pixel.
+// BT.601 full-range JFIF (same coefficients as NV12 kernel, but full-res chroma
+// -> no subsampling step). Q10 fixed point.
+static __global__ void yuv444_to_bgr_u8_kernel(
+    const unsigned char* __restrict__ y_p,
+    const unsigned char* __restrict__ u_p,
+    const unsigned char* __restrict__ v_p,
+    int stride,
+    unsigned char* __restrict__ bgr, int bgrStep,
+    int width, int height)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int yy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || yy >= height) return;
+
+    const int row = yy * stride + x;
+    const int Y = (int)y_p[row];
+    const int U = (int)u_p[row] - 128;
+    const int V = (int)v_p[row] - 128;
+
+    int R = (Y * 1024 +              1436 * V + 512) >> 10;
+    int G = (Y * 1024 -  352 * U -    731 * V + 512) >> 10;
+    int B = (Y * 1024 + 1815 * U              + 512) >> 10;
+
+    unsigned char* dp = bgr + yy * bgrStep + x * 3;
+    dp[0] = clamp_byte(B);
+    dp[1] = clamp_byte(G);
+    dp[2] = clamp_byte(R);
+}
+
+void launch_yuv444_to_bgr_u8(
+    const unsigned char* y,
+    const unsigned char* u,
+    const unsigned char* v,
+    size_t stride,
+    unsigned char* bgr, size_t bgrStep,
+    int width, int height,
+    cudaStream_t stream)
+{
+    if (!y || !u || !v || !bgr || width <= 0 || height <= 0) return;
+    const dim3 block(32, 8);
+    const dim3 grid((width + block.x - 1) / block.x,
+                    (height + block.y - 1) / block.y);
+    yuv444_to_bgr_u8_kernel<<<grid, block, 0, stream>>>(
+        y, u, v, (int)stride,
+        bgr, (int)bgrStep,
+        width, height);
+}
+
 // ---- In-place 圆形掩码 ------------------------------------------------------
 // 半径平方比较代替 sqrt;一个线程一个像素,圆外置 0,圆内不动。
 static __global__ void circle_mask_bgr_u8_kernel(

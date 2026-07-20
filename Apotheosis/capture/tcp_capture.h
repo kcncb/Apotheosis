@@ -10,6 +10,9 @@
 #include <ws2tcpip.h>
 
 #include <atomic>
+#include <array>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -27,6 +30,9 @@ public:
 
     cv::Mat GetNextFrameCpu() override;
     GpuImage GetNextFrameGpu() override;
+    int GetSourceFpsEstimate() const override { return source_fps_.load(); }
+    bool WaitFrame(int timeoutMs) override;
+    bool SupportsEventWait() const override { return true; }
 
     bool Initialize();
     void Cleanup();
@@ -40,6 +46,7 @@ private:
     void ReceiveThread();
     bool ParseMJPEGFrame(std::vector<uint8_t>& data, cv::Mat& frame);
     bool DecodeJpegGpu(const uint8_t* jpeg, size_t jpeg_size);
+    void TickInputFps();
 
     int width_;
     int height_;
@@ -53,9 +60,13 @@ private:
     std::atomic<bool> should_stop_;
     std::atomic<int> received_frames_;
     std::atomic<int> dropped_frames_;
+    std::atomic<int> source_fps_{ 0 };
+    int source_frame_count_{ 0 };
+    std::chrono::steady_clock::time_point source_fps_start_{};
 
     std::thread receive_thread_;
     std::mutex frame_mutex_;
+    std::condition_variable frame_cv_;
     std::queue<cv::Mat> frame_queue_;
     std::queue<GpuImage> gpu_frame_queue_;
 
@@ -64,8 +75,14 @@ private:
     std::unique_ptr<capture::GpuJpegDecoder> gpu_decoder_;
     cudaStream_t decode_stream_{ nullptr };
 
+    static const int DECODE_POOL_SIZE = 10;
+    std::array<GpuImage, DECODE_POOL_SIZE> decode_pool_{};
+    std::array<GpuImage, DECODE_POOL_SIZE> resize_pool_{};
+    std::array<cudaEvent_t, DECODE_POOL_SIZE> decode_events_{};
+    size_t decode_pool_index_{ 0 };
+
     static const int MAX_FRAME_SIZE = 8 * 1024 * 1024;
-    static const int MAX_QUEUE_SIZE = 5;
+    static const int MAX_QUEUE_SIZE = 1;
 };
 
 #endif // TCP_CAPTURE_H

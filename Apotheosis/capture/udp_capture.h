@@ -11,6 +11,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -28,6 +30,9 @@ public:
 
     cv::Mat GetNextFrameCpu() override;
     GpuImage GetNextFrameGpu() override;
+    int GetSourceFpsEstimate() const override { return source_fps_.load(); }
+    bool WaitFrame(int timeoutMs) override;
+    bool SupportsEventWait() const override { return true; }
 
     bool Initialize();
     void Cleanup();
@@ -42,6 +47,7 @@ private:
     // Locate SOI (FFD8) / EOI (FFD9) markers in a byte stream buffered from
     // fragmented UDP datagrams. Returns false if no complete JPEG is present.
     bool FindJpegBounds(const std::vector<uint8_t>& data, size_t& start_pos, size_t& end_pos);
+    void TickInputFps();
 
     int width_;
     int height_;
@@ -55,9 +61,13 @@ private:
     std::atomic<bool> should_stop_;
     std::atomic<int> received_frames_;
     std::atomic<int> dropped_frames_;
+    std::atomic<int> source_fps_{ 0 };
+    int source_frame_count_{ 0 };
+    std::chrono::steady_clock::time_point source_fps_start_{};
 
     std::thread receive_thread_;
     std::mutex frame_mutex_;
+    std::condition_variable frame_cv_;
 
     // Legacy CPU queue (used when nvJPEG init failed and we fall back to
     // cv::imdecode), plus the preferred GPU queue populated by the nvJPEG
@@ -102,7 +112,7 @@ private:
     std::array<cudaEvent_t, DECODE_POOL_SIZE> decode_events_{};
 
     static const int MAX_FRAME_SIZE = 1024 * 1024;
-    static const int MAX_QUEUE_SIZE = 5;
+    static const int MAX_QUEUE_SIZE = 1;
 };
 
 #endif // UDP_CAPTURE_H

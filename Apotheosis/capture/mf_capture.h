@@ -75,6 +75,7 @@ public:
     bool WaitFrame(int timeoutMs) override;
     bool SupportsEventWait() const override { return true; }
     void SetTargetFps(int fps) override;
+    bool HandlesTargetFps() const override { return true; }
 
     bool IsOpen() const { return is_open_.load(); }
 
@@ -146,6 +147,7 @@ private:
     std::atomic<bool> is_open_{ false };
     std::atomic<bool> should_stop_{ false };
     std::atomic<int> source_fps_{ 0 };
+    std::atomic<int> negotiated_fps_{ 0 };
     int source_frame_count_{ 0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 

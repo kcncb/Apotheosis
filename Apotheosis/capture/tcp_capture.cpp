@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 #include "gpu_color_ops.h"
 
@@ -37,6 +38,12 @@ TCPCapture::~TCPCapture()
         cudaFreeHost(pinned_jpeg_buffer_);
         pinned_jpeg_buffer_ = nullptr;
         pinned_jpeg_capacity_ = 0;
+    }
+    for (auto& event : decode_events_)
+    {
+        if (event)
+            cudaEventDestroy(event);
+        event = nullptr;
     }
     if (decode_stream_)
     {
@@ -103,6 +110,9 @@ bool TCPCapture::Initialize()
     is_connected_ = true;
     received_frames_ = 0;
     dropped_frames_ = 0;
+    source_frame_count_ = 0;
+    source_fps_.store(0);
+    source_fps_start_ = std::chrono::steady_clock::now();
 
     receive_thread_ = std::thread(&TCPCapture::ReceiveThread, this);
 
@@ -114,6 +124,7 @@ void TCPCapture::Cleanup()
 {
     should_stop_ = true;
     is_connected_ = false;
+    frame_cv_.notify_all();
 
     if (client_socket_ != INVALID_SOCKET)
     {
@@ -169,6 +180,17 @@ GpuImage TCPCapture::GetNextFrameGpu()
     return frame;
 }
 
+bool TCPCapture::WaitFrame(int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(frame_mutex_);
+    if (!gpu_frame_queue_.empty() || !frame_queue_.empty())
+        return true;
+    frame_cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
+        return should_stop_.load() || !gpu_frame_queue_.empty() || !frame_queue_.empty();
+    });
+    return !gpu_frame_queue_.empty() || !frame_queue_.empty();
+}
+
 void TCPCapture::ReceiveThread()
 {
     try
@@ -184,6 +206,8 @@ void TCPCapture::ReceiveThread()
             else if (!decode_stream_)
             {
                 cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+                for (auto& event : decode_events_)
+                    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
             }
         }
 
@@ -286,6 +310,7 @@ void TCPCapture::ReceiveThread()
 
                 const uint8_t* jpeg = frame_data.data() + start_pos;
                 const size_t jpeg_size = end_pos - start_pos;
+                TickInputFps();
 
                 const bool gpu_ok = DecodeJpegGpu(jpeg, jpeg_size);
                 if (!gpu_ok)
@@ -314,6 +339,7 @@ void TCPCapture::ReceiveThread()
                         }
                         frame_queue_.push(std::move(frame));
                         received_frames_++;
+                        frame_cv_.notify_one();
                     }
                 }
 
@@ -333,6 +359,19 @@ void TCPCapture::ReceiveThread()
     catch (...)
     {
         std::cerr << "[TCPCapture] Receive thread crashed: unknown exception." << std::endl;
+    }
+}
+
+void TCPCapture::TickInputFps()
+{
+    ++source_frame_count_;
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> elapsed = now - source_fps_start_;
+    if (elapsed.count() >= 1.0)
+    {
+        source_fps_.store(static_cast<int>(std::lround(source_frame_count_ / elapsed.count())));
+        source_frame_count_ = 0;
+        source_fps_start_ = now;
     }
 }
 
@@ -363,25 +402,38 @@ bool TCPCapture::DecodeJpegGpu(const uint8_t* jpeg, size_t jpeg_size)
         decode_src = pinned_jpeg_buffer_;
     }
 
-    GpuImage decoded;
+    const size_t slot = decode_pool_index_;
+    GpuImage& decoded = decode_pool_[slot];
     if (!gpu_decoder_->decode(decode_src, jpeg_size, decoded, decode_stream_))
         return false;
 
     GpuImage finalFrame = decoded;
     if (!decoded.empty() && (decoded.cols() != width_ || decoded.rows() != height_))
     {
-        GpuImage resized;
+        GpuImage& resized = resize_pool_[slot];
         if (resized.create(height_, width_, 3))
         {
             launch_resize_bgr_u8_bilinear(
                 decoded.data(), decoded.step(), decoded.cols(), decoded.rows(),
                 resized.data(), resized.step(), width_, height_,
                 decode_stream_);
-            finalFrame = std::move(resized);
+            finalFrame = resized;
         }
     }
 
-    cudaStreamSynchronize(decode_stream_);
+    // Keep decode/resize asynchronous.  TensorRT waits for this event on its
+    // own stream, allowing capture decode and inference to overlap instead of
+    // forcing a CPU-side stream fence for every TCP frame.
+    if (decode_events_[slot])
+    {
+        cudaEventRecord(decode_events_[slot], decode_stream_);
+        finalFrame.setReadyEvent(decode_events_[slot]);
+    }
+    else
+    {
+        cudaStreamSynchronize(decode_stream_);
+    }
+    decode_pool_index_ = (decode_pool_index_ + 1) % DECODE_POOL_SIZE;
 
     std::lock_guard<std::mutex> lock(frame_mutex_);
     while (gpu_frame_queue_.size() >= MAX_QUEUE_SIZE)
@@ -391,6 +443,7 @@ bool TCPCapture::DecodeJpegGpu(const uint8_t* jpeg, size_t jpeg_size)
     }
     gpu_frame_queue_.push(std::move(finalFrame));
     received_frames_++;
+    frame_cv_.notify_one();
     return true;
 }
 

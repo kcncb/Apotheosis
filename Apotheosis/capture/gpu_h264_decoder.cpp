@@ -51,9 +51,11 @@ bool GpuH264Decoder::init()
 
     if (cuvid_->cuvidCtxLockCreate(&ctxLock_, cuctx_) != CUDA_SUCCESS) { cleanup(); return false; }
 
-    // Parser: H.264, single-frame display delay (sender is all-intra).
+    // Parser: HEVC, single-frame display delay (sender is all-intra).
+    // 切 HEVC 是因为 NVDEC 不支持 H.264 4:4:4 (任何代都不支持). HEVC 4:4:4
+    // 在 NVDEC 5th gen+ (Turing 起) 正常支持. CMP 40HX 是 TU106 NVDEC 5th gen.
     CUVIDPARSERPARAMS pp{};
-    pp.CodecType            = cudaVideoCodec_H264;
+    pp.CodecType            = cudaVideoCodec_HEVC;
     pp.ulMaxNumDecodeSurfaces = 4;
     pp.ulMaxDisplayDelay    = 0;             // no reorder; IDR in, frame out
     pp.pUserData            = this;
@@ -75,9 +77,12 @@ bool GpuH264Decoder::ensureDecoder(const CUVIDEOFORMAT& fmt)
     if (decoder_) { cuvid_->cuvidDestroyDecoder(decoder_); decoder_ = nullptr; }
 
     CUVIDDECODECREATEINFO ci{};
-    ci.CodecType            = cudaVideoCodec_H264;
-    ci.ChromaFormat         = cudaVideoChromaFormat_420;
-    ci.OutputFormat         = cudaVideoSurfaceFormat_NV12;
+    ci.CodecType            = cudaVideoCodec_HEVC;
+    // HEVC 4:4:4: 发射端 NVENC HEVC FREXT profile + AYUV input. NVDEC 必须
+    // ChromaFormat_444 + SurfaceFormat_YUV444 才能解 full chroma. H.264
+    // 不支持 444 解码 (NVDEC 历史限制), 所以切 HEVC.
+    ci.ChromaFormat         = cudaVideoChromaFormat_444;
+    ci.OutputFormat         = cudaVideoSurfaceFormat_YUV444;
     ci.bitDepthMinus8       = 0;
     ci.DeinterlaceMode      = cudaVideoDeinterlaceMode_Weave;
     ci.ulWidth              = fmt.coded_width;
@@ -150,21 +155,22 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
                                         &devPtr, &pitch, &pp) != CUDA_SUCCESS)
         return 0;
 
-    // NV12 plane layout: Y plane [pitch * H], then UV plane [pitch * H/2].
-    const unsigned char* y  = reinterpret_cast<const unsigned char*>(devPtr);
-    const unsigned char* uv = y + (size_t)pitch * self->ch_;
+    // YUV444 planar layout: Y plane [pitch * H], then U plane [pitch * H],
+    // then V plane [pitch * H]. NVDEC 444 surface 是 3 个独立 full-res 平面.
+    const unsigned char* y = reinterpret_cast<const unsigned char*>(devPtr);
+    const unsigned char* u = y + (size_t)pitch * self->ch_;
+    const unsigned char* v = u + (size_t)pitch * self->ch_;
 
-    GpuImage out;
-    if (!out.create(self->ch_, self->cw_, 3)) {
+    GpuImage& slot = self->output_pool_[self->output_pool_index_];
+    if (!slot.create(self->ch_, self->cw_, 3)) {
         // 失败也别忘了 unmap,否则 surface 永久泄漏。
         self->cuvid_->cuvidUnmapVideoFrame(self->decoder_, devPtr);
         return 0;
     }
 
-    launch_nv12_to_bgr_u8(
-        y,  (size_t)pitch,
-        uv, (size_t)pitch,
-        out.data(), (size_t)out.step(),
+    launch_yuv444_to_bgr_u8(
+        y, u, v, (size_t)pitch,
+        slot.data(), (size_t)slot.step(),
         self->cw_, self->ch_,
         self->activeStream_);
 
@@ -174,6 +180,9 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
 
     // sink 不再等 kernel——consumer 通过附在 GpuImage 上的 readyEvent (由
     // EthCapture 的 sink 回调记录) 自己 cudaStreamWaitEvent 同步。
+    GpuImage out = slot;
+    self->output_pool_index_ =
+        (self->output_pool_index_ + 1) % OUTPUT_POOL_SIZE;
     self->sink_(std::move(out));
     return 1;
 }

@@ -34,6 +34,19 @@ void launch_nv12_to_bgr_u8(
     int width, int height,
     cudaStream_t stream);
 
+// Convert YUV444 planar (three independent full-res Y/U/V planes) to packed
+// BGR8. NVDEC 4:4:4 path outputs surface as Y[pitch*H] | U[pitch*H] | V[pitch*H].
+// All three planes share the same stride.
+// JFIF / BT.601 full-range; matches the ProSexy NVENC 4:4:4 AYUV input shader.
+void launch_yuv444_to_bgr_u8(
+    const unsigned char* y,
+    const unsigned char* u,
+    const unsigned char* v,
+    size_t stride,
+    unsigned char* bgr, size_t bgrStep,
+    int width, int height,
+    cudaStream_t stream);
+
 // In-place 圆形掩码:把内切圆之外的像素清零(黑)。center =(width/2,height/2),
 // radius = min(width,height)/2。专门给 capture 路径用,替代旧的 OpenCV CPU
 // apply_circle_mask——CMP 40HX 上一次 416x416 的 cv::Mat::copyTo(mask) 加上

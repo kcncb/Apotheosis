@@ -542,6 +542,7 @@ void MFCapture::ReceiveThread()
               << " -> " << out_side_ << "x" << out_side_
               << (crop_enabled_ ? " (center-crop)" : " (scaled)")
               << " [" << (gpu_decode_ ? "GPU" : "CPU") << "]" << std::endl;
+    negotiated_fps_.store(static_cast<int>(std::lround(negotiatedFps)));
 
     is_open_.store(true);
     StartDecodeWorkers();   // 仅 crop_enabled 的 MJPG-GPU 模式内部生效
@@ -573,33 +574,40 @@ void MFCapture::ReceiveThread()
 
         if (data && currentLen > 0)
         {
-            const bool gpu = gpu_decode_;
-            switch (format_)
+            // Count device delivery immediately after ReadSample/Lock.  Decode,
+            // color conversion and queue pressure must not masquerade as a
+            // lower camera/source frame rate in diagnostics.
+            TickFps();
+            // Apply the requested processing cap once, before every CPU/GPU
+            // decode path.  The device is still drained at full speed and the
+            // source counter above remains truthful, but frames above the cap
+            // consume no conversion/decode work.
+            if (ShouldDispatchFrame())
             {
-            case Format::Nv12:
-                gpu ? PushNv12Gpu(data, frame_width_, frame_height_, frame_stride_)
-                    : PushNv12Cpu(data, frame_width_, frame_height_, frame_stride_);
-                break;
-            case Format::Yuy2:
-                gpu ? PushYuy2Gpu(data, frame_width_, frame_height_, frame_stride_)
-                    : PushYuy2Cpu(data, frame_width_, frame_height_, frame_stride_);
-                break;
-            case Format::Rgb32:
-                gpu ? PushRgb32Gpu(data, frame_width_, frame_height_, frame_stride_)
-                    : PushRgb32Cpu(data, frame_width_, frame_height_, frame_stride_);
-                break;
-            case Format::Mjpg:
-                if (gpu && !mjpgCpuFallback && crop_enabled_)
+                const bool gpu = gpu_decode_;
+                switch (format_)
                 {
-                    // 采集帧率上限:超额的帧在这里直接丢弃,不分发给 worker、不解码,省 CPU。
-                    if (ShouldDispatchFrame())
-                        EnqueueJpegJob(data, static_cast<size_t>(currentLen));   // 多 worker 并行解码
+                case Format::Nv12:
+                    gpu ? PushNv12Gpu(data, frame_width_, frame_height_, frame_stride_)
+                        : PushNv12Cpu(data, frame_width_, frame_height_, frame_stride_);
+                    break;
+                case Format::Yuy2:
+                    gpu ? PushYuy2Gpu(data, frame_width_, frame_height_, frame_stride_)
+                        : PushYuy2Cpu(data, frame_width_, frame_height_, frame_stride_);
+                    break;
+                case Format::Rgb32:
+                    gpu ? PushRgb32Gpu(data, frame_width_, frame_height_, frame_stride_)
+                        : PushRgb32Cpu(data, frame_width_, frame_height_, frame_stride_);
+                    break;
+                case Format::Mjpg:
+                    if (gpu && !mjpgCpuFallback && crop_enabled_)
+                        EnqueueJpegJob(data, static_cast<size_t>(currentLen));
+                    else if (gpu && !mjpgCpuFallback)
+                        PushMjpgGpu(data, static_cast<size_t>(currentLen));
+                    else
+                        PushMjpgCpu(data, static_cast<size_t>(currentLen));
+                    break;
                 }
-                else if (gpu && !mjpgCpuFallback)
-                    PushMjpgGpu(data, static_cast<size_t>(currentLen));
-                else
-                    PushMjpgCpu(data, static_cast<size_t>(currentLen));
-                break;
             }
         }
 
@@ -731,6 +739,10 @@ bool MFCapture::ShouldDispatchFrame()
     const int fps = target_fps_.load();
     if (fps <= 0)
         return true;   // 0 = 不限速,全部放行
+    const int sourceFps = negotiated_fps_.load();
+    const int tolerance = std::max(2, fps / 100);
+    if (sourceFps > 0 && sourceFps <= fps + tolerance)
+        return true;   // 240Hz 源请求 240 时绝不能再用第二个 240Hz 时钟抽帧
     const auto now = std::chrono::steady_clock::now();
     const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double, std::milli>(1000.0 / fps));
@@ -817,16 +829,6 @@ bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq)
             gpu_frame_queue_.pop();
         gpu_frame_queue_.push(std::move(frame));
 
-        // source fps 统计(原 TickFps 逻辑,移到锁内以兼容多 worker 并发递增)。
-        ++source_frame_count_;
-        const auto now = std::chrono::steady_clock::now();
-        const std::chrono::duration<double> elapsed = now - source_fps_start_;
-        if (elapsed.count() >= 1.0)
-        {
-            source_fps_.store(static_cast<int>(std::lround(source_frame_count_ / elapsed.count())));
-            source_frame_count_ = 0;
-            source_fps_start_ = now;
-        }
     }
     frame_cv_.notify_one();
     return true;
@@ -933,7 +935,6 @@ bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stri
     cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -966,7 +967,6 @@ bool MFCapture::PushYuy2Gpu(const uint8_t* data, int width, int height, int stri
     cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -996,7 +996,6 @@ bool MFCapture::PushRgb32Gpu(const uint8_t* data, int width, int height, int str
     cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -1077,7 +1076,6 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
     {
         cudaStreamSynchronize(gpu_stream_);
     }
-    TickFps();
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -1100,7 +1098,6 @@ bool MFCapture::PushNv12Cpu(const uint8_t* data, int width, int height, int stri
     cv::Mat out = FinalizeCpu(bgr);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueCpu(std::move(out));
     return true;
 }
@@ -1118,7 +1115,6 @@ bool MFCapture::PushYuy2Cpu(const uint8_t* data, int width, int height, int stri
     cv::Mat out = FinalizeCpu(bgr);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueCpu(std::move(out));
     return true;
 }
@@ -1136,7 +1132,6 @@ bool MFCapture::PushRgb32Cpu(const uint8_t* data, int width, int height, int str
     cv::Mat out = FinalizeCpu(bgr);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueCpu(std::move(out));
     return true;
 }
@@ -1153,7 +1148,6 @@ bool MFCapture::PushMjpgCpu(const uint8_t* data, size_t size)
     cv::Mat out = FinalizeCpu(bgr);
     if (out.empty())
         return false;
-    TickFps();
     EnqueueCpu(std::move(out));
     return true;
 }

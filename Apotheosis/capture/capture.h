@@ -58,14 +58,18 @@ public:
     // false 表示该后端不支持事件等待,消费侧自行回退到短 sleep。
     virtual bool WaitFrame(int /*timeoutMs*/) { return false; }
 
-    // 该后端是否支持事件驱动取帧(WaitFrame 由产帧 notify 唤醒)。为 true 时消费
-    // 循环跳过 applyFrameLimiter 的固定节拍 sleep,完全靠产帧事件驱动节奏——固定
-    // 节拍的 sleep_until 在本机每帧过冲约 1.3ms,会把源 240fps 压到 ~175。
+    // 该后端是否支持事件驱动取帧(WaitFrame 由产帧 notify 唤醒)。为 true 时,
+    // 源帧率未超过目标上限就跳过固定节拍 sleep,直接跟随产帧事件;只在源确实
+    // 高于上限时才启用 limiter。这避免源/消费两个同频时钟错相丢帧。
     virtual bool SupportsEventWait() const { return false; }
 
     // 设置采集帧率上限(降采样限速)。支持的后端在解码前按目标间隔丢多余帧——不睡眠,
     // 所以不会像固定节拍 limiter 那样过冲压低帧率;丢的帧不解码,省 CPU。0 = 不限速。
     virtual void SetTargetFps(int /*fps*/) {}
+
+    // true 表示 SetTargetFps 已在后端入队/解码前完成降采样；主循环不能再叠加
+    // 第二个定时 limiter，否则两个独立节拍会错相并把 60/240 再压低一档。
+    virtual bool HandlesTargetFps() const { return false; }
 
     // 接收诊断:每个 1 秒滚动窗口的统计。默认 0,只在能给出数据的后端(如
     // eth_capture)里 override。意义见 capture.h 顶部那几个 extern 注释。

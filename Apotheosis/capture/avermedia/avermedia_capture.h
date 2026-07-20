@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <opencv2/opencv.hpp>
@@ -55,13 +56,11 @@ private:
                                      uint64_t timestamp_100ns,
                                      void* user_ctx);
     void OnFrame(uint8_t* buffer, uint32_t length, uint64_t timestamp_100ns);
+    void TransformLoop();
 
     bool OpenDevice();
     void CloseDevice();
     void TickFps();
-
-    // 把设备给的 BGRA 帧 → BGR 方图(crop or scale) → 写入 latest_。
-    void StoreLatest(const cv::Mat& bgra_full);
 
     int src_width_;
     int src_height_;
@@ -75,9 +74,19 @@ private:
     bool  streaming_{ false };
 
     std::atomic<bool> is_open_{ false };
+    std::atomic<bool> should_stop_{ false };
     std::atomic<int> source_fps_{ 0 };
     int source_frame_count_{ 0 };
     std::chrono::steady_clock::time_point source_fps_start_;
+
+    // SDK 回调只复制设备共享内存中的最新 ROI，然后立即返回；颜色转换和缩放
+    // 放到独立线程，避免回调耗时反向阻塞 SDK 的下一次取帧。
+    std::thread transform_thread_;
+    std::mutex raw_mutex_;
+    std::condition_variable raw_cv_;
+    cv::Mat raw_bgra_latest_;
+    bool raw_is_cropped_{ false };
+    bool has_raw_frame_{ false };
 
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;

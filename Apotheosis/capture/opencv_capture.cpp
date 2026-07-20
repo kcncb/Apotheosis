@@ -54,14 +54,19 @@ OpenCVCapture::OpenCVCapture(int src_width,
     }
 
     is_open_.store(true);
+    transform_thread_ = std::thread(&OpenCVCapture::TransformLoop, this);
     grab_thread_ = std::thread(&OpenCVCapture::GrabLoop, this);
 }
 
 OpenCVCapture::~OpenCVCapture()
 {
     should_stop_.store(true);
+    raw_cv_.notify_all();
+    frame_cv_.notify_all();
     if (grab_thread_.joinable())
         grab_thread_.join();
+    if (transform_thread_.joinable())
+        transform_thread_.join();
     CloseDevice();
 }
 
@@ -159,6 +164,38 @@ void OpenCVCapture::GrabLoop()
             continue;
         }
 
+        // This counter deliberately lives immediately after read().  It is the
+        // device/backend delivery rate, not crop/resize throughput.
+        TickFps();
+
+        {
+            std::lock_guard<std::mutex> lock(raw_mutex_);
+            // Latest-frame semantics keep latency bounded.  If conversion is
+            // momentarily slower than the card, replace the stale raw frame;
+            // never block the thread that drains VideoCapture.
+            raw_latest_ = std::move(frame);
+            has_raw_frame_ = true;
+        }
+        raw_cv_.notify_one();
+    }
+}
+
+void OpenCVCapture::TransformLoop()
+{
+    while (!should_stop_.load())
+    {
+        cv::Mat frame;
+        {
+            std::unique_lock<std::mutex> lock(raw_mutex_);
+            raw_cv_.wait(lock, [this] {
+                return should_stop_.load() || has_raw_frame_;
+            });
+            if (should_stop_.load())
+                break;
+            frame = std::move(raw_latest_);
+            has_raw_frame_ = false;
+        }
+
         cv::Mat out;
         if (crop_enabled_ && frame.cols >= out_side_ && frame.rows >= out_side_)
         {
@@ -171,18 +208,20 @@ void OpenCVCapture::GrabLoop()
         }
         else
         {
-            // crop disabled, or the source is smaller than the requested crop:
-            // fall back to scaling the whole frame to the square output.
-            cv::resize(frame, out, cv::Size(out_side_, out_side_));
+            // Avoid a full image copy when the negotiated source already has
+            // exactly the detector geometry.
+            if (frame.cols == out_side_ && frame.rows == out_side_)
+                out = std::move(frame);
+            else
+                cv::resize(frame, out, cv::Size(out_side_, out_side_));
         }
-
-        TickFps();
 
         {
             std::lock_guard<std::mutex> lock(frame_mutex_);
             latest_ = std::move(out);
             has_frame_ = true;
         }
+        frame_cv_.notify_one();
     }
 }
 
@@ -192,5 +231,20 @@ cv::Mat OpenCVCapture::GetNextFrameCpu()
     if (!has_frame_ || latest_.empty())
         return cv::Mat();
     has_frame_ = false;
-    return latest_.clone();
+    // Ownership transfers to the single capture consumer.  clone() used to
+    // copy the entire image while holding frame_mutex_, briefly blocking the
+    // producer on every frame and wasting memory bandwidth at 240 Hz.
+    return std::move(latest_);
+}
+
+bool OpenCVCapture::WaitFrame(int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(frame_mutex_);
+    if (has_frame_ && !latest_.empty())
+        return true;
+
+    frame_cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
+        return should_stop_.load() || (has_frame_ && !latest_.empty());
+    });
+    return has_frame_ && !latest_.empty();
 }

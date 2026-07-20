@@ -27,11 +27,14 @@ AverMediaCapture::AverMediaCapture(int src_width,
         return;
     }
     is_open_.store(true);
+    transform_thread_ = std::thread(&AverMediaCapture::TransformLoop, this);
 }
 
 AverMediaCapture::~AverMediaCapture()
 {
     CloseDevice();
+    if (transform_thread_.joinable())
+        transform_thread_.join();
 }
 
 bool AverMediaCapture::OpenDevice()
@@ -123,6 +126,8 @@ bool AverMediaCapture::OpenDevice()
 
 void AverMediaCapture::CloseDevice()
 {
+    should_stop_.store(true);
+    raw_cv_.notify_all();
     if (!device_handle_)
         return;
     auto& sdk = avermedia::SdkLoader::Instance();
@@ -178,34 +183,65 @@ void AverMediaCapture::OnFrame(uint8_t* buffer, uint32_t length, uint64_t /*ts*/
         return;
     }
 
-    // SDK buffer 是设备共享内存,回调返回后可能被覆盖 — 必须 wrap+clone。
+    // 这里是 SDK 的实时回调。设备内存会在返回后失效，所以必须复制；但只复制
+    // 最终需要的中心 ROI，并把 cvtColor/resize 留给 worker，回调本身尽快返回。
     cv::Mat bgra(h, w, CV_8UC4, buffer);
-    cv::Mat bgr;
-    cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
-    StoreLatest(bgr);
     TickFps();
-}
 
-void AverMediaCapture::StoreLatest(const cv::Mat& bgr_full)
-{
-    cv::Mat out;
-    if (crop_enabled_ && bgr_full.cols >= out_side_ && bgr_full.rows >= out_side_)
+    cv::Mat raw;
+    bool cropped = false;
+    if (crop_enabled_ && w >= out_side_ && h >= out_side_)
     {
-        const int left = (bgr_full.cols - out_side_) / 2;
-        const int top  = (bgr_full.rows - out_side_) / 2;
-        out = bgr_full(cv::Rect(left, top, out_side_, out_side_)).clone();
+        const int left = (w - out_side_) / 2;
+        const int top = (h - out_side_) / 2;
+        raw = bgra(cv::Rect(left, top, out_side_, out_side_)).clone();
+        cropped = true;
     }
     else
     {
-        cv::resize(bgr_full, out, cv::Size(out_side_, out_side_));
+        raw = bgra.clone();
     }
 
     {
-        std::lock_guard<std::mutex> lk(frame_mutex_);
-        latest_ = std::move(out);
-        has_frame_ = true;
+        std::lock_guard<std::mutex> lk(raw_mutex_);
+        raw_bgra_latest_ = std::move(raw);
+        raw_is_cropped_ = cropped;
+        has_raw_frame_ = true;
     }
-    frame_cv_.notify_one();
+    raw_cv_.notify_one();
+}
+
+void AverMediaCapture::TransformLoop()
+{
+    while (!should_stop_.load())
+    {
+        cv::Mat bgra;
+        bool cropped = false;
+        {
+            std::unique_lock<std::mutex> lk(raw_mutex_);
+            raw_cv_.wait(lk, [this] { return should_stop_.load() || has_raw_frame_; });
+            if (should_stop_.load())
+                break;
+            bgra = std::move(raw_bgra_latest_);
+            cropped = raw_is_cropped_;
+            has_raw_frame_ = false;
+        }
+
+        cv::Mat sized;
+        if (cropped || (bgra.cols == out_side_ && bgra.rows == out_side_))
+            sized = std::move(bgra);
+        else
+            cv::resize(bgra, sized, cv::Size(out_side_, out_side_));
+
+        cv::Mat out;
+        cv::cvtColor(sized, out, cv::COLOR_BGRA2BGR);
+        {
+            std::lock_guard<std::mutex> lk(frame_mutex_);
+            latest_ = std::move(out);
+            has_frame_ = true;
+        }
+        frame_cv_.notify_one();
+    }
 }
 
 void AverMediaCapture::TickFps()
@@ -227,7 +263,7 @@ cv::Mat AverMediaCapture::GetNextFrameCpu()
     if (!has_frame_ || latest_.empty())
         return cv::Mat();
     has_frame_ = false;
-    return latest_.clone();
+    return std::move(latest_);
 }
 
 bool AverMediaCapture::WaitFrame(int timeoutMs)

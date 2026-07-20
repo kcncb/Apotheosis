@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 #include "gpu_color_ops.h"
 
@@ -105,6 +106,9 @@ bool UDPCapture::Initialize()
     is_connected_ = true;
     received_frames_ = 0;
     dropped_frames_ = 0;
+    source_frame_count_ = 0;
+    source_fps_.store(0);
+    source_fps_start_ = std::chrono::steady_clock::now();
 
     receive_thread_ = std::thread(&UDPCapture::ReceiveThread, this);
 
@@ -116,6 +120,7 @@ void UDPCapture::Cleanup()
 {
     should_stop_ = true;
     is_connected_ = false;
+    frame_cv_.notify_all();
 
     if (receive_thread_.joinable())
     {
@@ -164,6 +169,17 @@ GpuImage UDPCapture::GetNextFrameGpu()
     GpuImage frame = std::move(gpu_frame_queue_.front());
     gpu_frame_queue_.pop();
     return frame;
+}
+
+bool UDPCapture::WaitFrame(int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(frame_mutex_);
+    if (!gpu_frame_queue_.empty() || !frame_queue_.empty())
+        return true;
+    frame_cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
+        return should_stop_.load() || !gpu_frame_queue_.empty() || !frame_queue_.empty();
+    });
+    return !gpu_frame_queue_.empty() || !frame_queue_.empty();
 }
 
 void UDPCapture::ReceiveThread()
@@ -243,6 +259,7 @@ void UDPCapture::ReceiveThread()
 
             const uint8_t* jpeg = frame_data.data() + start_pos;
             const size_t jpeg_size = end_pos - start_pos;
+            TickInputFps();
 
             bool gpu_ok = false;
             if (gpu_decoder_ && decode_stream_)
@@ -326,6 +343,7 @@ void UDPCapture::ReceiveThread()
                     gpu_frame_queue_.push(std::move(finalFrame));
                     received_frames_++;
                     gpu_ok = true;
+                    frame_cv_.notify_one();
                 }
             }
 
@@ -356,6 +374,7 @@ void UDPCapture::ReceiveThread()
                     }
                     frame_queue_.push(std::move(frame));
                     received_frames_++;
+                    frame_cv_.notify_one();
                 }
             }
 
@@ -369,6 +388,19 @@ void UDPCapture::ReceiveThread()
     catch (...)
     {
         std::cerr << "[UDPCapture] Receive thread crashed: unknown exception." << std::endl;
+    }
+}
+
+void UDPCapture::TickInputFps()
+{
+    ++source_frame_count_;
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> elapsed = now - source_fps_start_;
+    if (elapsed.count() >= 1.0)
+    {
+        source_fps_.store(static_cast<int>(std::lround(source_frame_count_ / elapsed.count())));
+        source_frame_count_ = 0;
+        source_fps_start_ = now;
     }
 }
 

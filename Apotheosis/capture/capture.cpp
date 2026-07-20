@@ -596,6 +596,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         };
 
         std::unique_ptr<IScreenCapture> capturer = createCapturer(currentCfg, captureWidth, captureHeight);
+        if (capturer)
+            capturer->SetTargetFps(currentCfg.capture_fps);
         auto lastCapturerCreateAttempt = std::chrono::steady_clock::now();
 
         auto clearCaptureFrames = [&]()
@@ -640,8 +642,10 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         TimerResolutionGuard timerResolution;
         PreciseSleeper preciseSleeper;
         std::optional<std::chrono::steady_clock::duration> frameDuration;
+        bool eventSourceAboveLimit = false;
         auto updateFrameDuration = [&](int captureFpsSetting)
         {
+            eventSourceAboveLimit = false;
             if (captureFpsSetting > 0)
             {
                 timerResolution.Enable();
@@ -769,6 +773,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
             if (needsReinit)
             {
+                eventSourceAboveLimit = false;
                 setCaptureUnavailable();
 
                 if (currentCfg.detection_resolution > 0)
@@ -779,6 +784,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
                 capturer.reset();
                 capturer = createCapturer(currentCfg, captureWidth, captureHeight);
+                if (capturer)
+                    capturer->SetTargetFps(currentCfg.capture_fps);
                 lastCapturerCreateAttempt = std::chrono::steady_clock::now();
                 if (currentCfg.verbose)
                     std::cout << "[Capture] Reinitialized capture backend." << std::endl;
@@ -790,6 +797,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 if (now - lastCapturerCreateAttempt >= std::chrono::seconds(1))
                 {
                     capturer = createCapturer(currentCfg, captureWidth, captureHeight);
+                    if (capturer)
+                        capturer->SetTargetFps(currentCfg.capture_fps);
                     lastCapturerCreateAttempt = now;
 
                     if (capturer)
@@ -1064,14 +1073,33 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 }
             }
 
-                // limiter 现在用高精度可等待计时器,每帧误差 ~50us 量级,即便对
-                // 事件驱动后端(eth_capture / mf_capture / avermedia)做帧率上限
-                // 也不会像旧版那样把源 240fps 压到 175。所有后端统一走 limiter:
-                //   - capture_fps = 0  -> frameDuration 为空, applyFrameLimiter
-                //     直接走 else 分支,只刷新锚点,不睡眠;
-                //   - capture_fps > 0  -> 严格执行帧周期,产帧更快时按目标节流,
-                //     产帧更慢时不睡,自然贴产帧节奏。
-                applyFrameLimiter();
+                // 事件驱动后端已经由产帧通知精确控制消费节奏。源和
+                // 目标同为 240fps 时若再 sleep,两套独立时钟会相位漂移,在
+                // “最新帧”小队列下踏空/覆盖,把 240fps 压成约 200fps。
+                //
+                // 但 capture_fps 仍是上限:当观测到源帧率明显高于目标时锁定
+                // limiter。加 1%/最少 2fps 容差是为了容纳 239.76/240Hz 的统计
+                // 抖动;一旦确认源超限就保持限速,避免 UDP/TCP 回退统计在
+                // 限速后变低导致 limiter 每秒开关振荡。
+                bool shouldLimit = !capturer->SupportsEventWait();
+                if (!shouldLimit
+                    && !capturer->HandlesTargetFps()
+                    && frameDuration.has_value()
+                    && currentCfg.capture_fps > 0)
+                {
+                    int sourceEstimate = capturer->GetSourceFpsEstimate();
+                    if (sourceEstimate <= 0)
+                        sourceEstimate = captureSourceFps.load();
+                    const int tolerance = std::max(2, currentCfg.capture_fps / 100);
+                    if (sourceEstimate > currentCfg.capture_fps + tolerance)
+                        eventSourceAboveLimit = true;
+                    shouldLimit = eventSourceAboveLimit;
+                }
+
+                if (shouldLimit)
+                    applyFrameLimiter();
+                else
+                    frameStartTime = std::chrono::steady_clock::now();
             }
             catch (const std::exception& e)
             {
