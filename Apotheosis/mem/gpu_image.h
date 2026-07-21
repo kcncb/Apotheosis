@@ -86,6 +86,9 @@ public:
     void setReadyEvent(cudaEvent_t e) noexcept { ready_event_ = e; }
     cudaEvent_t readyEvent() const noexcept { return ready_event_; }
 
+    static uint64_t allocationCount() noexcept;
+    static uint64_t allocationBytes() noexcept;
+
 private:
     struct Storage
     {

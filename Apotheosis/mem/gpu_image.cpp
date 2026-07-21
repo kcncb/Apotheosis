@@ -3,7 +3,14 @@
 #include <opencv2/core.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+
+namespace
+{
+std::atomic<uint64_t> g_gpu_image_allocations{ 0 };
+std::atomic<uint64_t> g_gpu_image_allocation_bytes{ 0 };
+}
 
 GpuImage::Storage::~Storage()
 {
@@ -32,6 +39,8 @@ bool GpuImage::create(int rows, int cols, int channels)
     auto storage = std::make_shared<Storage>();
     if (cudaMalloc(reinterpret_cast<void**>(&storage->base), total) != cudaSuccess)
         return false;
+    g_gpu_image_allocations.fetch_add(1, std::memory_order_relaxed);
+    g_gpu_image_allocation_bytes.fetch_add(total, std::memory_order_relaxed);
     storage->capacity = total;
 
     storage_ = std::move(storage);
@@ -41,6 +50,16 @@ bool GpuImage::create(int rows, int cols, int channels)
     channels_ = channels;
     step_ = step;
     return true;
+}
+
+uint64_t GpuImage::allocationCount() noexcept
+{
+    return g_gpu_image_allocations.load(std::memory_order_relaxed);
+}
+
+uint64_t GpuImage::allocationBytes() noexcept
+{
+    return g_gpu_image_allocation_bytes.load(std::memory_order_relaxed);
 }
 
 void GpuImage::release() noexcept

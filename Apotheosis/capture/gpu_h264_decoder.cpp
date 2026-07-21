@@ -11,13 +11,13 @@ GpuH264Decoder::~GpuH264Decoder() { cleanup(); }
 
 void GpuH264Decoder::cleanup()
 {
-    // 关停前先把"延迟 unmap"清掉,否则 destroy decoder 会留一个未配对的 map ref。
-    if (cuvid_ && decoder_ && has_pending_unmap_)
+    // Every mapped NVDEC surface must be paired with an unmap before decoder
+    // destruction. Shutdown is allowed to wait; the steady-state path is not.
+    reapPendingSurfaces(true);
+    for (auto& event : output_events_)
     {
-        if (activeStream_) cudaStreamSynchronize(activeStream_);
-        cuvid_->cuvidUnmapVideoFrame(decoder_, pending_unmap_devptr_);
-        has_pending_unmap_ = false;
-        pending_unmap_devptr_ = 0;
+        if (event) cudaEventDestroy(event);
+        event = nullptr;
     }
 
     if (cuvid_ && parser_) { cuvid_->cuvidDestroyVideoParser(parser_); parser_ = nullptr; }
@@ -27,6 +27,32 @@ void GpuH264Decoder::cleanup()
     if (cuda_)             { cuda_free_functions(&cuda_);              cuda_ = nullptr; }
     cuctx_ = nullptr;
     initialized_ = false;
+}
+
+void GpuH264Decoder::reapPendingSurfaces(bool waitAll)
+{
+    if (!cuvid_ || !decoder_)
+        return;
+    while (pending_count_ > 0)
+    {
+        PendingSurface& pending = pending_surfaces_[pending_head_];
+        if (!pending.active)
+        {
+            pending_head_ = (pending_head_ + 1) % PENDING_SURFACES;
+            --pending_count_;
+            continue;
+        }
+
+        const cudaError_t state = pending.done ? cudaEventQuery(pending.done) : cudaSuccess;
+        if (state == cudaErrorNotReady && !waitAll)
+            break;
+        if (state == cudaErrorNotReady && pending.done)
+            cudaEventSynchronize(pending.done);
+        cuvid_->cuvidUnmapVideoFrame(decoder_, pending.devptr);
+        pending = PendingSurface{};
+        pending_head_ = (pending_head_ + 1) % PENDING_SURFACES;
+        --pending_count_;
+    }
 }
 
 bool GpuH264Decoder::init()
@@ -50,6 +76,8 @@ bool GpuH264Decoder::init()
     cuda_->cuCtxPushCurrent(cuctx_);
 
     if (cuvid_->cuvidCtxLockCreate(&ctxLock_, cuctx_) != CUDA_SUCCESS) { cleanup(); return false; }
+    for (auto& event : output_events_)
+        cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
 
     // Parser: HEVC, single-frame display delay (sender is all-intra).
     // 切 HEVC 是因为 NVDEC 不支持 H.264 4:4:4 (任何代都不支持). HEVC 4:4:4
@@ -74,7 +102,12 @@ bool GpuH264Decoder::ensureDecoder(const CUVIDEOFORMAT& fmt)
     if (decoder_ && (int)fmt.coded_width == cw_ && (int)fmt.coded_height == ch_)
         return true;
 
-    if (decoder_) { cuvid_->cuvidDestroyDecoder(decoder_); decoder_ = nullptr; }
+    if (decoder_)
+    {
+        reapPendingSurfaces(true);
+        cuvid_->cuvidDestroyDecoder(decoder_);
+        decoder_ = nullptr;
+    }
 
     CUVIDDECODECREATEINFO ci{};
     ci.CodecType            = cudaVideoCodec_HEVC;
@@ -87,10 +120,8 @@ bool GpuH264Decoder::ensureDecoder(const CUVIDEOFORMAT& fmt)
     ci.DeinterlaceMode      = cudaVideoDeinterlaceMode_Weave;
     ci.ulWidth              = fmt.coded_width;
     ci.ulHeight             = fmt.coded_height;
-    // pool 扩大: 延迟 unmap 流水线下,任意瞬间最多有 2 个 surface 处于 mapped
-    // 状态(本帧 + 上一帧待 unmap)。原 ulNumOutputSurfaces=2 在小输入尺寸下也
-    // 工作,但接收线程不再阻塞 sync 之后,NVDEC 可以与 BGR kernel + sink 完全
-    // 并行入队多帧,适当放宽 surface 池避免突发负载触发 wait-for-surface 路径。
+    // Four mapped output surfaces match the asynchronous pending-surface ring;
+    // eight decode surfaces leave NVDEC room for parser/decode overlap.
     ci.ulNumDecodeSurfaces  = 8;
     ci.ulNumOutputSurfaces  = 4;
     ci.ulTargetWidth        = fmt.coded_width;
@@ -105,6 +136,11 @@ bool GpuH264Decoder::ensureDecoder(const CUVIDEOFORMAT& fmt)
     }
     cw_ = fmt.coded_width;
     ch_ = fmt.coded_height;
+    // Pay cudaMalloc cost once during sequence setup, not across the first
+    // eight live frames where allocator synchronization shows up as jitter.
+    for (auto& slot : output_pool_)
+        if (!slot.create(ch_, cw_, 3))
+            return false;
     return true;
 }
 
@@ -126,21 +162,14 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
     auto* self = static_cast<GpuH264Decoder*>(user);
     if (!self->decoder_ || !self->sink_) return 1;
 
-    // --- 第一步:把"上一帧待 unmap 的 surface"清掉 ---
-    // 旧实现在本帧 dispCb 里同步等本帧 kernel 再 unmap 本帧 surface,这一段
-    // cudaStreamSynchronize 是 receive thread 的关键路径阻塞(PCIe Gen1 上每帧
-    // 0.5-1.5ms,把 240fps 压到 180-190)。这里改成"延迟一帧 unmap":
-    //   - frame N 入口先 sync stream(等 N-1 的 kernel 完成),unmap N-1 的 surface;
-    //   - 然后 map N、launch N 的 kernel、record event 给 consumer、立刻 sink;
-    //   - 保存 N 的 devPtr 作为"下一次 dispCb 入口"要 unmap 的目标。
-    // 这样 N-1 的 kernel 在 N 的 wire/parse 期间已经跑过一段时间,sync 等的多半
-    // 是个"已经完成"的状态——把 GPU sync 从关键路径上移走了。
-    if (self->has_pending_unmap_)
+    // Reap every consecutively completed surface without blocking. If all four
+    // are still busy, wait only for the oldest one to create backpressure.
+    self->reapPendingSurfaces(false);
+    if (self->pending_count_ >= PENDING_SURFACES)
     {
-        cudaStreamSynchronize(self->activeStream_);
-        self->cuvid_->cuvidUnmapVideoFrame(self->decoder_, self->pending_unmap_devptr_);
-        self->has_pending_unmap_ = false;
-        self->pending_unmap_devptr_ = 0;
+        PendingSurface& oldest = self->pending_surfaces_[self->pending_head_];
+        if (oldest.done) cudaEventSynchronize(oldest.done);
+        self->reapPendingSurfaces(false);
     }
 
     CUVIDPROCPARAMS pp{};
@@ -161,7 +190,8 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
     const unsigned char* u = y + (size_t)pitch * self->ch_;
     const unsigned char* v = u + (size_t)pitch * self->ch_;
 
-    GpuImage& slot = self->output_pool_[self->output_pool_index_];
+    const size_t slotIndex = self->output_pool_index_;
+    GpuImage& slot = self->output_pool_[slotIndex];
     if (!slot.create(self->ch_, self->cw_, 3)) {
         // 失败也别忘了 unmap,否则 surface 永久泄漏。
         self->cuvid_->cuvidUnmapVideoFrame(self->decoder_, devPtr);
@@ -174,13 +204,23 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
         self->cw_, self->ch_,
         self->activeStream_);
 
-    // 标记本帧 surface 在下一次 dispCb 入口处 unmap。当前帧不 sync,kernel 异步。
-    self->pending_unmap_devptr_ = devPtr;
-    self->has_pending_unmap_ = true;
-
-    // sink 不再等 kernel——consumer 通过附在 GpuImage 上的 readyEvent (由
-    // EthCapture 的 sink 回调记录) 自己 cudaStreamWaitEvent 同步。
+    // sink 不再等 kernel——每个输出槽都有独立 readyEvent，consumer 从自己的
+    // stream 等待它，避免单一事件被后续帧重复 record。
     GpuImage out = slot;
+    cudaEvent_t ready = self->output_events_[slotIndex];
+    if (ready)
+    {
+        cudaEventRecord(ready, self->activeStream_);
+        out.setReadyEvent(ready);
+    }
+    else
+    {
+        cudaStreamSynchronize(self->activeStream_);
+    }
+    const size_t pendingTail =
+        (self->pending_head_ + self->pending_count_) % PENDING_SURFACES;
+    self->pending_surfaces_[pendingTail] = PendingSurface{ devPtr, ready, true };
+    ++self->pending_count_;
     self->output_pool_index_ =
         (self->output_pool_index_ + 1) % OUTPUT_POOL_SIZE;
     self->sink_(std::move(out));

@@ -20,11 +20,10 @@
 #include <vector>
 
 // Receiver for the ProSexy sender (../../ProSexy): raw Ethernet (layer-2)
-// frames carrying a fragmented MJPEG stream, captured via npcap. This is the
+// frames carrying fragmented all-intra HEVC access units, captured via Npcap.
 // counterpart of ProSexy/src/PcapSender.cpp + Protocol.h. We bypass the IP/UDP
-// stack entirely, reassemble the per-frame fragments, then decode the JPEG on
-// the GPU (nvJPEG) — reusing the exact same decode/ring-pool machinery as
-// UDPCapture so the hot path keeps the same zero-malloc, event-pipelined cost.
+// stack entirely, reassemble the fragments, then decode with NVDEC. Receive and
+// decode are separate so GPU work cannot stall packet draining.
 //
 // Forward-declared pcap_t so npcap headers stay out of this header (they pull
 // in winsock and conflict easily); the .cpp owns <pcap.h>.
@@ -70,7 +69,7 @@ public:
     //     发包速率;比它低意味着 sender 端就少了。
     // wire_lost_fps_  : sender 发了但 receive thread 一个 fragment 都没收到的帧
     //     数(senderSpan - started)。基本上就是 wire / pcap kernel drop。
-    // partial_lost_fps_: 收到 fragment 但凑不齐整帧的数量(started - decoded)。
+    // partial_lost_fps_: 收到 fragment 后被下一帧覆盖、未完成重组的帧数。
     //     reassembly 失败,通常是某个 fragment 在 pcap 队列尾被丢。
     // pcap_kernel_dropped_fps_: pcap_stats() 报告的内核 drop(ps_drop)增量。
     //     基本就是 pcap 内核 ring 满了来不及消费时的丢弃数。
@@ -83,8 +82,10 @@ public:
 
 private:
     void ReceiveThread();
-    // Push one fully-reassembled H.264 IDR NALU through NVDEC and enqueue the
-    // resulting GpuImage (BGR8). ProSexy sender ships all-intra so every NALU
+    void DecodeThread();
+    void EnqueueDecode(const uint8_t* nalu, size_t nalu_size);
+    // Push one fully-reassembled HEVC IDR access unit through NVDEC and enqueue
+    // the resulting GpuImage (BGR8). ProSexy sender ships all-intra so every unit
     // is self-contained — no reorder buffer needed.
     void DecodeAndEnqueue(const uint8_t* nalu, size_t nalu_size);
 
@@ -101,15 +102,27 @@ private:
     std::atomic<int> dropped_frames_;
 
     std::thread receive_thread_;
+    std::thread decode_thread_;
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;  // signaled when a frame is enqueued
 
     std::queue<cv::Mat> frame_queue_;
     std::queue<GpuImage> gpu_frame_queue_;
 
+    struct DecodeJob
+    {
+        std::vector<uint8_t> nalu;
+        std::chrono::steady_clock::time_point assembled_at{};
+    };
+    static constexpr int MAX_DECODE_QUEUE = 3;
+    std::mutex decode_mutex_;
+    std::condition_variable decode_cv_;
+    std::queue<DecodeJob> decode_queue_;
+    std::vector<std::vector<uint8_t>> decode_free_buffers_;
+
     // --- fragment reassembly (single in-flight frame; ProSexy ships a whole
     //     frame's fragments back-to-back, so one slot is enough) ---
-    std::vector<uint8_t> asm_buf_;       // accumulates the current JPEG
+    std::vector<uint8_t> asm_buf_;       // accumulates the current HEVC access unit
     std::vector<uint8_t> frag_received_; // per-fragment dedupe flags
     uint32_t cur_frame_id_{ 0 };
     uint32_t expected_size_{ 0 };
@@ -117,14 +130,11 @@ private:
     uint16_t frags_got_{ 0 };
     bool have_frame_{ false };
 
-    // --- GPU decode (NVDEC H.264). ProSexy sends all-intra so the parser
-    //     decode latency is single-frame; no gate ring or inflight buffer
-    //     needed (NVDEC silicon decodes faster than the wire delivers). The
-    //     decoder sink writes the BGR8 GpuImage straight into the queue
-    //     under frame_mutex_. ---
+    // --- GPU decode. Npcap receive/reassembly and NVDEC run on separate
+    //     threads, so a decode/surface wait can never stop the NIC ring from
+    //     being drained. The bounded queue drops old frames to cap latency. ---
     std::unique_ptr<capture::GpuH264Decoder> gpu_decoder_;
     cudaStream_t decode_stream_{ nullptr };
-    cudaEvent_t  decode_event_{ nullptr };  // signals decoded BGR ready
 
     std::atomic<int> last_dec_w_{ 0 };
     std::atomic<int> last_dec_h_{ 0 };
@@ -134,6 +144,10 @@ private:
     std::atomic<int> partial_lost_fps_{ 0 };
     std::atomic<int> pcap_kernel_dropped_fps_{ 0 };
     std::atomic<int> pcap_ifdropped_fps_{ 0 };
+    std::atomic<int> decode_queue_dropped_fps_{ 0 };
+    std::atomic<int> decode_queue_p95_us_{ 0 };
+    std::atomic<int> decode_submit_p95_us_{ 0 };
+    std::atomic<uint64_t> decode_queue_dropped_total_{ 0 };
 
     static const int MAX_FRAME_SIZE = 4 * 1024 * 1024;
     // Small ready-queue. The GPU-readiness gate already bounds decodes in flight

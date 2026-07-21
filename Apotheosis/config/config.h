@@ -273,7 +273,7 @@ public:
     // (\Device\NPF_{GUID}); eth_ethertype 须与发送端一致(ProSexy 默认 0x88B5)。
     std::string eth_adapter;
     int eth_ethertype = 0x88B5;
-    // 采集卡几何参数,由 opencv_capture 与 mf_capture 两套后端共用。
+    // 采集卡几何参数,由 OpenCV / MF / 圆刚 SDK 后端共用。
     int opencv_capture_index = 0;
     std::string opencv_capture_api = "DSHOW"; // DSHOW | MSMF | FFMPEG | ANY (仅 opencv)
     std::string opencv_capture_url;           // 可选连接 URL (rtsp:// / 文件路径); 空 = 用设备索引 (仅 opencv)
@@ -282,7 +282,7 @@ public:
     int opencv_capture_fps = 0;               // 采集 FPS, 0 = 设备默认
     int capture_crop = 0;                     // 中心裁切正方形边长; >0 时驱动 detection_resolution, 0 = 整帧缩放到 detection_resolution
     std::string capture_format = "MJPG";      // NV12 | MJPG | YUY2 | RGB32
-    bool capture_mf_gpu = true;               // 仅 mf_capture: true=GPU 解码(nvJPEG/NPP), false=CPU 解码
+    bool capture_mf_gpu = true;               // MF/圆刚: true=GPU 转换, false=CPU 转换
     int detection_resolution = 320;
     int capture_fps = 60;
     bool circle_mask = true;

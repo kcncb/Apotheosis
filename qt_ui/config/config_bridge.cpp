@@ -54,6 +54,15 @@ void ConfigBridge::syncToRuntime() {
 
     // --- Capture ---
     std::string oldMethod = config.capture_method;
+    const int oldDeviceIndex = config.opencv_capture_index;
+    const std::string oldCaptureApi = config.opencv_capture_api;
+    const std::string oldCaptureUrl = config.opencv_capture_url;
+    const int oldCaptureWidth = config.opencv_capture_width;
+    const int oldCaptureHeight = config.opencv_capture_height;
+    const int oldDeviceFps = config.opencv_capture_fps;
+    const bool oldMfGpu = config.capture_mf_gpu;
+    const int oldCaptureCrop = config.capture_crop;
+    const std::string oldCaptureFormat = config.capture_format;
     config.capture_method = qs(cm.captureMethod());
     config.udp_ip         = qs(cm.udpIp());
     config.udp_port       = cm.udpPort();
@@ -219,7 +228,17 @@ void ConfigBridge::syncToRuntime() {
     // double-encoding CJK group names.  Do NOT overwrite here.
 
     // --- Set change flags ---
-    if (config.capture_method != oldMethod)
+    const bool captureDeviceChanged =
+        config.opencv_capture_index != oldDeviceIndex
+        || config.opencv_capture_api != oldCaptureApi
+        || config.opencv_capture_url != oldCaptureUrl
+        || config.opencv_capture_width != oldCaptureWidth
+        || config.opencv_capture_height != oldCaptureHeight
+        || config.opencv_capture_fps != oldDeviceFps
+        || config.capture_mf_gpu != oldMfGpu
+        || config.capture_crop != oldCaptureCrop
+        || config.capture_format != oldCaptureFormat;
+    if (config.capture_method != oldMethod || captureDeviceChanged)
         capture_method_changed = true;
     if (config.detection_resolution != oldDetRes)
         detection_resolution_changed = true;

@@ -6,6 +6,7 @@
 #include <thread>
 #include <mutex>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <timeapi.h>
 #include <condition_variable>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -158,7 +160,8 @@ std::string NormalizeCaptureMethod(const std::string& method)
         || method == "tcp_capture"
         || method == "eth_capture"
         || method == "opencv_capture"
-        || method == "mf_capture")
+        || method == "mf_capture"
+        || method == "avermedia_capture")
         return method;
     return "udp_capture";
 }
@@ -498,7 +501,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     return std::make_unique<EthCapture>(width, height, cfg.eth_adapter, cfg.eth_ethertype);
                 }
 
-                if (method == "opencv_capture" || method == "mf_capture")
+                if (method == "opencv_capture" || method == "mf_capture"
+                    || method == "avermedia_capture")
                 {
                     // The square crop, when enabled, IS the inference frame and
                     // therefore drives detection_resolution so the detector input
@@ -517,35 +521,22 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                         }
                     }
 
-                    // 圆刚 (AVerMedia) 采集卡探测: 用户在 UI 上选 opencv/mf,但若
-                    // 设备名命中圆刚关键字且 AVerCapAPI*.dll 已加载,就改走 SDK 原生
-                    // 路径。SDK 缺失 / 设备不是圆刚 / probe 失败 -> 走下方原 OpenCV/MF
-                    // 分支,无副作用。
+                    // SDK 后端必须显式选择。不能因为检测到圆刚设备就悄悄覆盖用户
+                    // 选择的 MF GPU 路径，否则 UI 显示 GPU、实际却走 CPU clone。
+                    if (method == "avermedia_capture")
                     {
                         auto& aver = avermedia::SdkLoader::Instance();
-                        if (aver.IsUsable() && aver.Api().GetDeviceFriendlyName)
-                        {
-                            char name[256] = { 0 };
-                            const uint32_t rc = aver.Api().GetDeviceFriendlyName(
-                                static_cast<uint32_t>(cfg.opencv_capture_index),
-                                name, sizeof(name));
-                            const std::string nameStr(name);
-                            if (rc == avermedia::AVER_ERR_SUCCESS
-                                && avermedia::IsAverMediaFriendlyName(nameStr))
-                            {
-                                if (cfg.verbose)
-                                    std::cout << "[Capture] AVerMedia device detected ("
-                                              << nameStr << "), using SDK path." << std::endl;
-                                return std::make_unique<AverMediaCapture>(
-                                    cfg.opencv_capture_width,
-                                    cfg.opencv_capture_height,
-                                    out_side,
-                                    crop_enabled,
-                                    cfg.opencv_capture_fps,
-                                    static_cast<uint32_t>(cfg.opencv_capture_index),
-                                    /*prefer_hdmi_source=*/true);
-                            }
-                        }
+                        if (!aver.IsUsable())
+                            throw std::runtime_error("AVerMedia SDK unavailable");
+                        return std::make_unique<AverMediaCapture>(
+                            cfg.opencv_capture_width,
+                            cfg.opencv_capture_height,
+                            out_side,
+                            crop_enabled,
+                            cfg.opencv_capture_fps,
+                            static_cast<uint32_t>(cfg.opencv_capture_index),
+                            /*prefer_hdmi_source=*/true,
+                            cfg.capture_mf_gpu);
                     }
 
                     if (method == "mf_capture")
@@ -734,16 +725,25 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         struct CaptureCudaGuard
         {
             cudaStream_t stream{ nullptr };
-            cudaEvent_t  maskEvent{ nullptr };
+            std::array<cudaEvent_t, 8> maskEvents{};
+            size_t maskEventIndex{ 0 };
             CaptureCudaGuard()
             {
                 cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-                cudaEventCreateWithFlags(&maskEvent, cudaEventDisableTiming);
+                for (auto& event : maskEvents)
+                    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
             }
             ~CaptureCudaGuard()
             {
-                if (maskEvent) cudaEventDestroy(maskEvent);
+                for (auto& event : maskEvents)
+                    if (event) cudaEventDestroy(event);
                 if (stream)    cudaStreamDestroy(stream);
+            }
+            cudaEvent_t nextMaskEvent()
+            {
+                cudaEvent_t event = maskEvents[maskEventIndex];
+                maskEventIndex = (maskEventIndex + 1) % maskEvents.size();
+                return event;
             }
         };
         CaptureCudaGuard captureCuda;
@@ -873,8 +873,17 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     screenshotGpu.data(), screenshotGpu.step(),
                     screenshotGpu.cols(), screenshotGpu.rows(),
                     captureCuda.stream);
-                cudaEventRecord(captureCuda.maskEvent, captureCuda.stream);
-                screenshotGpu.setReadyEvent(captureCuda.maskEvent);
+                cudaEvent_t maskEvent = captureCuda.nextMaskEvent();
+                if (maskEvent)
+                {
+                    cudaEventRecord(maskEvent, captureCuda.stream);
+                    screenshotGpu.setReadyEvent(maskEvent);
+                }
+                else
+                {
+                    cudaStreamSynchronize(captureCuda.stream);
+                    screenshotGpu.setReadyEvent(nullptr);
+                }
                 gpuMaskApplied = true;
             }
 

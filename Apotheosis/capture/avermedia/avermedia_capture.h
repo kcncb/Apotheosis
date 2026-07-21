@@ -3,16 +3,19 @@
 
 // 圆刚 (AVerMedia) 采集卡的 IScreenCapture 实现 — 走 AVerCapAPI SDK 原生路径。
 //
-// 用户 UI 上选 OpenCV 或 MF 模式时,capture.cpp 的工厂分发先 probe 设备名字,
-// 命中圆刚关键字且 SDK 可用就改实例化本类,否则回退到原 OpenCVCapture / MFCapture。
+// 仅在 UI 显式选择“圆刚 SDK 采集卡”时启用，不会覆盖用户选择的 MF GPU 路径。
 //
-// 输出与 OpenCVCapture 兼容: 同样的 out_side × out_side BGR 方图,启用 crop 时
-// 中心裁出,否则缩放整帧。GPU 路径暂不实现 — 圆刚 USB 卡的瓶颈是 USB 总线/解码,
-// SDK 走 BGRA 同步回调已能稳定吃满源帧率,后续如需 zero-copy 可再加一条。
+// 输出同样是 out_side × out_side BGR 方图；GPU 模式用 NPP/CUDA 转换后直接交给
+// TensorRT，CPU 模式保留 OpenCV 兼容路径。
 
 #include "../capture.h"
+#include "../../mem/gpu_image.h"
+
+#include <cuda_runtime.h>
+#include <npp.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -35,7 +38,8 @@ public:
                      bool crop_enabled,
                      int capture_fps,
                      uint32_t device_index,
-                     bool prefer_hdmi_source);
+                     bool prefer_hdmi_source,
+                     bool gpu_decode);
 
     ~AverMediaCapture() override;
 
@@ -43,6 +47,7 @@ public:
     AverMediaCapture& operator=(const AverMediaCapture&) = delete;
 
     cv::Mat GetNextFrameCpu() override;
+    GpuImage GetNextFrameGpu() override;
     int  GetSourceFpsEstimate() const override { return source_fps_.load(); }
     bool WaitFrame(int timeoutMs) override;
     bool SupportsEventWait() const override { return true; }
@@ -61,22 +66,27 @@ private:
     bool OpenDevice();
     void CloseDevice();
     void TickFps();
+    bool EnsureGpuContext();
+    bool TransformGpu(const cv::Mat& raw, bool cropped);
 
-    int src_width_;
-    int src_height_;
+    std::atomic<int> src_width_;
+    std::atomic<int> src_height_;
     int out_side_;
     bool crop_enabled_;
     int capture_fps_;
     uint32_t device_index_;
     bool prefer_hdmi_source_;
+    bool gpu_decode_;
 
     void* device_handle_{ nullptr };   // AVerMedia DeviceHandle
     bool  streaming_{ false };
+    bool  nv12_format_{ false };
 
     std::atomic<bool> is_open_{ false };
     std::atomic<bool> should_stop_{ false };
     std::atomic<int> source_fps_{ 0 };
     int source_frame_count_{ 0 };
+    double source_fps_smoothed_{ 0.0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 
     // SDK 回调只复制设备共享内存中的最新 ROI，然后立即返回；颜色转换和缩放
@@ -84,14 +94,34 @@ private:
     std::thread transform_thread_;
     std::mutex raw_mutex_;
     std::condition_variable raw_cv_;
-    cv::Mat raw_bgra_latest_;
-    bool raw_is_cropped_{ false };
-    bool has_raw_frame_{ false };
+    struct RawSlot
+    {
+        cv::Mat image;
+        bool cropped{ false };
+        bool busy{ false };
+        bool gpu_pending{ false };
+        cudaEvent_t gpu_done{ nullptr };
+    };
+    static constexpr int RAW_POOL_SIZE = 3;
+    std::array<RawSlot, RAW_POOL_SIZE> raw_pool_;
+    int queued_raw_slot_{ -1 };
 
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;
     cv::Mat latest_;
+    GpuImage latest_gpu_;
     bool has_frame_{ false };
+    bool has_gpu_frame_{ false };
+
+    cudaStream_t gpu_stream_{ nullptr };
+    NppStreamContext npp_ctx_{};
+    GpuImage scratch_a_;
+    GpuImage scratch_b_;
+    GpuImage scratch_full_;
+    static constexpr int GPU_POOL_SIZE = 8;
+    std::array<GpuImage, GPU_POOL_SIZE> gpu_pool_;
+    std::array<cudaEvent_t, GPU_POOL_SIZE> gpu_events_{};
+    size_t gpu_pool_index_{ 0 };
 };
 
 #endif // APOTHEOSIS_AVERMEDIA_CAPTURE_H

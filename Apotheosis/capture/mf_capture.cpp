@@ -415,7 +415,6 @@ void MFCapture::ReceiveThread()
     ComPtr<IMFSourceReader> reader;
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
-    bool mjpgCpuFallback = false;
     double negotiatedFps = 0.0;  // declared before any goto so cleanup stays in scope
 
     ComPtr<IMFAttributes> deviceAttrs = CreateVideoDeviceAttributes();
@@ -523,6 +522,24 @@ void MFCapture::ReceiveThread()
     {
         if (!EnsureGpuContext())
             goto cleanup;
+        // Allocate steady-state raw-path storage before streaming. cudaMalloc
+        // may synchronize the device, so letting it occur while 240Hz samples
+        // are arriving creates visible frame-time spikes.
+        for (auto& slot : out_pool_)
+            if (!slot.create(out_side_, out_side_, 3))
+                goto cleanup;
+        if (format_ != Format::Mjpg)
+        {
+            int left = 0, top = 0, roiW = 0, roiH = 0;
+            ResolveRoi(frame_width_, frame_height_, left, top, roiW, roiH);
+            const int sourceChannels = format_ == Format::Rgb32 ? 4
+                                     : format_ == Format::Yuy2 ? 2 : 1;
+            if (!scratch_a_.create(roiH, roiW, sourceChannels)
+                || (format_ == Format::Nv12
+                    && !scratch_b_.create(roiH / 2, roiW, 1))
+                || !scratch_full_.create(roiH, roiW, 3))
+                goto cleanup;
+        }
         if (format_ == Format::Mjpg)
         {
             gpu_decoder_ = std::make_unique<capture::GpuJpegDecoder>();
@@ -530,7 +547,7 @@ void MFCapture::ReceiveThread()
             {
                 std::cerr << "[MFCapture] nvJPEG unavailable; MJPG falls back to CPU decode." << std::endl;
                 gpu_decoder_.reset();
-                mjpgCpuFallback = true;
+                mjpg_cpu_fallback_ = true;
             }
         }
     }
@@ -544,8 +561,12 @@ void MFCapture::ReceiveThread()
               << " [" << (gpu_decode_ ? "GPU" : "CPU") << "]" << std::endl;
     negotiated_fps_.store(static_cast<int>(std::lround(negotiatedFps)));
 
+    source_frame_count_ = 0;
+    source_fps_smoothed_ = 0.0;
+    source_fps_start_ = std::chrono::steady_clock::now();
     is_open_.store(true);
     StartDecodeWorkers();   // 仅 crop_enabled 的 MJPG-GPU 模式内部生效
+    StartProcessWorker();
     while (!should_stop_.load())
     {
         DWORD streamIndex = 0, flags = 0;
@@ -584,30 +605,11 @@ void MFCapture::ReceiveThread()
             // consume no conversion/decode work.
             if (ShouldDispatchFrame())
             {
-                const bool gpu = gpu_decode_;
-                switch (format_)
-                {
-                case Format::Nv12:
-                    gpu ? PushNv12Gpu(data, frame_width_, frame_height_, frame_stride_)
-                        : PushNv12Cpu(data, frame_width_, frame_height_, frame_stride_);
-                    break;
-                case Format::Yuy2:
-                    gpu ? PushYuy2Gpu(data, frame_width_, frame_height_, frame_stride_)
-                        : PushYuy2Cpu(data, frame_width_, frame_height_, frame_stride_);
-                    break;
-                case Format::Rgb32:
-                    gpu ? PushRgb32Gpu(data, frame_width_, frame_height_, frame_stride_)
-                        : PushRgb32Cpu(data, frame_width_, frame_height_, frame_stride_);
-                    break;
-                case Format::Mjpg:
-                    if (gpu && !mjpgCpuFallback && crop_enabled_)
-                        EnqueueJpegJob(data, static_cast<size_t>(currentLen));
-                    else if (gpu && !mjpgCpuFallback)
-                        PushMjpgGpu(data, static_cast<size_t>(currentLen));
-                    else
-                        PushMjpgCpu(data, static_cast<size_t>(currentLen));
-                    break;
-                }
+                if (format_ == Format::Mjpg && gpu_decode_
+                    && !mjpg_cpu_fallback_ && crop_enabled_)
+                    EnqueueJpegJob(data, static_cast<size_t>(currentLen));
+                else
+                    EnqueueProcessJob(data, static_cast<size_t>(currentLen));
             }
         }
 
@@ -615,6 +617,7 @@ void MFCapture::ReceiveThread()
     }
 
 cleanup:
+    StopProcessWorker();
     StopDecodeWorkers();    // 幂等:未启动时直接返回
     is_open_.store(false);
     if (activates)
@@ -630,14 +633,233 @@ cleanup:
         CoUninitialize();
 }
 
+void MFCapture::StartProcessWorker()
+{
+    process_stop_.store(false);
+    process_thread_ = std::thread(&MFCapture::ProcessWorkerLoop, this);
+}
+
+void MFCapture::StopProcessWorker()
+{
+    process_stop_.store(true);
+    process_cv_.notify_all();
+    if (process_thread_.joinable())
+        process_thread_.join();
+    std::lock_guard<std::mutex> lock(process_mutex_);
+    std::queue<ProcessJob> empty;
+    process_queue_.swap(empty);
+    process_free_buffers_.clear();
+}
+
+void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size)
+{
+    if (!data || size == 0)
+        return;
+    ProcessJob job;
+    {
+        std::lock_guard<std::mutex> lock(process_mutex_);
+        if (!process_free_buffers_.empty())
+        {
+            job.bytes = std::move(process_free_buffers_.back());
+            process_free_buffers_.pop_back();
+        }
+    }
+
+    job.width = frame_width_;
+    job.height = frame_height_;
+    job.stride = frame_stride_;
+    bool copied = false;
+    if (format_ != Format::Mjpg && frame_width_ > 0 && frame_height_ > 0)
+    {
+        int left = 0, top = 0, roiW = 0, roiH = 0;
+        ResolveRoi(frame_width_, frame_height_, left, top, roiW, roiH);
+        const int srcStride = frame_stride_ > 0 ? frame_stride_
+            : frame_width_ * (format_ == Format::Rgb32 ? 4
+                            : format_ == Format::Yuy2 ? 2 : 1);
+        const int channels = format_ == Format::Rgb32 ? 4
+                           : format_ == Format::Yuy2 ? 2 : 1;
+        const size_t rowBytes = static_cast<size_t>(roiW) * channels;
+        const size_t yEnd = static_cast<size_t>(top + roiH - 1) * srcStride
+                          + static_cast<size_t>(left) * channels + rowBytes;
+
+        if (roiW > 0 && roiH > 0 && yEnd <= size)
+        {
+            size_t total = rowBytes * roiH;
+            if (format_ == Format::Nv12)
+                total += static_cast<size_t>(roiW) * (roiH / 2);
+            job.bytes.resize(total);
+            for (int row = 0; row < roiH; ++row)
+                std::memcpy(job.bytes.data() + static_cast<size_t>(row) * rowBytes,
+                            data + static_cast<size_t>(top + row) * srcStride
+                                 + static_cast<size_t>(left) * channels,
+                            rowBytes);
+
+            if (format_ == Format::Nv12)
+            {
+                const size_t uvBase = static_cast<size_t>(srcStride) * frame_height_;
+                if (roiH >= 2)
+                {
+                    const size_t uvEnd = uvBase
+                        + static_cast<size_t>(top / 2 + roiH / 2 - 1) * srcStride
+                        + left + roiW;
+                    if (uvEnd <= size)
+                    {
+                        uint8_t* dstUv = job.bytes.data() + rowBytes * roiH;
+                        for (int row = 0; row < roiH / 2; ++row)
+                            std::memcpy(dstUv + static_cast<size_t>(row) * roiW,
+                                        data + uvBase
+                                             + static_cast<size_t>(top / 2 + row) * srcStride + left,
+                                        static_cast<size_t>(roiW));
+                        copied = true;
+                    }
+                }
+            }
+            else
+            {
+                copied = true;
+            }
+
+            if (copied)
+            {
+                job.width = roiW;
+                job.height = roiH;
+                job.stride = static_cast<int>(rowBytes);
+            }
+        }
+    }
+    if (!copied)
+    {
+        job.bytes.resize(size);
+        std::memcpy(job.bytes.data(), data, size);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(process_mutex_);
+        while (static_cast<int>(process_queue_.size()) >= MAX_PROCESS_QUEUE)
+        {
+            ProcessJob stale = std::move(process_queue_.front());
+            process_queue_.pop();
+            if (process_free_buffers_.size() < MAX_PROCESS_QUEUE + 8)
+                process_free_buffers_.push_back(std::move(stale.bytes));
+        }
+        process_queue_.push(std::move(job));
+    }
+    process_cv_.notify_one();
+}
+
+void MFCapture::ProcessWorkerLoop()
+{
+    // Keep several source byte buffers alive until their asynchronous H2D copy
+    // has passed on gpu_stream_. Waiting only when a ring slot is reused gives
+    // CUDA multiple frames of runway without risking use-after-free of pageable
+    // IMFSample copies.
+    static constexpr size_t HOST_RING = 8;
+    std::array<ProcessJob, HOST_RING> hostRing;
+    std::array<cudaEvent_t, HOST_RING> hostDone{};
+    std::array<bool, HOST_RING> hostPending{};
+    size_t hostIdx = 0;
+    const bool rawGpu = gpu_decode_ && format_ != Format::Mjpg;
+    if (rawGpu)
+        for (auto& event : hostDone)
+            cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
+
+    for (;;)
+    {
+        ProcessJob job;
+        {
+            std::unique_lock<std::mutex> lock(process_mutex_);
+            process_cv_.wait(lock, [this] {
+                return process_stop_.load() || !process_queue_.empty();
+            });
+            if (process_stop_.load())
+                break;
+            job = std::move(process_queue_.front());
+            process_queue_.pop();
+        }
+
+        const uint8_t* data = job.bytes.data();
+        size_t rawSlot = 0;
+        if (rawGpu)
+        {
+            rawSlot = hostIdx;
+            hostIdx = (hostIdx + 1) % HOST_RING;
+            if (hostPending[rawSlot] && hostDone[rawSlot])
+                cudaEventSynchronize(hostDone[rawSlot]);
+            if (!hostRing[rawSlot].bytes.empty())
+            {
+                std::lock_guard<std::mutex> lock(process_mutex_);
+                if (process_free_buffers_.size() < MAX_PROCESS_QUEUE + HOST_RING)
+                    process_free_buffers_.push_back(std::move(hostRing[rawSlot].bytes));
+            }
+            hostRing[rawSlot] = std::move(job);
+            data = hostRing[rawSlot].bytes.data();
+        }
+        const ProcessJob& activeJob = rawGpu ? hostRing[rawSlot] : job;
+        switch (format_)
+        {
+        case Format::Nv12:
+            gpu_decode_ ? PushNv12Gpu(data, activeJob.width, activeJob.height, activeJob.stride)
+                        : PushNv12Cpu(data, activeJob.width, activeJob.height, activeJob.stride);
+            break;
+        case Format::Yuy2:
+            gpu_decode_ ? PushYuy2Gpu(data, activeJob.width, activeJob.height, activeJob.stride)
+                        : PushYuy2Cpu(data, activeJob.width, activeJob.height, activeJob.stride);
+            break;
+        case Format::Rgb32:
+            gpu_decode_ ? PushRgb32Gpu(data, activeJob.width, activeJob.height, activeJob.stride)
+                        : PushRgb32Cpu(data, activeJob.width, activeJob.height, activeJob.stride);
+            break;
+        case Format::Mjpg:
+            if (gpu_decode_ && !mjpg_cpu_fallback_)
+                PushMjpgGpu(data, job.bytes.size());
+            else
+                PushMjpgCpu(data, job.bytes.size());
+            break;
+        }
+
+        if (rawGpu)
+        {
+            if (hostDone[rawSlot])
+            {
+                cudaEventRecord(hostDone[rawSlot], gpu_stream_);
+                hostPending[rawSlot] = true;
+            }
+            else
+            {
+                // Event creation failure is rare; preserve correctness even if
+                // this degraded path loses overlap.
+                cudaStreamSynchronize(gpu_stream_);
+                hostRing[rawSlot].bytes.clear();
+            }
+        }
+        else if (!job.bytes.empty())
+        {
+            std::lock_guard<std::mutex> lock(process_mutex_);
+            if (process_free_buffers_.size() < MAX_PROCESS_QUEUE + HOST_RING)
+                process_free_buffers_.push_back(std::move(job.bytes));
+        }
+    }
+
+    // ProcessJob owns the host bytes used by asynchronous H2D copies. Drain the
+    // stream before the last local job is destroyed during shutdown.
+    if (gpu_stream_)
+        cudaStreamSynchronize(gpu_stream_);
+    for (auto& event : hostDone)
+        if (event) cudaEventDestroy(event);
+}
+
 void MFCapture::TickFps()
 {
     ++source_frame_count_;
     const auto now = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = now - source_fps_start_;
-    if (elapsed.count() >= 1.0)
+    if (elapsed.count() >= 0.5)
     {
-        source_fps_.store(static_cast<int>(std::lround(source_frame_count_ / elapsed.count())));
+        const double instant = source_frame_count_ / elapsed.count();
+        source_fps_smoothed_ = source_fps_smoothed_ <= 0.0
+            ? instant
+            : source_fps_smoothed_ * 0.75 + instant * 0.25;
+        source_fps_.store(static_cast<int>(std::lround(source_fps_smoothed_)));
         source_frame_count_ = 0;
         source_fps_start_ = now;
     }
@@ -873,12 +1095,12 @@ GpuImage MFCapture::ResizeToOut(const GpuImage& src)
     return slot;
 }
 
-cv::Mat MFCapture::FinalizeCpu(const cv::Mat& bgr)
+cv::Mat MFCapture::FinalizeCpu(cv::Mat bgr)
 {
     if (bgr.empty())
         return cv::Mat();
     if (bgr.cols == out_side_ && bgr.rows == out_side_)
-        return bgr.clone();
+        return std::move(bgr);
 
     if (crop_enabled_ && bgr.cols >= out_side_ && bgr.rows >= out_side_)
     {
@@ -895,11 +1117,8 @@ cv::Mat MFCapture::FinalizeCpu(const cv::Mat& bgr)
 // ---------------- GPU decode paths ----------------
 // Raw formats: upload ONLY the centered ROI (crop-before-upload) so the per-
 // frame PCIe transfer is bounded by out_side — critical on a Gen1-capped card.
-// NPP converts the ROI to BGR straight into an output slot. These keep a
-// per-frame sync (the ROI upload + NPP work is tiny, so it doesn't stall the
-// producer). MJPG decodes only the centered ROI on the GPU and does NOT sync
-// per frame, so successive frames pipeline (host entropy decode overlaps GPU
-// reconstruction); it hands a completion event to the consumer instead.
+// NPP converts the ROI to BGR straight into an output slot. Completion events
+// let conversion overlap the next device read without exposing partial frames.
 
 bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stride)
 {
@@ -932,9 +1151,11 @@ bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stri
         return false;
 
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
-    cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
+    cudaEvent_t e = out_events_[current_out_idx_];
+    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
+    else cudaStreamSynchronize(gpu_stream_);
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -964,9 +1185,11 @@ bool MFCapture::PushYuy2Gpu(const uint8_t* data, int width, int height, int stri
         return false;
 
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
-    cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
+    cudaEvent_t e = out_events_[current_out_idx_];
+    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
+    else cudaStreamSynchronize(gpu_stream_);
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -993,9 +1216,11 @@ bool MFCapture::PushRgb32Gpu(const uint8_t* data, int width, int height, int str
                           roiW, roiH, gpu_stream_);
 
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
-    cudaStreamSynchronize(gpu_stream_);
     if (out.empty())
         return false;
+    cudaEvent_t e = out_events_[current_out_idx_];
+    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
+    else cudaStreamSynchronize(gpu_stream_);
     EnqueueGpu(std::move(out));
     return true;
 }

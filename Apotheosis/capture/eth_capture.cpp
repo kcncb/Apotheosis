@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -76,8 +77,6 @@ EthCapture::EthCapture(int width, int height, const std::string& adapter, int et
 EthCapture::~EthCapture()
 {
     Cleanup();
-    if (decode_event_)  { cudaEventDestroy(decode_event_);   decode_event_ = nullptr; }
-    if (decode_stream_) { cudaStreamDestroy(decode_stream_); decode_stream_ = nullptr; }
 }
 
 bool EthCapture::Initialize()
@@ -146,6 +145,7 @@ bool EthCapture::Initialize()
     dropped_frames_ = 0;
     have_frame_ = false;
 
+    decode_thread_ = std::thread(&EthCapture::DecodeThread, this);
     receive_thread_ = std::thread(&EthCapture::ReceiveThread, this);
 
     std::cout << "[EthCapture] Listening on " << adapter_
@@ -158,6 +158,7 @@ void EthCapture::Cleanup()
     should_stop_ = true;
     is_connected_ = false;
     frame_cv_.notify_all();  // wake any consumer blocked in WaitFrame
+    decode_cv_.notify_all();
 
     // pcap_breakloop unblocks a pcap_next_ex that is mid-timeout.
     if (handle_)
@@ -165,6 +166,9 @@ void EthCapture::Cleanup()
 
     if (receive_thread_.joinable())
         receive_thread_.join();
+    decode_cv_.notify_all();
+    if (decode_thread_.joinable())
+        decode_thread_.join();
 
     if (handle_)
     {
@@ -213,63 +217,25 @@ void EthCapture::ReceiveThread()
 {
     try
     {
-        // Lazily init NVDEC + decode stream on this thread. cuvid/parser
-        // state is thread-affine just like nvjpegState was.
-        if (!gpu_decoder_)
-        {
-            gpu_decoder_ = std::make_unique<capture::GpuH264Decoder>();
-            if (!gpu_decoder_->init())
-            {
-                std::cerr << "[EthCapture] NVDEC init failed; nothing to decode" << std::endl;
-                gpu_decoder_.reset();
-                return;
-            }
-            cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
-            cudaEventCreateWithFlags(&decode_event_, cudaEventDisableTiming);
-
-            // Sink: parser display callback hands us a finished BGR8 GpuImage;
-            // we attach the stream-completion event and enqueue. Drop stale
-            // frames so the consumer always sees the newest one (same policy
-            // as the JPEG path had).
-            gpu_decoder_->setSink([this](GpuImage&& img) {
-                if (img.empty()) return;
-                last_dec_w_.store(img.cols());
-                last_dec_h_.store(img.rows());
-                cudaEventRecord(decode_event_, decode_stream_);
-                img.setReadyEvent(decode_event_);
-                {
-                    std::lock_guard<std::mutex> lock(frame_mutex_);
-                    while (gpu_frame_queue_.size() >= MAX_QUEUE_SIZE)
-                    {
-                        gpu_frame_queue_.pop();
-                        dropped_frames_++;
-                    }
-                    gpu_frame_queue_.push(std::move(img));
-                    received_frames_++;
-                }
-                frame_cv_.notify_one();
-            });
-        }
-
         const int ethHdr = (int)sizeof(PxEthHeader);
         const int fragHdr = (int)sizeof(PxFragHeader);
 
         // Diagnostic: once a second, report where the throughput goes —
         //   decoded/s  : frames actually decoded+enqueued (producer rate)
-        //   gateDrop/s : frames skipped because the GPU hadn't finished the
-        //                previous decode (i.e. decode is the bottleneck)
-        // If decoded/s ~= sender fps and gateDrop/s ~= 0, the cap is downstream
-        // (consumer); if gateDrop/s is high, JPEG decode on this GPU is the cap.
+        // decoded/s is produced by the independent NVDEC thread; the remaining
+        // counters isolate sender, wire, reassembly and Npcap losses.
         auto statT0 = std::chrono::steady_clock::now();
         int lastRecv = received_frames_.load();
         // Per-window sender-rate / loss tracking. The sender stamps a
         // monotonically increasing frameId per frame, so the span of frameIds
         // seen == how many frames the sender actually emitted, while `started`
         // == frames we got at least one fragment for. senderSpan-started ==
-        // frames lost whole on the wire; started-decoded == frames that lost a
+        // frames lost whole on the wire; started-completed == frames that lost a
         // fragment (incomplete). This pinpoints whether the last few fps are
         // wire loss vs the sender simply not emitting a full 240.
         uint64_t winStarted = 0;
+        uint64_t winCompleted = 0;
+        uint64_t winPartialLost = 0;
         uint32_t winFirstId = 0, winLastId = 0;
         bool winHaveId = false;
 
@@ -297,14 +263,18 @@ void EthCapture::ReceiveThread()
                 if (el >= 1.0)
                 {
                     int rec = received_frames_.load();
-                    const int decFps = (int)((rec - lastRecv) / el);
+                    const int decFps = static_cast<int>(std::lround((rec - lastRecv) / el));
                     const uint32_t spanRaw = winHaveId ? (winLastId - winFirstId + 1) : 0;
-                    const int spanFps = (int)(spanRaw / el);
-                    const int startedFps = (int)(winStarted / el);
+                    const int spanFps = static_cast<int>(std::lround(spanRaw / el));
+                    const int startedFps = static_cast<int>(std::lround(winStarted / el));
                     // wire loss = sender 发了但一个 frag 都没到的;partial = 收到
                     // frag 但凑不齐的(reassembly 失败)。
                     const int wireLost    = std::max(0, spanFps - startedFps);
-                    const int partialLost = std::max(0, startedFps - decFps);
+                    const int completedFps = static_cast<int>(std::lround(winCompleted / el));
+                    // Count only frames that were actually superseded while
+                    // incomplete. A started-completed subtraction jitters when
+                    // one frame crosses the statistics-window boundary.
+                    const int partialLost = static_cast<int>(std::lround(winPartialLost / el));
 
                     pcap_stat ps{};
                     int psDropInc = 0, psIfDropInc = 0;
@@ -328,16 +298,23 @@ void EthCapture::ReceiveThread()
                         std::cerr << "[EthCapture] decoded/s=" << decFps
                                   << " senderSpan/s=" << spanFps
                                   << " started/s=" << startedFps
+                                  << " completed/s=" << completedFps
                                   << " wireLost/s=" << wireLost
                                   << " partial/s=" << partialLost
                                   << " psDrop/s=" << psDropInc
                                   << " psIfDrop/s=" << psIfDropInc
+                                  << " decQueueDrop/s=" << decode_queue_dropped_fps_.load()
+                                  << " queueP95=" << (decode_queue_p95_us_.load() / 1000.0) << "ms"
+                                  << " submitP95=" << (decode_submit_p95_us_.load() / 1000.0) << "ms"
+                                  << " gpuAllocs=" << GpuImage::allocationCount()
                                   << " dec=" << last_dec_w_.load() << "x" << last_dec_h_.load()
                                   << std::endl;
                     }
                     lastRecv = rec;
                     statT0 = nowT;
                     winStarted = 0;
+                    winCompleted = 0;
+                    winPartialLost = 0;
                     winHaveId = false;
                 }
             }
@@ -377,7 +354,10 @@ void EthCapture::ReceiveThread()
             if (!have_frame_ || fh->frameId != cur_frame_id_)
             {
                 if (have_frame_ && frags_got_ < frag_count_)
+                {
                     dropped_frames_++;
+                    winPartialLost++;
+                }
                 // diagnostic: track sender frameId span + frames started
                 if (!winHaveId) { winFirstId = fh->frameId; winHaveId = true; }
                 winLastId = fh->frameId;
@@ -386,7 +366,10 @@ void EthCapture::ReceiveThread()
                 expected_size_ = totalSize;
                 frag_count_ = fragCount;
                 frags_got_ = 0;
-                asm_buf_.assign(totalSize, 0);
+                // Every completed frame is fully overwritten by its fragments;
+                // resize preserves the allocation and avoids zero-filling the
+                // entire encoded frame 240 times per second.
+                asm_buf_.resize(totalSize);
                 frag_received_.assign(fragCount, 0);
                 have_frame_ = true;
             }
@@ -402,7 +385,8 @@ void EthCapture::ReceiveThread()
 
             if (frags_got_ == frag_count_)
             {
-                DecodeAndEnqueue(asm_buf_.data(), expected_size_);
+                winCompleted++;
+                EnqueueDecode(asm_buf_.data(), expected_size_);
                 have_frame_ = false;
             }
         }
@@ -417,14 +401,140 @@ void EthCapture::ReceiveThread()
     }
 }
 
+void EthCapture::EnqueueDecode(const uint8_t* nalu, size_t nalu_size)
+{
+    if (!nalu || nalu_size == 0 || should_stop_.load())
+        return;
+
+    DecodeJob job;
+    {
+        std::lock_guard<std::mutex> lock(decode_mutex_);
+        if (!decode_free_buffers_.empty())
+        {
+            job.nalu = std::move(decode_free_buffers_.back());
+            decode_free_buffers_.pop_back();
+        }
+        while (static_cast<int>(decode_queue_.size()) >= MAX_DECODE_QUEUE)
+        {
+            DecodeJob stale = std::move(decode_queue_.front());
+            decode_queue_.pop();
+            decode_free_buffers_.push_back(std::move(stale.nalu));
+            dropped_frames_++;
+            decode_queue_dropped_total_.fetch_add(1, std::memory_order_relaxed);
+        }
+        job.nalu.resize(nalu_size);
+        std::memcpy(job.nalu.data(), nalu, nalu_size);
+        job.assembled_at = std::chrono::steady_clock::now();
+        decode_queue_.push(std::move(job));
+    }
+    decode_cv_.notify_one();
+}
+
+void EthCapture::DecodeThread()
+{
+    gpu_decoder_ = std::make_unique<capture::GpuH264Decoder>();
+    if (!gpu_decoder_->init()
+        || cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking) != cudaSuccess)
+    {
+        std::cerr << "[EthCapture] NVDEC/CUDA init failed; stopping capture" << std::endl;
+        should_stop_.store(true);
+        is_connected_.store(false);
+        if (handle_) pcap_breakloop(handle_);
+        decode_cv_.notify_all();
+    }
+    else
+    {
+        // Parser callbacks execute on this decode thread. GpuH264Decoder puts a
+        // per-output-slot completion event on each image before this sink runs.
+        gpu_decoder_->setSink([this](GpuImage&& img) {
+            if (img.empty()) return;
+            last_dec_w_.store(img.cols());
+            last_dec_h_.store(img.rows());
+            {
+                std::lock_guard<std::mutex> lock(frame_mutex_);
+                while (gpu_frame_queue_.size() >= MAX_QUEUE_SIZE)
+                {
+                    gpu_frame_queue_.pop();
+                    dropped_frames_++;
+                }
+                gpu_frame_queue_.push(std::move(img));
+                received_frames_++;
+            }
+            frame_cv_.notify_one();
+        });
+
+        auto statsStart = std::chrono::steady_clock::now();
+        uint64_t lastQueueDrops = decode_queue_dropped_total_.load();
+        std::vector<int> queueWaitSamples;
+        std::vector<int> submitSamples;
+        queueWaitSamples.reserve(512);
+        submitSamples.reserve(512);
+
+        while (!should_stop_.load())
+        {
+            DecodeJob job;
+            {
+                std::unique_lock<std::mutex> lock(decode_mutex_);
+                decode_cv_.wait(lock, [this] {
+                    return should_stop_.load() || !decode_queue_.empty();
+                });
+                if (should_stop_.load())
+                    break;
+                job = std::move(decode_queue_.front());
+                decode_queue_.pop();
+            }
+
+            const auto submitStart = std::chrono::steady_clock::now();
+            queueWaitSamples.push_back(static_cast<int>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    submitStart - job.assembled_at).count()));
+            DecodeAndEnqueue(job.nalu.data(), job.nalu.size());
+            const auto submitEnd = std::chrono::steady_clock::now();
+            submitSamples.push_back(static_cast<int>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    submitEnd - submitStart).count()));
+
+            if (submitEnd - statsStart >= std::chrono::seconds(1))
+            {
+                auto p95 = [](std::vector<int>& samples) -> int {
+                    if (samples.empty()) return 0;
+                    const size_t index = (samples.size() - 1) * 95 / 100;
+                    std::nth_element(samples.begin(), samples.begin() + index, samples.end());
+                    return samples[index];
+                };
+                decode_queue_p95_us_.store(p95(queueWaitSamples));
+                decode_submit_p95_us_.store(p95(submitSamples));
+                const uint64_t drops = decode_queue_dropped_total_.load();
+                decode_queue_dropped_fps_.store(static_cast<int>(drops - lastQueueDrops));
+                lastQueueDrops = drops;
+                queueWaitSamples.clear();
+                submitSamples.clear();
+                statsStart = submitEnd;
+            }
+
+            std::lock_guard<std::mutex> lock(decode_mutex_);
+            if (decode_free_buffers_.size() < MAX_DECODE_QUEUE + 1)
+                decode_free_buffers_.push_back(std::move(job.nalu));
+        }
+    }
+
+    if (decode_stream_)
+        cudaStreamSynchronize(decode_stream_);
+    gpu_decoder_.reset();
+    if (decode_stream_) { cudaStreamDestroy(decode_stream_); decode_stream_ = nullptr; }
+
+    std::lock_guard<std::mutex> lock(decode_mutex_);
+    std::queue<DecodeJob> empty;
+    decode_queue_.swap(empty);
+    decode_free_buffers_.clear();
+}
+
 void EthCapture::DecodeAndEnqueue(const uint8_t* nalu, size_t nalu_size)
 {
     if (!gpu_decoder_ || !decode_stream_) return;
     // Sender is all-intra, so each NALU bundle is self-contained (SPS+PPS+IDR).
-    // The parser display callback drains synchronously into the queue via the
-    // sink we set up in ReceiveThread; no in-flight gate or pinned staging
-    // buffer needed — NVDEC silicon decodes 512×512 H.264 in well under a
-    // millisecond, way faster than the wire.
+    // Runs only on DecodeThread; parser callbacks never execute on the Npcap
+    // receive thread.
     if (!gpu_decoder_->parse(nalu, nalu_size, decode_stream_))
     {
         std::cerr << "[EthCapture] NVDEC parse failed (size=" << nalu_size << ")" << std::endl;

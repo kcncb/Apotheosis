@@ -88,6 +88,14 @@ private:
     bool EnsureGpuContext();
     void TickFps();
 
+    // IMFSourceReader is synchronous: doing conversion in ReceiveThread delays
+    // the next ReadSample call. Keep that thread device-facing only and move
+    // all non-parallel-MJPG work to a bounded latest-frame worker.
+    void StartProcessWorker();
+    void StopProcessWorker();
+    void ProcessWorkerLoop();
+    void EnqueueProcessJob(const uint8_t* data, size_t size);
+
     // MJPG-GPU 并行解码 worker 池(说明见下方 DecodeJob 成员处)。
     void StartDecodeWorkers();
     void StopDecodeWorkers();
@@ -103,11 +111,8 @@ private:
     //   MJPG -> nvJPEG ROI decode reconstructs only the centered out_side region
     //           (decodeCropped), avoiding a full-frame decode the weak GPU can't
     //           sustain at the source fps.
-    // The raw paths keep a per-frame cudaStreamSynchronize (their ROI upload +
-    // NPP convert is tiny). The MJPG path does NOT sync per frame — it records a
-    // completion event so the next frame's host-side entropy decode overlaps
-    // this frame's GPU reconstruction (this is what closes the gap to the source
-    // fps); the detector waits on that event from its own stream.
+    // GPU paths do not CPU-synchronize per frame. They record a completion event
+    // on the output slot; consumers wait from their own stream.
     bool PushNv12Gpu(const uint8_t* data, int width, int height, int stride);
     bool PushYuy2Gpu(const uint8_t* data, int width, int height, int stride);
     bool PushRgb32Gpu(const uint8_t* data, int width, int height, int stride);
@@ -130,7 +135,7 @@ private:
     bool PushYuy2Cpu(const uint8_t* data, int width, int height, int stride);
     bool PushRgb32Cpu(const uint8_t* data, int width, int height, int stride);
     bool PushMjpgCpu(const uint8_t* data, size_t size);
-    cv::Mat FinalizeCpu(const cv::Mat& bgr);
+    cv::Mat FinalizeCpu(cv::Mat bgr);
 
     void EnqueueCpu(cv::Mat&& frame);
     void EnqueueGpu(GpuImage&& frame);
@@ -149,6 +154,7 @@ private:
     std::atomic<int> source_fps_{ 0 };
     std::atomic<int> negotiated_fps_{ 0 };
     int source_frame_count_{ 0 };
+    double source_fps_smoothed_{ 0.0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 
     int frame_width_{ 0 };
@@ -160,6 +166,22 @@ private:
     std::condition_variable frame_cv_;   // 产帧入队后唤醒等待的消费线程
     std::queue<cv::Mat> cpu_frame_queue_;
     std::queue<GpuImage> gpu_frame_queue_;
+
+    struct ProcessJob
+    {
+        std::vector<uint8_t> bytes;
+        int width = 0;
+        int height = 0;
+        int stride = 0;
+    };
+    static constexpr int MAX_PROCESS_QUEUE = 2;
+    std::thread process_thread_;
+    std::mutex process_mutex_;
+    std::condition_variable process_cv_;
+    std::queue<ProcessJob> process_queue_;
+    std::vector<std::vector<uint8_t>> process_free_buffers_;
+    std::atomic<bool> process_stop_{ false };
+    bool mjpg_cpu_fallback_{ false };
 
     // MJPG-GPU 并行解码 worker 池。host 端 Huffman 熵解码(单帧 ~3.6ms)是产帧瓶颈
     // 且 CPU-bound,单线程顶不到源帧率。ReceiveThread 只读样本、把 JPEG 字节投进
@@ -191,10 +213,8 @@ private:
     uint8_t* pinned_jpeg_buffer_{ nullptr };  // pinned host staging for the MJPG H->D copy
     size_t pinned_jpeg_capacity_{ 0 };
 
-    // Reused intermediate GPU buffers (never enqueued, so use_count()==1 and
-    // create() reuses them every frame). For the raw paths a per-frame
-    // cudaStreamSynchronize makes single-buffer reuse safe: frame N+1's upload
-    // into a scratch cannot begin until frame N's read of it has completed.
+    // Reused intermediate GPU buffers. Operations are ordered on gpu_stream_,
+    // so frame N+1 cannot overwrite a scratch before frame N has consumed it.
     GpuImage scratch_a_;      // Y / packed-source ROI upload
     GpuImage scratch_b_;      // NV12 UV ROI upload
     GpuImage scratch_full_;   // full-frame BGR (resize source / MJPG full-decode fallback)
@@ -202,9 +222,8 @@ private:
     // Output ring. Enqueued frames (or zero-copy views) reference a slot, so the
     // ring must be deeper than the frames in flight for a slot's refcount to be
     // back to 1 by the time we cycle to it. out_events_ pairs one CUDA event per
-    // slot: the MJPG path records it (no per-frame sync) so the consumer waits
-    // on it; the raw paths sync per frame and leave the event unused (null
-    // readyEvent), which the detector/download treat as "already complete".
+    // slot: every GPU path records it so the consumer can wait without blocking
+    // the capture/processing thread.
     static constexpr int OUT_POOL_SIZE = 8;
     std::array<GpuImage, OUT_POOL_SIZE> out_pool_;
     std::array<cudaEvent_t, OUT_POOL_SIZE> out_events_{};

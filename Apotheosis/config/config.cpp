@@ -306,7 +306,8 @@ bool Config::loadConfig(const std::string& filename)
         capture_method = "mf_capture";
     if (capture_method != "udp_capture" && capture_method != "tcp_capture"
         && capture_method != "eth_capture"
-        && capture_method != "opencv_capture" && capture_method != "mf_capture")
+        && capture_method != "opencv_capture" && capture_method != "mf_capture"
+        && capture_method != "avermedia_capture")
         capture_method = "udp_capture";
     udp_ip = get_string("", "udp_ip", "0.0.0.0");
     udp_port = get_long("", "udp_port", 1234);
@@ -1407,6 +1408,5 @@ void Config::ensure_flashlight_class()
     st.bucket     = ClassBucket::Aim; // default routable; user may rebucket later
     class_filters.push_back(std::move(st));
 }
-
 
 

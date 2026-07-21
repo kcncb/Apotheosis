@@ -22,6 +22,7 @@ static const QStringList kMethodKeys = {
     QStringLiteral("eth_capture"),
     QStringLiteral("opencv_capture"),
     QStringLiteral("mf_capture"),
+    QStringLiteral("avermedia_capture"),
 };
 static const QStringList kMethodLabels = {
     QStringLiteral("UDP"),
@@ -29,6 +30,7 @@ static const QStringList kMethodLabels = {
     QStringLiteral("以太网原始帧 (ProSexy)"),   // 以太网原始帧
     QStringLiteral("OpenCV 采集卡"),                         // OpenCV 采集卡
     QStringLiteral("MF 采集卡（自写）"),     // MF 采集卡（自写）
+    QStringLiteral("圆刚 SDK 采集卡"),
 };
 
 static const QStringList kApiKeys = {
@@ -347,7 +349,7 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_urlRow = FormKit::fieldRow(QStringLiteral("URL (可选)"), m_devUrl);   // URL (可选)
     m_cardCard->contentLayout()->addWidget(m_urlRow);
 
-    // ── Decode location (MF only) ──
+    // ── Decode location (MF / AVerMedia SDK) ──
     m_devDecode = new QComboBox;
     m_devDecode->addItems(kDecodeLabels);
     m_devDecode->setToolTip(tr(
@@ -442,12 +444,13 @@ void CapturePage::updateSectionVisibility() {
 
     const bool isOpenCv = (key == QStringLiteral("opencv_capture"));
     const bool isMf     = (key == QStringLiteral("mf_capture"));
-    m_cardCard->setVisible(isOpenCv || isMf);
+    const bool isAver   = (key == QStringLiteral("avermedia_capture"));
+    m_cardCard->setVisible(isOpenCv || isMf || isAver);
 
     // Show/hide sub-rows that are backend-specific.
     m_apiRow->setVisible(isOpenCv);
     m_urlRow->setVisible(isOpenCv);
-    m_decodeRow->setVisible(isMf);
+    m_decodeRow->setVisible(isMf || isAver);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -539,7 +542,7 @@ void CapturePage::applyCard() {
         cfg.setOpencvCaptureApi(kApiKeys[m_devApi->currentIndex()]);
         cfg.setOpencvCaptureUrl(m_devUrl->text().trimmed());
     } else {
-        // MF
+        // MF / 圆刚 SDK 共用 GPU 转换开关。
         cfg.setCaptureMfGpu(m_devDecode->currentIndex() == 0);
     }
 
