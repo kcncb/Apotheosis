@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,46 @@
 
 namespace
 {
+
+constexpr std::uint32_t kCurveMagic = 0x31565243u; // "CRV1"
+
+bool write_curve_asset(const std::filesystem::path& path, const std::vector<float>& samples)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    const std::uint32_t count = static_cast<std::uint32_t>(samples.size());
+    out.write(reinterpret_cast<const char*>(&kCurveMagic), sizeof(kCurveMagic));
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    for (float value : samples)
+    {
+        const auto quantized = static_cast<std::int16_t>(std::lround(
+            std::clamp(value, -1.0f, 1.0f) * 32767.0f));
+        out.write(reinterpret_cast<const char*>(&quantized), sizeof(quantized));
+    }
+    return static_cast<bool>(out);
+}
+
+std::vector<float> read_curve_asset(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::uint32_t magic = 0, count = 0;
+    if (!in.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+        !in.read(reinterpret_cast<char*>(&count), sizeof(count)) ||
+        magic != kCurveMagic || count < 2 || count > 1000000)
+        return {};
+    std::vector<float> samples(count);
+    for (std::uint32_t i = 0; i < count; ++i)
+    {
+        std::int16_t quantized = 0;
+        if (!in.read(reinterpret_cast<char*>(&quantized), sizeof(quantized))) return {};
+        samples[i] = static_cast<float>(quantized) / 32767.0f;
+    }
+    samples.front() = 0.0f;
+    samples.back() = 0.0f;
+    return samples;
+}
 
 std::string to_bool_str(bool v)
 {
@@ -51,6 +92,69 @@ void apply_default_hotkey(HotkeyProfile& hk)
     hk.name = "Aim";
     hk.group = u8"默认";
     hk.keys = { "RightMouseButton" };
+    hk.aim_classes.clear();
+}
+
+// Aim classes 序列化为分号分隔列表;
+// 每条 "class_id:y_min:y_max:min_conf"。旧的 2/3 段格式仍能读回，
+// 并把旧 y_offset 同时作为上下限，避免升级后锁点位置发生变化。
+std::string serialize_aim_classes(const std::vector<HotkeyAimClass>& classes)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    for (size_t i = 0; i < classes.size(); ++i)
+    {
+        if (i) oss << ';';
+        oss << classes[i].class_id
+            << ':' << classes[i].y_offset
+            << ':' << classes[i].y_offset_max
+            << ':' << classes[i].min_conf;
+    }
+    return oss.str();
+}
+
+std::vector<HotkeyAimClass> parse_aim_classes(const std::string& raw)
+{
+    std::vector<HotkeyAimClass> out;
+    std::stringstream ss(raw);
+    std::string tok;
+    while (std::getline(ss, tok, ';'))
+    {
+        auto p1 = tok.find(':');
+        if (p1 == std::string::npos) continue;
+        try
+        {
+            HotkeyAimClass c;
+            c.class_id = std::stoi(tok.substr(0, p1));
+            std::vector<float> values;
+            std::stringstream value_stream(tok.substr(p1 + 1));
+            std::string value;
+            while (std::getline(value_stream, value, ':'))
+                values.push_back(std::stof(value));
+            if (values.empty()) continue;
+
+            c.y_offset = values[0];
+            if (values.size() >= 3)
+            {
+                c.y_offset_max = values[1];
+                c.min_conf = values[2];
+            }
+            else
+            {
+                // 旧格式: id:y 或 id:y:min_conf。
+                c.y_offset_max = c.y_offset;
+                c.min_conf = (values.size() == 2) ? values[1] : 0.0f;
+            }
+            c.y_offset = std::clamp(c.y_offset, 0.0f, 1.0f);
+            c.y_offset_max = std::clamp(c.y_offset_max, 0.0f, 1.0f);
+            if (c.y_offset > c.y_offset_max)
+                std::swap(c.y_offset, c.y_offset_max);
+            c.min_conf = std::clamp(c.min_conf, 0.0f, 1.0f);
+            out.push_back(c);
+        }
+        catch (...) { /* skip malformed */ }
+    }
+    return out;
 }
 
 } // namespace
@@ -315,6 +419,8 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_use_low    = get_bool("",   "auto_capture_use_low",    false);
     auto_capture_low_conf   = std::clamp(
         static_cast<float>(get_double("", "auto_capture_low_conf", 0.30)), 0.0f, 1.0f);
+    auto_capture_any_detection   = get_bool("", "auto_capture_any_detection",   false);
+    auto_capture_use_flashlight  = get_bool("", "auto_capture_use_flashlight",  false);
     auto_capture_cooldown_ms = std::max(0,
         static_cast<int>(get_long("", "auto_capture_cooldown_ms", 200)));
     auto_capture_force_keys = splitString(
@@ -322,6 +428,19 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_output_dir = get_string("", "auto_capture_output_dir",
                                          "screenshots/auto");
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
+
+    // ---------- Event orchestrator rules ----------
+    event_rules_serialized.clear();
+    {
+        const int n = std::clamp(static_cast<int>(get_long("", "event_rule_count", 0)), 0, 256);
+        event_rules_serialized.reserve(n);
+        for (int i = 0; i < n; ++i)
+        {
+            const std::string key = "event_rule_" + std::to_string(i);
+            std::string line = get_string("", key.c_str(), "");
+            if (!line.empty()) event_rules_serialized.push_back(std::move(line));
+        }
+    }
 
     // ---------- Crosshair color detector (palette + rect + area) ----------
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
@@ -569,8 +688,6 @@ bool Config::loadConfig(const std::string& filename)
             hk.speed_x         = static_cast<float>(get_double(sec, "speed_x",         hk.speed_x));
             hk.speed_y         = static_cast<float>(get_double(sec, "speed_y",         hk.speed_y));
             hk.dead_zone_px    = static_cast<float>(get_double(sec, "dead_zone_px",    hk.dead_zone_px));
-            hk.mover_kind      = static_cast<int>(get_long(sec, "mover_kind",          hk.mover_kind));
-
             // 疾风 (Predictive)。旧 ini 里的 predictive_pred_weight_x 自动迁移成 pred_weight。
             hk.predictive_kp_x        = static_cast<float>(get_double(sec, "predictive_kp_x",        hk.predictive_kp_x));
             hk.predictive_kp_y        = static_cast<float>(get_double(sec, "predictive_kp_y",        hk.predictive_kp_y));
@@ -609,10 +726,18 @@ bool Config::loadConfig(const std::string& filename)
             hk.classic_kalman_q_vel      = static_cast<float>(get_double(sec, "classic_kalman_q_vel",      hk.classic_kalman_q_vel));
             hk.classic_kalman_r_obs      = static_cast<float>(get_double(sec, "classic_kalman_r_obs",      hk.classic_kalman_r_obs));
             hk.classic_kalman_lookahead  = static_cast<float>(get_double(sec, "classic_kalman_lookahead",  hk.classic_kalman_lookahead));
+            hk.mover_kind = static_cast<int>(get_long(sec, "mover_kind", hk.mover_kind));
+            hk.yaoguang_pull_speed_x = static_cast<float>(get_double(sec, "yaoguang_pull_speed_x", hk.yaoguang_pull_speed_x));
+            hk.yaoguang_pull_speed_y = static_cast<float>(get_double(sec, "yaoguang_pull_speed_y", hk.yaoguang_pull_speed_y));
+            hk.yaoguang_tracking = static_cast<float>(get_double(sec, "yaoguang_tracking", hk.yaoguang_tracking));
+            hk.yaoguang_prediction_ms = static_cast<float>(get_double(sec, "yaoguang_prediction_ms", hk.yaoguang_prediction_ms));
+            hk.yaoguang_stability = static_cast<float>(get_double(sec, "yaoguang_stability", hk.yaoguang_stability));
 
             // 死区 (shared)
             hk.deadzone_enabled  = get_bool(sec, "deadzone_enabled",  hk.deadzone_enabled);
             hk.deadzone_percent  = static_cast<float>(get_double(sec, "deadzone_percent",  hk.deadzone_percent));
+            hk.lost_target_cache_frames = static_cast<int>(get_long(
+                sec, "lost_target_cache_frames", hk.lost_target_cache_frames));
 
             // 扳机
             hk.trigger_enabled        = get_bool(sec, "trigger_enabled",        hk.trigger_enabled);
@@ -620,21 +745,43 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_fire_duration  = static_cast<int>(get_long(sec, "trigger_fire_duration",  hk.trigger_fire_duration));
             hk.trigger_fire_interval  = static_cast<int>(get_long(sec, "trigger_fire_interval",  hk.trigger_fire_interval));
             hk.trigger_y_percent      = static_cast<int>(get_long(sec, "trigger_y_percent",      hk.trigger_y_percent));
+            hk.trigger_delay_jitter_ms    = static_cast<int>(get_long(sec, "trigger_delay_jitter_ms",    hk.trigger_delay_jitter_ms));
+            hk.trigger_duration_jitter_ms = static_cast<int>(get_long(sec, "trigger_duration_jitter_ms", hk.trigger_duration_jitter_ms));
+            hk.trigger_interval_jitter_ms = static_cast<int>(get_long(sec, "trigger_interval_jitter_ms", hk.trigger_interval_jitter_ms));
+            hk.trigger_switch_cooldown_ms = static_cast<int>(get_long(sec, "trigger_switch_cooldown_ms", hk.trigger_switch_cooldown_ms));
+            hk.y_strength_percent         = static_cast<int>(get_long(sec, "y_strength_percent",         hk.y_strength_percent));
 
-            // 目标选择 3 槽位
-            hk.target_class_1    = static_cast<int>(get_long(sec, "target_class_1",    hk.target_class_1));
-            hk.target_y_top_1    = static_cast<float>(get_double(sec, "target_y_top_1",    hk.target_y_top_1));
-            hk.target_y_bot_1    = static_cast<float>(get_double(sec, "target_y_bot_1",    hk.target_y_bot_1));
-            hk.target_min_conf_1 = static_cast<float>(get_double(sec, "target_min_conf_1", hk.target_min_conf_1));
-            hk.target_class_2    = static_cast<int>(get_long(sec, "target_class_2",    hk.target_class_2));
-            hk.target_y_top_2    = static_cast<float>(get_double(sec, "target_y_top_2",    hk.target_y_top_2));
-            hk.target_y_bot_2    = static_cast<float>(get_double(sec, "target_y_bot_2",    hk.target_y_bot_2));
-            hk.target_min_conf_2 = static_cast<float>(get_double(sec, "target_min_conf_2", hk.target_min_conf_2));
-            hk.target_class_3    = static_cast<int>(get_long(sec, "target_class_3",    hk.target_class_3));
-            hk.target_y_top_3    = static_cast<float>(get_double(sec, "target_y_top_3",    hk.target_y_top_3));
-            hk.target_y_bot_3    = static_cast<float>(get_double(sec, "target_y_bot_3",    hk.target_y_bot_3));
-            hk.target_min_conf_3 = static_cast<float>(get_double(sec, "target_min_conf_3", hk.target_min_conf_3));
-            hk.target_aim_range  = static_cast<int>(get_long(sec, "target_aim_range",  hk.target_aim_range));
+            // 目标选择 — 优先级列表
+            {
+                const std::string aim_raw = get_string(sec, "aim_classes", "");
+                hk.aim_classes = parse_aim_classes(aim_raw);
+                // 从旧三槽 target_class_N/y_top_N/y_bot_N 平滑迁移。
+                // 旧值是“距框顶比例”，新 UI 是 1=框顶/0=框底，因此反转。
+                if (aim_raw.empty())
+                {
+                    for (int slot = 1; slot <= 3; ++slot)
+                    {
+                        const std::string suffix = std::to_string(slot);
+                        const int class_id = static_cast<int>(get_long(
+                            sec, ("target_class_" + suffix).c_str(), -1));
+                        if (class_id < 0) continue;
+
+                        const float y_top = static_cast<float>(get_double(
+                            sec, ("target_y_top_" + suffix).c_str(), 0.0));
+                        const float y_bot = static_cast<float>(get_double(
+                            sec, ("target_y_bot_" + suffix).c_str(), 1.0));
+                        HotkeyAimClass migrated;
+                        migrated.class_id = class_id;
+                        migrated.y_offset = std::clamp(1.0f - y_bot, 0.0f, 1.0f);
+                        migrated.y_offset_max = std::clamp(1.0f - y_top, 0.0f, 1.0f);
+                        if (migrated.y_offset > migrated.y_offset_max)
+                            std::swap(migrated.y_offset, migrated.y_offset_max);
+                        migrated.min_conf = static_cast<float>(get_double(
+                            sec, ("target_min_conf_" + suffix).c_str(), 0.0));
+                        hk.aim_classes.push_back(migrated);
+                    }
+                }
+            }
 
             hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
             hk.laser_detect_enabled      = get_bool(sec, "laser_detect_enabled", false);
@@ -658,27 +805,66 @@ bool Config::loadConfig(const std::string& filename)
             hk.aim_path_bezier_cx2  = static_cast<float>(get_double(sec, "aim_path_bezier_cx2", hk.aim_path_bezier_cx2));
             hk.aim_path_bezier_cy2  = static_cast<float>(get_double(sec, "aim_path_bezier_cy2", hk.aim_path_bezier_cy2));
             {
+                std::vector<float> samples;
+                const std::string asset = get_string(sec, "aim_path_custom_file", "");
+                if (!asset.empty())
+                {
+                    const auto base = std::filesystem::u8path(target).parent_path();
+                    samples = read_curve_asset(base / std::filesystem::u8path(asset));
+                }
                 const std::string raw = get_string(sec, "aim_path_custom_samples", "");
-                hk.aim_path_custom_samples.clear();
-                if (!raw.empty())
+                if (samples.empty() && !raw.empty())
                 {
                     for (const auto& tok : splitString(raw, ','))
                     {
                         try {
                             float v = std::stof(tok);
                             v = std::clamp(v, -1.0f, 1.0f);
-                            hk.aim_path_custom_samples.push_back(v);
+                            samples.push_back(v);
                         } catch (...) { /* ignore malformed sample */ }
                     }
                     // Endpoints are pinned to zero so the path actually
                     // ends ON the target — load-time enforcement guards
                     // against hand-edited ini files.
-                    if (!hk.aim_path_custom_samples.empty())
+                    if (!samples.empty())
                     {
-                        hk.aim_path_custom_samples.front() = 0.0f;
-                        hk.aim_path_custom_samples.back()  = 0.0f;
+                        samples.front() = 0.0f;
+                        samples.back()  = 0.0f;
                     }
                 }
+                // 旧密度在加载边界一次性升采样，运行时不再每帧转换。
+                if (samples.size() >= 2 &&
+                    samples.size() != static_cast<size_t>(HotkeyProfile::kAimPathSampleCount))
+                {
+                    std::vector<float> expanded(HotkeyProfile::kAimPathSampleCount);
+                    for (int i = 0; i < HotkeyProfile::kAimPathSampleCount; ++i)
+                    {
+                        const double pos = static_cast<double>(i) * (samples.size() - 1)
+                                         / (HotkeyProfile::kAimPathSampleCount - 1);
+                        const size_t i0 = static_cast<size_t>(std::floor(pos));
+                        const size_t i1 = std::min(i0 + 1, samples.size() - 1);
+                        const double f = pos - static_cast<double>(i0);
+                        expanded[static_cast<size_t>(i)] = static_cast<float>(
+                            samples[i0] + (samples[i1] - samples[i0]) * f);
+                    }
+                    samples = std::move(expanded);
+                }
+                hk.aim_path_custom_samples =
+                    std::make_shared<const std::vector<float>>(std::move(samples));
+            }
+            hk.aim_path_neural_enabled = get_bool(
+                sec, "aim_path_neural_enabled", hk.aim_path_neural_enabled);
+            {
+                const std::string raw = get_string(sec, "aim_path_neural_weights", "");
+                size_t wi = 0;
+                for (const auto& token : splitString(raw, ','))
+                {
+                    if (wi >= hk.aim_path_neural_weights.size()) break;
+                    try { hk.aim_path_neural_weights[wi++] = std::stof(token); }
+                    catch (...) { hk.aim_path_neural_weights.fill(0.0f); wi = 0; break; }
+                }
+                if (wi != hk.aim_path_neural_weights.size())
+                    hk.aim_path_neural_enabled = false;
             }
 
             hotkeys.push_back(std::move(hk));
@@ -709,7 +895,6 @@ bool Config::loadConfig(const std::string& filename)
         hk.speed_x        = std::clamp(hk.speed_x,        0.0f, 2.0f);
         hk.speed_y        = std::clamp(hk.speed_y,        0.0f, 2.0f);
         hk.dead_zone_px   = std::clamp(hk.dead_zone_px,   0.0f, 20.0f);
-        hk.mover_kind     = std::clamp(hk.mover_kind,     0, 2);
 
         // 疾风 clamp
         hk.predictive_kp_x        = std::clamp(hk.predictive_kp_x,        0.0f, 10.0f);
@@ -744,26 +929,48 @@ bool Config::loadConfig(const std::string& filename)
         hk.classic_kalman_q_vel      = std::clamp(hk.classic_kalman_q_vel,      0.001f, 100.0f);
         hk.classic_kalman_r_obs      = std::clamp(hk.classic_kalman_r_obs,      0.001f, 100.0f);
         hk.classic_kalman_lookahead  = std::clamp(hk.classic_kalman_lookahead,  0.0f, 100.0f);
+        hk.mover_kind = std::clamp(hk.mover_kind, 0, 1);
+        hk.yaoguang_pull_speed_x = std::clamp(hk.yaoguang_pull_speed_x, 0.0f, 100.0f);
+        hk.yaoguang_pull_speed_y = std::clamp(hk.yaoguang_pull_speed_y, 0.0f, 100.0f);
+        hk.yaoguang_tracking = std::clamp(hk.yaoguang_tracking, 0.0f, 100.0f);
+        hk.yaoguang_prediction_ms = std::clamp(hk.yaoguang_prediction_ms, 0.0f, 100.0f);
+        hk.yaoguang_stability = std::clamp(hk.yaoguang_stability, 0.0f, 100.0f);
+
         // 死区 clamp
         hk.deadzone_percent = std::clamp(hk.deadzone_percent, 0.0f, 100.0f);
+        hk.lost_target_cache_frames = std::clamp(hk.lost_target_cache_frames, 0, 240);
+
+        hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 2);
+        hk.aim_path_bezier_cx1 = std::clamp(hk.aim_path_bezier_cx1, 0.0f, 1.0f);
+        hk.aim_path_bezier_cx2 = std::clamp(hk.aim_path_bezier_cx2, 0.0f, 1.0f);
+        hk.aim_path_bezier_cy1 = std::clamp(hk.aim_path_bezier_cy1, -1.0f, 1.0f);
+        hk.aim_path_bezier_cy2 = std::clamp(hk.aim_path_bezier_cy2, -1.0f, 1.0f);
+        if (hk.aim_path_bezier_cx1 > hk.aim_path_bezier_cx2)
+        {
+            std::swap(hk.aim_path_bezier_cx1, hk.aim_path_bezier_cx2);
+            std::swap(hk.aim_path_bezier_cy1, hk.aim_path_bezier_cy2);
+        }
 
         // 扳机 clamp
         hk.trigger_fire_delay    = std::clamp(hk.trigger_fire_delay,    0, 5000);
         hk.trigger_fire_duration = std::clamp(hk.trigger_fire_duration, 1, 5000);
         hk.trigger_fire_interval = std::clamp(hk.trigger_fire_interval, 0, 5000);
-        hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 100);
+        hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 500);
+        hk.trigger_delay_jitter_ms    = std::clamp(hk.trigger_delay_jitter_ms,    0, 500);
+        hk.trigger_duration_jitter_ms = std::clamp(hk.trigger_duration_jitter_ms, 0, 500);
+        hk.trigger_interval_jitter_ms = std::clamp(hk.trigger_interval_jitter_ms, 0, 500);
+        hk.trigger_switch_cooldown_ms = std::clamp(hk.trigger_switch_cooldown_ms, 0, 5000);
+        hk.y_strength_percent         = std::clamp(hk.y_strength_percent,         1, 500);
 
         // 目标选择 clamp
-        hk.target_y_top_1    = std::clamp(hk.target_y_top_1,    0.0f, 1.0f);
-        hk.target_y_bot_1    = std::clamp(hk.target_y_bot_1,    0.0f, 1.0f);
-        hk.target_min_conf_1 = std::clamp(hk.target_min_conf_1, 0.0f, 1.0f);
-        hk.target_y_top_2    = std::clamp(hk.target_y_top_2,    0.0f, 1.0f);
-        hk.target_y_bot_2    = std::clamp(hk.target_y_bot_2,    0.0f, 1.0f);
-        hk.target_min_conf_2 = std::clamp(hk.target_min_conf_2, 0.0f, 1.0f);
-        hk.target_y_top_3    = std::clamp(hk.target_y_top_3,    0.0f, 1.0f);
-        hk.target_y_bot_3    = std::clamp(hk.target_y_bot_3,    0.0f, 1.0f);
-        hk.target_min_conf_3 = std::clamp(hk.target_min_conf_3, 0.0f, 1.0f);
-        hk.target_aim_range  = std::clamp(hk.target_aim_range,  1, 9999);
+        for (auto& ac : hk.aim_classes)
+        {
+            ac.y_offset = std::clamp(ac.y_offset, 0.0f, 1.0f);
+            ac.y_offset_max = std::clamp(ac.y_offset_max, 0.0f, 1.0f);
+            if (ac.y_offset > ac.y_offset_max)
+                std::swap(ac.y_offset, ac.y_offset_max);
+            ac.min_conf = std::clamp(ac.min_conf, 0.0f, 1.0f);
+        }
 
         hk.dynamic_fov_strength = std::clamp(hk.dynamic_fov_strength, 0.0f, 1.0f);
     };
@@ -941,10 +1148,19 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_capture_high_conf = "  << auto_capture_high_conf << "\n"
         << "auto_capture_use_low = "    << to_bool_str(auto_capture_use_low) << "\n"
         << "auto_capture_low_conf = "   << auto_capture_low_conf << "\n"
+        << "auto_capture_any_detection = "  << to_bool_str(auto_capture_any_detection)  << "\n"
+        << "auto_capture_use_flashlight = " << to_bool_str(auto_capture_use_flashlight) << "\n"
         << "auto_capture_cooldown_ms = " << auto_capture_cooldown_ms << "\n"
         << "auto_capture_force_keys = " << joinStrings(auto_capture_force_keys) << "\n"
         << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
         << "auto_capture_save_label = " << to_bool_str(auto_capture_save_label) << "\n\n";
+
+    file << "# Event orchestrator (rule per line, format:\n"
+            "#   v2|name|enabled|event|mode|count|interval|cooldown|type,a,b|...)\n"
+        << "event_rule_count = " << event_rules_serialized.size() << "\n";
+    for (size_t i = 0; i < event_rules_serialized.size(); ++i)
+        file << "event_rule_" << i << " = " << event_rules_serialized[i] << "\n";
+    file << "\n";
 
     file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
             "# macro_script_path; runtime loads it on startup when macro_enabled\n"
@@ -983,7 +1199,6 @@ bool Config::saveConfig(const std::string& filename)
              << "speed_x = "         << hk.speed_x         << "\n"
              << "speed_y = "         << hk.speed_y         << "\n"
              << "dead_zone_px = "    << hk.dead_zone_px    << "\n"
-             << "mover_kind = "      << hk.mover_kind      << "\n"
              << "predictive_kp_x = "        << hk.predictive_kp_x        << "\n"
              << "predictive_kp_y = "        << hk.predictive_kp_y        << "\n"
              << "predictive_kd = "          << hk.predictive_kd          << "\n"
@@ -1024,34 +1239,29 @@ bool Config::saveConfig(const std::string& filename)
              << "classic_kalman_q_vel = "      << hk.classic_kalman_q_vel      << "\n"
              << "classic_kalman_r_obs = "      << hk.classic_kalman_r_obs      << "\n"
              << "classic_kalman_lookahead = "  << hk.classic_kalman_lookahead  << "\n"
+             << "mover_kind = " << hk.mover_kind << "\n"
+             << "yaoguang_pull_speed_x = " << hk.yaoguang_pull_speed_x << "\n"
+             << "yaoguang_pull_speed_y = " << hk.yaoguang_pull_speed_y << "\n"
+             << "yaoguang_tracking = " << hk.yaoguang_tracking << "\n"
+             << "yaoguang_prediction_ms = " << hk.yaoguang_prediction_ms << "\n"
+             << "yaoguang_stability = " << hk.yaoguang_stability << "\n"
              << "deadzone_enabled = "  << to_bool_str(hk.deadzone_enabled)  << "\n"
              << std::setprecision(4)
              << "deadzone_percent = "  << hk.deadzone_percent  << "\n"
-             << "trigger_enabled = "       << to_bool_str(hk.trigger_enabled)       << "\n"
              << std::setprecision(0)
+             << "lost_target_cache_frames = " << hk.lost_target_cache_frames << "\n"
+             << "trigger_enabled = "       << to_bool_str(hk.trigger_enabled)       << "\n"
              << "trigger_fire_delay = "    << hk.trigger_fire_delay    << "\n"
              << "trigger_fire_duration = " << hk.trigger_fire_duration << "\n"
              << "trigger_fire_interval = " << hk.trigger_fire_interval << "\n"
              << "trigger_y_percent = "     << hk.trigger_y_percent     << "\n"
-             << "target_class_1 = "      << hk.target_class_1      << "\n"
-             << std::setprecision(4)
-             << "target_y_top_1 = "      << hk.target_y_top_1      << "\n"
-             << "target_y_bot_1 = "      << hk.target_y_bot_1      << "\n"
-             << "target_min_conf_1 = "   << hk.target_min_conf_1   << "\n"
+             << "trigger_delay_jitter_ms = "    << hk.trigger_delay_jitter_ms    << "\n"
+             << "trigger_duration_jitter_ms = " << hk.trigger_duration_jitter_ms << "\n"
+             << "trigger_interval_jitter_ms = " << hk.trigger_interval_jitter_ms << "\n"
+             << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
+             << "y_strength_percent = "         << hk.y_strength_percent         << "\n"
+             << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << std::setprecision(0)
-             << "target_class_2 = "      << hk.target_class_2      << "\n"
-             << std::setprecision(4)
-             << "target_y_top_2 = "      << hk.target_y_top_2      << "\n"
-             << "target_y_bot_2 = "      << hk.target_y_bot_2      << "\n"
-             << "target_min_conf_2 = "   << hk.target_min_conf_2   << "\n"
-             << std::setprecision(0)
-             << "target_class_3 = "      << hk.target_class_3      << "\n"
-             << std::setprecision(4)
-             << "target_y_top_3 = "      << hk.target_y_top_3      << "\n"
-             << "target_y_bot_3 = "      << hk.target_y_bot_3      << "\n"
-             << "target_min_conf_3 = "   << hk.target_min_conf_3   << "\n"
-             << std::setprecision(0)
-             << "target_aim_range = "    << hk.target_aim_range    << "\n"
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
              << "laser_detect_enabled = "      << to_bool_str(hk.laser_detect_enabled)      << "\n"
              << "flashlight_detect_enabled = " << to_bool_str(hk.flashlight_detect_enabled) << "\n"
@@ -1065,15 +1275,39 @@ bool Config::saveConfig(const std::string& filename)
              << "aim_path_bezier_cy1 = " << hk.aim_path_bezier_cy1 << "\n"
              << "aim_path_bezier_cx2 = " << hk.aim_path_bezier_cx2 << "\n"
              << "aim_path_bezier_cy2 = " << hk.aim_path_bezier_cy2 << "\n";
-        if (!hk.aim_path_custom_samples.empty())
+        if (hk.aim_path_custom_samples && !hk.aim_path_custom_samples->empty())
         {
-            file << "aim_path_custom_samples = ";
-            for (size_t si = 0; si < hk.aim_path_custom_samples.size(); ++si)
+            const std::string assetName = "hotkey_" + std::to_string(i) + ".curve";
+            const std::string assetDirName = targetPath.stem().u8string() + ".curves";
+            const auto assetPath = targetPath.parent_path()
+                / std::filesystem::u8path(assetDirName)
+                / std::filesystem::u8path(assetName);
+            if (write_curve_asset(assetPath, *hk.aim_path_custom_samples))
             {
-                if (si > 0) file << ',';
-                file << hk.aim_path_custom_samples[si];
+                file << "aim_path_custom_file = " << assetDirName << '/' << assetName << "\n";
             }
-            file << "\n";
+            else
+            {
+                // 二进制资产写入失败时保留文本回退，不丢用户曲线。
+                file << "aim_path_custom_samples = ";
+                for (size_t si = 0; si < hk.aim_path_custom_samples->size(); ++si)
+                {
+                    if (si > 0) file << ',';
+                    file << (*hk.aim_path_custom_samples)[si];
+                }
+                file << "\n";
+            }
+        }
+        file << "aim_path_neural_enabled = " << to_bool_str(hk.aim_path_neural_enabled) << "\n";
+        if (hk.aim_path_neural_enabled)
+        {
+            file << "aim_path_neural_weights = ";
+            for (size_t wi = 0; wi < hk.aim_path_neural_weights.size(); ++wi)
+            {
+                if (wi > 0) file << ',';
+                file << std::setprecision(9) << hk.aim_path_neural_weights[wi];
+            }
+            file << std::setprecision(4) << "\n";
         }
 
         file << "\n";

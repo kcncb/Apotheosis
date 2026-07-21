@@ -20,6 +20,7 @@
 #include <cstring>
 
 #include "trt_detector.h"
+#include "runtime/config_snapshot.h"
 #include "nvinf.h"
 #include "Apotheosis.h"
 #include "other_tools.h"
@@ -348,7 +349,7 @@ void TrtDetector::allocatePinnedOutputs()
             pinnedSlot(slot)[name] = hostPtr;
         }
 
-        if (config.verbose)
+        if (runtime_config::read()->verbose)
         {
             std::cout << "[Detector] Allocated " << numSlots << " pinned host buffer(s) for output "
                 << name << ": " << bytes << " bytes each" << std::endl;
@@ -529,7 +530,7 @@ bool TrtDetector::captureCudaGraph(int slot)
             const SmallTargetDecode st = computeSmallTargetDecode();
             launch_decode_and_filter(
                 outputBindings[name], C, N, numClasses, isHalf,
-                config.confidence_threshold, st.smallConf,
+                runtime_config::read()->confidence_threshold, st.smallConf,
                 static_cast<float>(st.areaThreshPx), img_scale,
                 kMaxCandidates, cnLayout, devCounter, devCandidates, stream
             );
@@ -595,7 +596,7 @@ void TrtDetector::getInputNames()
         if (engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
         {
             inputNames.emplace_back(name);
-            if (config.verbose)
+            if (runtime_config::read()->verbose)
             {
                 std::cout << "[Detector] Detected input: " << name << std::endl;
             }
@@ -618,7 +619,7 @@ void TrtDetector::getOutputNames()
             outputNames.emplace_back(name);
             outputTypes[name] = engine->getTensorDataType(name);
 
-            if (config.verbose)
+            if (runtime_config::read()->verbose)
             {
                 std::cout << "[Detector] Detected output: " << name << std::endl;
             }
@@ -651,7 +652,7 @@ void TrtDetector::getBindings()
             if (err == cudaSuccess)
             {
                 inputBindings[name] = ptr;
-                if (config.verbose)
+                if (runtime_config::read()->verbose)
                 {
                     std::cout << "[Detector] Allocated " << size << " bytes for input " << name << std::endl;
                 }
@@ -672,7 +673,7 @@ void TrtDetector::getBindings()
             if (err == cudaSuccess)
             {
                 outputBindings[name] = ptr;
-                if (config.verbose)
+                if (runtime_config::read()->verbose)
                 {
                     std::cout << "[Detector] Allocated " << size << " bytes for output " << name << std::endl;
                 }
@@ -719,7 +720,7 @@ bool TrtDetector::initialize(const std::string& model_path)
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (ext == ".onnx" || ext == ".oliver")
         {
-            detector::ModelMetadata md = detector::inspect_onnx_model(model_path, config.verbose);
+            detector::ModelMetadata md = detector::inspect_onnx_model(model_path, runtime_config::read()->verbose);
             if (!md.class_names.empty())
                 class_names_ = std::move(md.class_names);
         }
@@ -772,14 +773,18 @@ bool TrtDetector::initialize(const std::string& model_path)
     for (int i = 0; i < inputDims.nbDims; ++i)
         if (inputDims.d[i] <= 0) isStatic = false;
 
-    if (isStatic != config.fixed_input_size)
+    if (isStatic != runtime_config::read()->fixed_input_size)
     {
-        config.fixed_input_size = isStatic;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            config.fixed_input_size = isStatic;
+        }
+        runtime_config::publish();
         detector_model_changed.store(true);
         std::cout << "[Detector] Automatically set fixed_input_size = " << (isStatic ? "true" : "false") << std::endl;
     }
 
-    const int target = config.detection_resolution;
+    const int target = runtime_config::read()->detection_resolution;
     if (!isStatic)
     {
         nvinfer1::Dims4 newShape{ 1, 3, target, target };
@@ -885,7 +890,7 @@ bool TrtDetector::initialize(const std::string& model_path)
         }
         numClasses = classes;
 
-        if (config.verbose)
+        if (runtime_config::read()->verbose)
         {
             std::cout << "[Detector] Output '" << mainOut << "' shape=["
                       << outDims.d[0] << "," << dim1 << "," << dim2 << "]"
@@ -1015,7 +1020,7 @@ bool TrtDetector::initialize(const std::string& model_path)
     // exclusive — pipelining (CPU post-process on prev slot while GPU runs
     // curr slot's graph) stacks on top of the launch-overhead savings from
     // collapsing N kernel launches into one cudaGraphLaunch.
-    numSlots = (config.use_double_buffer ? 2 : 1);
+    numSlots = (runtime_config::read()->use_double_buffer ? 2 : 1);
 
     for (int s = 0; s < 2; ++s)
     {
@@ -1028,7 +1033,7 @@ bool TrtDetector::initialize(const std::string& model_path)
 
     allocatePinnedOutputs();
 
-    img_scale = static_cast<float>(config.detection_resolution) / w;
+    img_scale = static_cast<float>(runtime_config::read()->detection_resolution) / w;
 
     for (const auto& n : inputNames)
         context->setTensorAddress(n.c_str(), inputBindings[n]);
@@ -1051,12 +1056,12 @@ bool TrtDetector::initialize(const std::string& model_path)
         cudaEventCreate(&copyCompleteEvent[s]);
     }
 
-    useCudaGraph = config.use_cuda_graph;
+    useCudaGraph = runtime_config::read()->use_cuda_graph;
     // Graph capture itself is deferred to the first frame: we need that
     // frame's rows/cols/channels to size the per-slot staging buffer that the
     // captured preprocess kernel will read from.
 
-    if (config.verbose)
+    if (runtime_config::read()->verbose)
     {
         std::cout << "[Detector] Initialized. ModelStatic=" << std::boolalpha << isStatic
             << ", NetInput=" << h << "x" << w << " (scale=" << img_scale << ")" << std::endl;
@@ -1306,7 +1311,7 @@ void TrtDetector::loadEngine(const std::string& modelFile)
 
 void TrtDetector::processFrame(const cv::Mat& frame)
 {
-    if (config.backend == "DML") return;
+    if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
     currentFrame = frame;
@@ -1318,7 +1323,7 @@ void TrtDetector::processFrame(const cv::Mat& frame)
 
 void TrtDetector::processFrameGpu(GpuImage frame)
 {
-    if (config.backend == "DML") return;
+    if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
     currentFrame.release();
@@ -1366,7 +1371,7 @@ void TrtDetector::inferenceThread()
                 frameReady = false;
                 pendingFrameType = PendingFrameType::None;
             }
-            initialize("models/" + config.ai_model);
+            initialize("models/" + runtime_config::read()->ai_model);
             publishTrtModelMetadata(*this);
             detection_resolution_changed.store(true);
             detector_model_changed.store(false);
@@ -1375,9 +1380,9 @@ void TrtDetector::inferenceThread()
             graphCaptureGivenUp = false;
         }
 
-        if (useCudaGraph != config.use_cuda_graph)
+        if (useCudaGraph != runtime_config::read()->use_cuda_graph)
         {
-            useCudaGraph = config.use_cuda_graph;
+            useCudaGraph = runtime_config::read()->use_cuda_graph;
             if (!useCudaGraph)
             {
                 destroyCudaGraph();
@@ -1567,9 +1572,10 @@ void TrtDetector::inferenceThread()
                             float* devCandidates = reinterpret_cast<float*>(devBlock + kDecodeHeaderBytes);
 
                             const SmallTargetDecode st = computeSmallTargetDecode();
+                            const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
                             launch_decode_and_filter(
                                 outputBindings[name], C, N, numClasses, isHalf,
-                                config.confidence_threshold, st.smallConf,
+                                runtime.confidenceThreshold, st.smallConf,
                                 static_cast<float>(st.areaThreshPx), img_scale,
                                 kMaxCandidates, cnLayout, devCounter, devCandidates, stream
                             );
@@ -1637,16 +1643,17 @@ void TrtDetector::inferenceThread()
 
                             std::vector<int64_t> shape{ 1, kept, 6 };
                             const SmallTargetDecode st = computeSmallTargetDecode();
+                            const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
                             // GPU 内核已做面积自适应过滤,这里只让候选通过 conf 门槛并跑 NMS,
                             // 不再重复 CPU 面积过滤(传 -1 关闭)。
                             std::vector<Detection> detections = postProcessYolo(
                                 cands, shape, numClasses,
                                 st.decodeFloor,
-                                config.nms_threshold,
+                                runtime.nmsThreshold,
                                 &lastNmsTimeValue,
                                 -1.0f, 0.0
                             );
-                            capDetectionsToMax(detections, config.max_detections);
+                            capDetectionsToMax(detections, runtime.maxDetections);
 
                             {
                                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
@@ -1770,7 +1777,7 @@ void TrtDetector::preProcess(const GpuImage& frame)
         frame.view(), reinterpret_cast<__half*>(inputBuffer), w, stream
     );
 
-    if (config.verbose)
+    if (runtime_config::read()->verbose)
     {
         auto err = cudaGetLastError();
         if (err != cudaSuccess)
@@ -1803,11 +1810,11 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
         shape,
         numClasses,
         st.decodeFloor,
-        config.nms_threshold,
+        detectorRuntimeSettings().nmsThreshold,
         nmsTime,
         st.baseConf, st.areaThreshPx
     );
-    capDetectionsToMax(detections, config.max_detections);
+    capDetectionsToMax(detections, detectorRuntimeSettings().maxDetections);
 
     {
         std::lock_guard<std::mutex> lock(detectionBuffer.mutex);

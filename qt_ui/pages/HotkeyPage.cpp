@@ -2,23 +2,29 @@
 #include "pages/TargetPage.h"
 #include "config/ConfigManager.h"
 #include "config/config_bridge.h"
+#include "widgets/AdaptiveStack.h"
 #include "widgets/BezierEditor.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/FreehandCurveEditor.h"
+#include "widgets/NeuralCurveTrainer.h"
 #include "widgets/IconFont.h"
 #include "widgets/ToggleSwitch.h"
 
 #include <QShowEvent>
+#include <QDropEvent>
 
+#include <QAbstractItemView>
 #include <QButtonGroup>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -32,9 +38,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "Apotheosis.h"
 #include "config.h"
@@ -74,11 +83,17 @@ HotkeyPage::HotkeyPage(QWidget* parent)
 void HotkeyPage::setTargetPage(TargetPage* tp)
 {
     m_targetPage = tp;
+    if (tp)
+        connect(tp, &TargetPage::classFiltersChanged,
+                this, &HotkeyPage::onAimClassFiltersChanged);
 }
 
 void HotkeyPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    // Target 页可能在两次 showEvent 之间改动了 Aim 桶,进本页时兜底刷新一次。
+    rebuildAimClassList();
+    rebuildAddClassCombo();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -102,7 +117,7 @@ void HotkeyPage::buildLeftPanel(QWidget* parent)
     groupRow->addWidget(m_groupCombo, 1);
 
     const QString smallBtnSS =
-        "QPushButton{font-size:16px; color:#8E8E96; background:transparent;"
+        "QPushButton{font-size:16px; color:#71717A; background:transparent;"
         " border:1px solid rgba(0,0,0,0.08); border-radius:4px; padding:0;}"
         "QPushButton:hover{color:#5E6AD2; border-color:#5E6AD2;}";
 
@@ -133,7 +148,7 @@ void HotkeyPage::buildLeftPanel(QWidget* parent)
     addBtn->setFixedSize(24, 24);
     addBtn->setCursor(Qt::PointingHandCursor);
     addBtn->setStyleSheet(
-        "QPushButton{font-family:\"tabler-icons\"; font-size:16px; color:#8E8E96;"
+        "QPushButton{font-family:\"tabler-icons\"; font-size:16px; color:#71717A;"
         " background:transparent; border:none; padding:0;}"
         "QPushButton:hover{color:#5E6AD2;}");
     header->addWidget(m_leftTitle);
@@ -175,14 +190,14 @@ void HotkeyPage::buildRightPanel(QWidget* parent)
 
     auto* content = new QWidget;
     m_rightLayout = new QVBoxLayout(content);
-    m_rightLayout->setContentsMargins(12, 8, 12, 8);
+    m_rightLayout->setContentsMargins(16, 16, 16, 16);
     m_rightLayout->setSpacing(12);
 
     buildKeyBindCard();
     buildFovCard();
     buildDeadzoneCard();
     buildTriggerCard();
-    buildTargetSelectionCard();
+    buildAimClassCard();
     buildCrosshairCard();
     buildBossAimCard();
     buildAimPathCard();
@@ -320,9 +335,22 @@ void HotkeyPage::buildDeadzoneCard()
         0, 100, 0, dzSl, dzSp));
     m_deadzonePercent = dzSl;
 
+    m_lostTargetCacheFrames = new QSpinBox;
+    m_lostTargetCacheFrames->setRange(0, 240);
+    m_lostTargetCacheFrames->setValue(5);
+    m_lostTargetCacheFrames->setSuffix(QString::fromUtf8(u8" 帧"));
+    m_lostTargetCacheFrames->setMinimumHeight(30);
+    m_lostTargetCacheFrames->setToolTip(QString::fromUtf8(
+        u8"检测暂时丢失时保留同一目标的帧数。缓存期间停止移动和开火，"
+        u8"目标重现后以零导数重新接管；0 = 当帧释放。"));
+    cl->addWidget(FormKit::fieldRow(
+        QString::fromUtf8(u8"丢失目标缓存"), m_lostTargetCacheFrames));
+
     connect(m_deadzoneEnabled, &ToggleSwitch::toggled,
             this, [this] { saveUiToCurrentProfile(); });
     connect(dzSp, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this] { saveUiToCurrentProfile(); });
+    connect(m_lostTargetCacheFrames, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [this] { saveUiToCurrentProfile(); });
 
     m_rightLayout->addWidget(card);
@@ -351,110 +379,433 @@ void HotkeyPage::buildTriggerCard()
         return sp;
     };
 
-    m_triggerFireDelay    = makeSpin(0,    5000, QStringLiteral(" ms"));
-    m_triggerFireDuration = makeSpin(1,    5000, QStringLiteral(" ms"));
-    m_triggerFireInterval = makeSpin(0,    5000, QStringLiteral(" ms"));
-    m_triggerYPercent     = makeSpin(1,     100, QStringLiteral(" %"));
+    m_triggerFireDelay      = makeSpin(0,    5000, QStringLiteral(" ms"));
+    m_triggerFireDuration   = makeSpin(1,    5000, QStringLiteral(" ms"));
+    m_triggerFireInterval   = makeSpin(0,    5000, QStringLiteral(" ms"));
+    m_triggerYPercent       = makeSpin(1,     500, QStringLiteral(" %"));   // 上限 500% 支持预开火
+    m_triggerDelayJitter    = makeSpin(0,     500, QStringLiteral(" ms"));
+    m_triggerDurationJitter = makeSpin(0,     500, QStringLiteral(" ms"));
+    m_triggerIntervalJitter = makeSpin(0,     500, QStringLiteral(" ms"));
+    m_triggerSwitchCooldown = makeSpin(0,    5000, QStringLiteral(" ms"));
 
     cl->addWidget(FormKit::fieldRow(
         QStringLiteral("\xe5\xbb\xb6\xe8\xbf\x9f"),                   // 延迟
         m_triggerFireDelay));
     cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("\xe5\xbb\xb6\xe8\xbf\x9f\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 延迟抖动 ±
+        m_triggerDelayJitter));
+    cl->addWidget(FormKit::fieldRow(
         QStringLiteral("\xe6\x8c\x89\xe4\xbd\x8f\xe6\x97\xb6\xe9\x95\xbf"),  // 按住时长
         m_triggerFireDuration));
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("\xe6\x8c\x89\xe4\xbd\x8f\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 按住抖动 ±
+        m_triggerDurationJitter));
     cl->addWidget(FormKit::fieldRow(
         QStringLiteral("\xe5\x86\xb7\xe5\x8d\xb4"),                   // 冷却
         m_triggerFireInterval));
     cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("\xe5\x86\xb7\xe5\x8d\xb4\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 冷却抖动 ±
+        m_triggerIntervalJitter));
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("\xe8\xbd\xac\xe7\x81\xab\xe5\xbb\xb6\xe8\xbf\x9f"),           // 转火延迟
+        m_triggerSwitchCooldown));
+    cl->addWidget(FormKit::fieldRow(
         QStringLiteral("\xe5\x91\xbd\xe4\xb8\xad\xe5\x8c\xba"),       // 命中区
         m_triggerYPercent));
 
+    m_triggerYPercent->setToolTip(QStringLiteral(
+        "\xe5\x91\xbd\xe4\xb8\xad\xe5\x8c\xba\xe5\x8d\xa0 bbox \xe7\x99\xbe\xe5\x88\x86\xe6\xaf\x94\xef\xbc\x9a\n"
+        "100 = \xe6\x95\xb4\xe6\xa1\x86\xef\xbc\x9b\n"
+        "> 100 = \xe6\x89\xa9\xe5\xa4\xa7\xe5\x88\xb0 bbox \xe5\xa4\x96\xef\xbc\x88\xe9\xa2\x84\xe5\xbc\x80\xe7\x81\xab\xef\xbc\x89\xe3\x80\x82"));
+    m_triggerDelayJitter->setToolTip(QStringLiteral(
+        "\xe4\xb8\xba\xe5\xbb\xb6\xe8\xbf\x9f\xe5\x8a\xa0\xe4\xb8\x80\xe4\xb8\xaa \xc2\xb1N ms \xe7\x9a\x84\xe9\x9a\x8f\xe6\x9c\xba\xe6\x8a\x96\xe5\x8a\xa8\xef\xbc\x8c\xe7\xa0\xb4\xe9\x99\xa4\xe6\x9c\xba\xe6\xa2\xb0\xe6\x84\x9f\xe3\x80\x82"));
+    m_triggerSwitchCooldown->setToolTip(QStringLiteral(
+        "\xe7\x9b\xae\xe6\xa0\x87 track_id \xe5\x8f\x98\xe5\x8c\x96\xe6\x97\xb6\xe7\x9a\x84\xe8\xbd\xac\xe7\x81\xab\xe5\x86\xb7\xe5\x8d\xb4\xef\xbc\x8c\xe6\xb6\x88\xe9\x99\xa4\xe7\x9e\xac\xe5\x88\x87\xe6\x84\x9f\xe3\x80\x82"));
+
     connect(m_triggerEnabled, &ToggleSwitch::toggled,
             this, [this] { saveUiToCurrentProfile(); });
-    connect(m_triggerFireDelay, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
-    connect(m_triggerFireDuration, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
-    connect(m_triggerFireInterval, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
-    connect(m_triggerYPercent, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
+    auto wireInt = [this](QSpinBox* sp) {
+        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [this] { saveUiToCurrentProfile(); });
+    };
+    wireInt(m_triggerFireDelay);
+    wireInt(m_triggerFireDuration);
+    wireInt(m_triggerFireInterval);
+    wireInt(m_triggerYPercent);
+    wireInt(m_triggerDelayJitter);
+    wireInt(m_triggerDurationJitter);
+    wireInt(m_triggerIntervalJitter);
+    wireInt(m_triggerSwitchCooldown);
 
     m_rightLayout->addWidget(card);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Card: 目标选择 (3-slot target selection)
+// Card: 瞄准类别 (优先级排序 + 每类单独 y_offset / min_conf + 拖动换位)
 // ═══════════════════════════════════════════════════════════════════════════
 
-void HotkeyPage::buildTargetSelectionCard()
+void HotkeyPage::buildAimClassCard()
 {
-    auto* card = new CardWidget(
-        QStringLiteral("\xe7\x9b\xae\xe6\xa0\x87\xe9\x80\x89\xe6\x8b\xa9"),  // 目标选择
-        QStringLiteral("list-numbers"));
-    auto* cl = card->contentLayout();
+    m_aimClassCard = new CardWidget(
+        QStringLiteral("\xe7\x9e\x84\xe5\x87\x86\xe7\xb1\xbb\xe5\x88\xab (\xe4\xbc\x98\xe5\x85\x88\xe7\xba\xa7\xe6\x8e\x92\xe5\xba\x8f)"),  // 瞄准类别 (优先级排序)
+        QStringLiteral("target"));
+    auto* cl = m_aimClassCard->contentLayout();
 
-    // Helper: build one target slot
-    auto buildSlot = [&](const QString& header,
-                         QSpinBox*& classSpin,
-                         QSlider*& yTopSlider,
-                         QSlider*& yBotSlider,
-                         QSlider*& confSlider) {
-        auto* hdr = new QLabel(header);
-        hdr->setStyleSheet("color:#5E6AD2; font-size:12px; font-weight:600;");
-        cl->addWidget(hdr);
+    auto* hint = new QLabel(QString::fromUtf8(
+        u8"从「目标类别」页勾选「瞄准」的类别会出现在下方。"
+        u8"用 ▲ ▼ 调整优先级（顶部 = 最高），✕ 移除。"));
+    hint->setWordWrap(true);
+    hint->setProperty("class", "hint");
+    cl->addWidget(hint);
 
-        classSpin = new QSpinBox;
-        classSpin->setRange(0, 99);
-        classSpin->setMinimumHeight(30);
-        cl->addWidget(FormKit::fieldRow(
-            QStringLiteral("\xe7\xb1\xbb\xe5\x88\xab ID"),             // 类别 ID
-            classSpin));
+    // 优先级列表: 普通 QVBoxLayout 承载自定义行卡片。不再用 QListWidget +
+    // setItemWidget + InternalMove —— 那套会压扁行 / 横向溢出 / 拖拽后留空行。
+    // 换位改由每行的 ▲▼ 按钮完成, 高度天然贴合内容, 由外层页面统一滚动。
+    m_aimClassContainer = new QWidget;
+    m_aimClassLayout = new QVBoxLayout(m_aimClassContainer);
+    m_aimClassLayout->setContentsMargins(0, 0, 0, 0);
+    m_aimClassLayout->setSpacing(8);
+    cl->addWidget(m_aimClassContainer);
 
-        QSpinBox* ytSp = nullptr;
-        cl->addWidget(FormKit::sliderRow(
-            QStringLiteral("Y \xe9\xa1\xb6\xe9\x83\xa8 (%)"),         // Y 顶部 (%)
-            0, 100, 0, yTopSlider, ytSp));
+    // "+ 添加" 行
+    auto* addRow = new QHBoxLayout;
+    addRow->setSpacing(6);
+    m_addClassCombo = new QComboBox;
+    m_addClassCombo->setMinimumWidth(120);
+    m_addClassCombo->setMinimumHeight(30);
+    addRow->addWidget(m_addClassCombo, 1);
 
-        QSpinBox* ybSp = nullptr;
-        cl->addWidget(FormKit::sliderRow(
-            QStringLiteral("Y \xe5\xba\x95\xe9\x83\xa8 (%)"),         // Y 底部 (%)
-            0, 100, 100, yBotSlider, ybSp));
+    m_addClassBtn = new QPushButton(QStringLiteral("+ \xe6\xb7\xbb\xe5\x8a\xa0"));  // + 添加
+    m_addClassBtn->setFixedHeight(30);
+    m_addClassBtn->setCursor(Qt::PointingHandCursor);
+    addRow->addWidget(m_addClassBtn);
+    cl->addLayout(addRow);
 
-        QSpinBox* cfSp = nullptr;
-        cl->addWidget(FormKit::sliderRow(
-            QStringLiteral("\xe6\x9c\x80\xe5\xb0\x8f\xe7\xbd\xae\xe4\xbf\xa1\xe5\xba\xa6 (%)"),  // 最小置信度 (%)
-            0, 100, 0, confSlider, cfSp));
+    connect(m_addClassBtn, &QPushButton::clicked, this, [this] {
+        int ri = currentRuntimeIndex();
+        if (ri < 0) return;
+        int classId = m_addClassCombo->currentData().toInt();
+        if (classId < 0) return;
 
-        // Connect all to save
-        connect(classSpin, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [this] { saveUiToCurrentProfile(); });
-        connect(ytSp, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [this] { saveUiToCurrentProfile(); });
-        connect(ybSp, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [this] { saveUiToCurrentProfile(); });
-        connect(cfSp, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, [this] { saveUiToCurrentProfile(); });
+        {
+            std::lock_guard<std::recursive_mutex> lk(configMutex);
+            if (ri >= static_cast<int>(config.hotkeys.size())) return;
+            auto& ac = config.hotkeys[ri].aim_classes;
+            for (const auto& a : ac)
+                if (a.class_id == classId) return;   // 已存在
+            HotkeyAimClass entry;
+            entry.class_id = classId;
+            entry.y_offset = 0.65f;   // 1=框顶, 0=框底; 默认锁上半身/头颈
+            entry.y_offset_max = 0.65f;
+            // 默认预填 AI 页的全局置信度, 让新加类别的显示 = "跟随全局";
+            // 用户想收紧就上拉滑条, 拉到 0 → 视作再次退回全局跟随。
+            entry.min_conf = static_cast<float>(config.confidence_threshold);
+            ac.push_back(entry);
+        }
+
+        ConfigBridge::instance().markDirty();
+        rebuildAimClassList();
+        rebuildAddClassCombo();
+    });
+
+    m_rightLayout->addWidget(m_aimClassCard);
+}
+
+// ── Target 页把某类别切成 Aim 桶时会调这里,刷新可选下拉+当前列表 ──
+void HotkeyPage::onAimClassFiltersChanged()
+{
+    rebuildAimClassList();
+    rebuildAddClassCombo();
+}
+
+void HotkeyPage::rebuildAddClassCombo()
+{
+    if (!m_addClassCombo) return;
+    m_addClassCombo->clear();
+
+    int ri = currentRuntimeIndex();
+    if (ri < 0) {
+        if (m_addClassBtn) m_addClassBtn->setEnabled(false);
+        return;
+    }
+
+    std::set<int> alreadyAdded;
+    std::vector<std::pair<int, std::string>> aimCandidates;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri < static_cast<int>(config.hotkeys.size()))
+            for (const auto& a : config.hotkeys[ri].aim_classes)
+                alreadyAdded.insert(a.class_id);
+
+        for (const auto& cf : config.class_filters)
+            if (cf.bucket == ClassBucket::Aim)
+                aimCandidates.emplace_back(cf.class_id, cf.class_name);
+    }
+
+    for (auto& [cid, name] : aimCandidates) {
+        if (alreadyAdded.count(cid)) continue;
+        QString display = name.empty()
+            ? QStringLiteral("class_%1").arg(cid)
+            : QString::fromUtf8(name.c_str());
+        m_addClassCombo->addItem(QStringLiteral("[%1] %2").arg(cid).arg(display), cid);
+    }
+
+    if (m_addClassBtn) m_addClassBtn->setEnabled(m_addClassCombo->count() > 0);
+}
+
+void HotkeyPage::rebuildAimClassList()
+{
+    if (!m_aimClassLayout) return;
+
+    // 清空旧行。
+    while (m_aimClassLayout->count() > 0) {
+        auto* it = m_aimClassLayout->takeAt(0);
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
+    int ri = currentRuntimeIndex();
+    if (ri < 0) { rebuildAddClassCombo(); return; }
+
+    // 提取随机 Y 范围 + min_conf + 名字,顺便 purge 掉桶已不是 Aim 的旧条目。
+    struct Row { int cid; float yMin; float yMax; float c; QString name; };
+    std::vector<Row> rows;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) { rebuildAddClassCombo(); return; }
+
+        std::set<int> aimIds;
+        for (const auto& cf : config.class_filters)
+            if (cf.bucket == ClassBucket::Aim)
+                aimIds.insert(cf.class_id);
+
+        auto& aimClasses = config.hotkeys[ri].aim_classes;
+        aimClasses.erase(
+            std::remove_if(aimClasses.begin(), aimClasses.end(),
+                [&](const HotkeyAimClass& a) { return aimIds.find(a.class_id) == aimIds.end(); }),
+            aimClasses.end());
+
+        for (const auto& ac : aimClasses) {
+            QString name;
+            for (const auto& cf : config.class_filters)
+                if (cf.class_id == ac.class_id) {
+                    name = cf.class_name.empty()
+                        ? QStringLiteral("class_%1").arg(ac.class_id)
+                        : QString::fromUtf8(cf.class_name.c_str());
+                    break;
+                }
+            rows.push_back({ ac.class_id, ac.y_offset, ac.y_offset_max,
+                             ac.min_conf, name });
+        }
+    }
+
+    if (rows.empty()) {
+        auto* empty = new QLabel(QString::fromUtf8(
+            u8"（无瞄准类别 — 先在「目标类别」页把类别切到「瞄准」）"));
+        empty->setProperty("class", "hint");
+        empty->setWordWrap(true);
+        empty->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+        empty->setMinimumHeight(36);
+        m_aimClassLayout->addWidget(empty);
+        rebuildAddClassCombo();
+        return;
+    }
+
+    // 只读置信标签文本: raw<=0 → "全局"(回退 AI 页阈值), 否则显示 0.00~1.00。
+    auto confText = [](int raw) {
+        return raw <= 0 ? QString::fromUtf8(u8"全局")
+                        : QString::number(raw / 100.0, 'f', 2);
     };
 
-    buildSlot(QStringLiteral("\xe6\xa7\xbd\xe4\xbd\x8d 1 (\xe6\x9c\x80\xe9\xab\x98\xe4\xbc\x98\xe5\x85\x88\xe7\xba\xa7)"),  // 槽位 1 (最高优先级)
-              m_targetClass1, m_targetYTop1, m_targetYBot1, m_targetMinConf1);
-    buildSlot(QStringLiteral("\xe6\xa7\xbd\xe4\xbd\x8d 2"),                                                                     // 槽位 2
-              m_targetClass2, m_targetYTop2, m_targetYBot2, m_targetMinConf2);
-    buildSlot(QStringLiteral("\xe6\xa7\xbd\xe4\xbd\x8d 3"),                                                                     // 槽位 3
-              m_targetClass3, m_targetYTop3, m_targetYBot3, m_targetMinConf3);
+    const int total = static_cast<int>(rows.size());
+    for (int idx = 0; idx < total; ++idx) {
+        const Row& r = rows[idx];
+        const int classId = r.cid;
 
-    // Aim range
-    m_targetAimRange = new QSpinBox;
-    m_targetAimRange->setRange(1, 9999);
-    m_targetAimRange->setMinimumHeight(30);
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe6\x9c\x80\xe5\xa4\xa7\xe7\x9e\x84\xe5\x87\x86\xe8\xb7\x9d\xe7\xa6\xbb (px)"),  // 最大瞄准距离 (px)
-        m_targetAimRange));
-    connect(m_targetAimRange, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
+        auto* rowFrame = new QFrame;
+        rowFrame->setObjectName("aimRow");
+        rowFrame->setStyleSheet(
+            "QFrame#aimRow{background:#FAFAFB; border:1px solid rgba(0,0,0,0.06);"
+            " border-radius:8px;}");
+        auto* rl = new QVBoxLayout(rowFrame);
+        rl->setContentsMargins(12, 8, 10, 10);
+        rl->setSpacing(8);
 
-    m_rightLayout->addWidget(card);
+        // ── 第一行: #优先级 + 类名 + 上移 / 下移 / 删除 ──
+        auto* top = new QHBoxLayout;
+        top->setSpacing(8);
+
+        auto* priLabel = new QLabel(QStringLiteral("#%1").arg(idx + 1));
+        priLabel->setFixedWidth(30);
+        priLabel->setStyleSheet("color:#5E6AD2; font-size:13px; font-weight:600; border:none;");
+        top->addWidget(priLabel);
+
+        auto* nameLabel = new QLabel(QStringLiteral("[%1] %2").arg(r.cid).arg(r.name));
+        nameLabel->setStyleSheet("color:#3C3C44; font-size:13px; font-weight:500; border:none;");
+        top->addWidget(nameLabel, 1);
+
+        auto makeIconBtn = [](const QString& glyph, const QString& color,
+                              const QString& hover, const QString& tip) {
+            auto* b = new QPushButton(glyph);
+            b->setFixedSize(26, 26);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setToolTip(tip);
+            b->setStyleSheet(QStringLiteral(
+                "QPushButton{color:%1; background:transparent;"
+                " border:1px solid rgba(0,0,0,0.08); border-radius:6px;"
+                " font-size:13px; padding:0;}"
+                "QPushButton:hover{color:%2; border-color:%2;}"
+                "QPushButton:disabled{color:#C8C8CE; border-color:rgba(0,0,0,0.05);}")
+                .arg(color, hover));
+            return b;
+        };
+
+        auto* upBtn = makeIconBtn(QStringLiteral("▲"), QStringLiteral("#71717A"),
+                                  QStringLiteral("#5E6AD2"), QString::fromUtf8(u8"上移（提高优先级）"));
+        auto* downBtn = makeIconBtn(QStringLiteral("▼"), QStringLiteral("#71717A"),
+                                    QStringLiteral("#5E6AD2"), QString::fromUtf8(u8"下移（降低优先级）"));
+        auto* delBtn = makeIconBtn(QStringLiteral("✕"), QStringLiteral("#D25A5A"),
+                                   QStringLiteral("#B83232"), QString::fromUtf8(u8"移除"));
+        upBtn->setEnabled(idx > 0);
+        downBtn->setEnabled(idx < total - 1);
+        top->addWidget(upBtn);
+        top->addWidget(downBtn);
+        top->addWidget(delBtn);
+        rl->addLayout(top);
+
+        // ── 第二行:随机锁点范围。每次新锁定抽一次，锁定期间不重抽。 ──
+        auto* rangeRow = new QHBoxLayout;
+        rangeRow->setSpacing(8);
+
+        auto makeSlider = [](float v) {
+            auto* s = new QSlider(Qt::Horizontal);
+            s->setRange(0, 100);
+            s->setSingleStep(1);
+            s->setPageStep(5);
+            s->setValue(std::clamp(static_cast<int>(std::lround(v * 100.0f)), 0, 100));
+            s->setMinimumWidth(80);
+            return s;
+        };
+        auto makeOffsetSpin = [](float value) {
+            auto* sp = new QDoubleSpinBox;
+            sp->setRange(0.0, 1.0);
+            sp->setSingleStep(0.01);
+            sp->setDecimals(2);
+            sp->setValue(value);
+            sp->setMinimumHeight(28);
+            sp->setMinimumWidth(76);
+            return sp;
+        };
+
+        auto* yLbl = new QLabel(QString::fromUtf8(u8"随机锁点 Y"));
+        yLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        auto* yMinSpin = makeOffsetSpin(r.yMin);
+        auto* yMaxSpin = makeOffsetSpin(r.yMax);
+        yMinSpin->setToolTip(QString::fromUtf8(u8"范围下限：1=框顶，0.5=中心，0=框底"));
+        yMaxSpin->setToolTip(QString::fromUtf8(u8"范围上限：每次新锁定在上下限之间随机一次"));
+        rangeRow->addWidget(yLbl);
+        rangeRow->addWidget(yMinSpin);
+        rangeRow->addWidget(new QLabel(QString::fromUtf8(u8"—")));
+        rangeRow->addWidget(yMaxSpin);
+        rangeRow->addStretch();
+        rl->addLayout(rangeRow);
+
+        // ── 第三行:最低置信度。 ──
+        auto* bottom = new QHBoxLayout;
+        bottom->setSpacing(10);
+        auto* cLbl = new QLabel(QString::fromUtf8(u8"置信"));
+        cLbl->setFixedWidth(32);
+        cLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        auto* cSlider = makeSlider(r.c);
+        cSlider->setToolTip(QString::fromUtf8(
+            u8"最低置信度：低于此值的框不会夺锁。0 = 跟随 AI 页全局阈值。"));
+        auto* cVal = new QLabel(confText(cSlider->value()));
+        cVal->setFixedWidth(38);
+        cVal->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        cVal->setStyleSheet("color:#3C3C44; font-size:12px; border:none;");
+        bottom->addWidget(cLbl);
+        bottom->addWidget(cSlider, 1);
+        bottom->addWidget(cVal);
+
+        rl->addLayout(bottom);
+        m_aimClassLayout->addWidget(rowFrame);
+
+        // ── 回调 ──
+        auto persistRange = [this, classId, yMinSpin, yMaxSpin](bool minChanged) {
+            if (minChanged && yMinSpin->value() > yMaxSpin->value())
+                yMaxSpin->setValue(yMinSpin->value());
+            else if (!minChanged && yMaxSpin->value() < yMinSpin->value())
+                yMinSpin->setValue(yMaxSpin->value());
+
+            int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk2(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                for (auto& a : config.hotkeys[ri2].aim_classes)
+                    if (a.class_id == classId) {
+                        a.y_offset = static_cast<float>(yMinSpin->value());
+                        a.y_offset_max = static_cast<float>(yMaxSpin->value());
+                        break;
+                    }
+            }
+            ConfigBridge::instance().markDirty();
+        };
+        connect(yMinSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(true); });
+        connect(yMaxSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(false); });
+
+        connect(cSlider, &QSlider::valueChanged, this, [this, classId, cVal, confText](int raw) {
+            const float v = static_cast<float>(raw) / 100.0f;
+            cVal->setText(confText(raw));
+            int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk2(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                for (auto& a : config.hotkeys[ri2].aim_classes)
+                    if (a.class_id == classId) { a.min_conf = v; break; }
+            }
+            ConfigBridge::instance().markDirty();
+        });
+
+        connect(upBtn, &QPushButton::clicked, this, [this, idx] { moveAimClass(idx, idx - 1); });
+        connect(downBtn, &QPushButton::clicked, this, [this, idx] { moveAimClass(idx, idx + 1); });
+        connect(delBtn, &QPushButton::clicked, this, [this, classId] {
+            int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk2(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                auto& ac2 = config.hotkeys[ri2].aim_classes;
+                ac2.erase(std::remove_if(ac2.begin(), ac2.end(),
+                    [classId](const HotkeyAimClass& a) { return a.class_id == classId; }),
+                    ac2.end());
+            }
+            ConfigBridge::instance().markDirty();
+            rebuildAimClassList();
+            rebuildAddClassCombo();
+        });
+    }
+
+    rebuildAddClassCombo();
+}
+
+void HotkeyPage::moveAimClass(int from, int to)
+{
+    int ri = currentRuntimeIndex();
+    if (ri < 0) return;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) return;
+        auto& ac = config.hotkeys[ri].aim_classes;
+        const int n = static_cast<int>(ac.size());
+        if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+        std::swap(ac[from], ac[to]);
+    }
+    ConfigBridge::instance().markDirty();
+    rebuildAimClassList();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -474,10 +825,10 @@ void HotkeyPage::buildCrosshairCard()
         QStringLiteral("\xe5\x90\xaf\xe7\x94\xa8\xe9\x95\xad\xe5\xb0\x84\xe6\x89\xbe\xe8\x89\xb2 (\xe6\xad\xa4\xe7\x83\xad\xe9\x94\xae)"),
         false, m_laserDetect));
     cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("启用寻光检测 (此热键)"),
+        QString::fromUtf8(u8"启用寻光检测（此热键）"),
         false, m_flashlightDetect));
     cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("启用玻璃过滤 (此热键)"),
+        QString::fromUtf8(u8"启用玻璃过滤（此热键）"),
         false, m_glassFilter));
 
     connect(m_crosshairDetect,  &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
@@ -499,76 +850,13 @@ void HotkeyPage::buildBossAimCard()
         QStringLiteral("adjustments"));
     auto* cl = card->contentLayout();
 
-    // 移动控制器选择 (mover_kind): 顶部下拉。下面 QStackedWidget 跟着切。
+    m_moverParamStack = new AdaptiveStack;
     m_moverKindCombo = new QComboBox;
-    m_moverKindCombo->setMinimumHeight(30);
-    m_moverKindCombo->addItem(
-        QStringLiteral("\xe5\xbe\xae\xe6\xbe\x9c"));        // 微澜
-    m_moverKindCombo->addItem(
-        QStringLiteral("\xe7\x96\xbe\xe9\xa3\x8e"));        // 疾风
-    m_moverKindCombo->addItem(
-        QStringLiteral("\xe5\xa4\xa9\xe6\x9e\xa2"));        // 天枢
-    m_moverKindCombo->setToolTip(QStringLiteral(
-        "\xe7\xa7\xbb\xe5\x8a\xa8\xe6\x8e\xa7\xe5\x88\xb6\xe5\x99\xa8\xef\xbc\x9a\n"
-        "\xe5\xbe\xae\xe6\xbe\x9c\xef\xbc\x9a" "ART \xe9\xbb\x98\xe8\xae\xa4\xe8\xb7\xaf\xe5\xbe\x84(EMA \xe5\xb9\xb3\xe6\xbb\x91)\n"
-        "\xe7\x96\xbe\xe9\xa3\x8e\xef\xbc\x9a\xe4\xbd\x8d\xe7\xbd\xae\xe5\xbc\x8f PID + \xe5\xaf\xbc\xe6\x95\xb0\xe9\xa2\x84\xe6\xb5\x8b\n"
-        "\xe5\xa4\xa9\xe6\x9e\xa2\xef\xbc\x9a\xe7\xbb\x8f\xe5\x85\xb8\xe5\x85\xa8\xe5\x8f\x82 PID + \xe5\x8a\xa8\xe6\x80\x81 KP + EMA/Kalman"));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe7\xa7\xbb\xe5\x8a\xa8\xe6\x8e\xa7\xe5\x88\xb6\xe5\x99\xa8"),
-        m_moverKindCombo));
+    m_moverKindCombo->addItem(QString::fromUtf8(u8"天枢"));
+    m_moverKindCombo->addItem(QString::fromUtf8(u8"摇光"));
+    cl->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"控制算法"), m_moverKindCombo));
 
-    m_moverParamStack = new QStackedWidget;
-
-    // ── Page 0: 微澜 (Smooth) ART 三参数 ──
-    {
-        auto* page = new QWidget;
-        auto* pl = new QVBoxLayout(page);
-        pl->setContentsMargins(0, 0, 0, 0);
-        pl->setSpacing(6);
-
-        QSlider* sxSl = nullptr;
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe7\x81\xb5\xe6\x95\x8f\xe5\xba\xa6 X"),  // 灵敏度 X
-            0.0, 2.0, 0.6, 0.01, 2, sxSl, m_speedXSpin));
-
-        QSlider* sySl = nullptr;
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe7\x81\xb5\xe6\x95\x8f\xe5\xba\xa6 Y"),  // 灵敏度 Y
-            0.0, 2.0, 0.6, 0.01, 2, sySl, m_speedYSpin));
-
-        QSlider* dzSl = nullptr;
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe6\xad\xbb\xe5\x8c\xba"),                // 死区
-            0.0, 20.0, 2.0, 0.1, 1, dzSl, m_deadZoneSpin));
-
-        m_moverParamStack->addWidget(page);
-    }
-
-    // ── Page 1: 疾风 (Predictive) ──
-    {
-        auto* page = new QWidget;
-        auto* pl = new QVBoxLayout(page);
-        pl->setContentsMargins(0, 0, 0, 0);
-        pl->setSpacing(6);
-
-        QSlider* s = nullptr;
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe7\x81\xb5\xe6\x95\x8f\xe5\xba\xa6 X"),  // 灵敏度 X (Kp X)
-            0.0, 5.0, 0.6, 0.01, 2, s, m_predKpXSpin));
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe7\x81\xb5\xe6\x95\x8f\xe5\xba\xa6 Y"),  // 灵敏度 Y (Kp Y)
-            0.0, 5.0, 0.6, 0.01, 2, s, m_predKpYSpin));
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe9\x98\xbb\xe5\xb0\xbc"),                // 阻尼 (Kd)
-            0.0, 1.0, 0.10, 0.001, 3, s, m_predKdSpin));
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe6\x9d\x83\xe9\x87\x8d"),  // 预测权重
-            0.0, 2.0, 0.5, 0.01, 2, s, m_predPwSpin));
-
-        m_moverParamStack->addWidget(page);
-    }
-
-    // ── Page 2: 天枢 (Classic) — 经典全参 PID ──
+    // ── Page 0: 天枢 (Classic) — 经典全参 PID ──
     {
         auto* page = new QWidget;
         auto* pl = new QVBoxLayout(page);
@@ -580,9 +868,9 @@ void HotkeyPage::buildBossAimCard()
         m_clsAimModeCombo->addItem(QStringLiteral("\xe7\xae\x80\xe5\x8d\x95"));  // 简单
         m_clsAimModeCombo->addItem(QStringLiteral("\xe9\xab\x98\xe7\xba\xa7"));  // 高级
         pl->addWidget(FormKit::fieldRow(
-            QStringLiteral("PID \xe6\xa8\xa1\xe5\xbc\x8f"), m_clsAimModeCombo));  // PID 模式
+            QStringLiteral("\xe8\xb0\x83\xe6\x8e\xa7\xe6\xa8\xa1\xe5\xbc\x8f"), m_clsAimModeCombo));  // 调控模式
 
-        m_clsAimModeStack = new QStackedWidget;
+        m_clsAimModeStack = new AdaptiveStack;
 
         // ── 简单模式 ──
         {
@@ -603,10 +891,10 @@ void HotkeyPage::buildBossAimCard()
                     0, 10000, 0, sl_, m_clsTransitionMs));
             }
             sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("KI"),
+                QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86"),      // 积分
                 0.0, 1.0, 0.0, 0.001, 3, s, m_clsSimpleKi));
             sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("KD"),
+                QStringLiteral("\xe5\xbe\xae\xe5\x88\x86"),      // 微分
                 0.0, 2.0, 0.0, 0.01, 2, s, m_clsSimpleKd));
             m_clsAimModeStack->addWidget(sp);
         }
@@ -620,30 +908,44 @@ void HotkeyPage::buildBossAimCard()
             QSlider* s = nullptr;
 
             al->addWidget(new QLabel(QStringLiteral("── X \xe8\xbd\xb4 ──")));  // ── X 轴 ──
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KP Min X"), 0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinX));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KP Max X"), 0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxX));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KI X"),     0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiX));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KD X"),     0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdX));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("I Max X"),  0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxX));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("P Factor X"), 0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorX));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xb0\x8f X"),
+                0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinX));   // 比例最小 X
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xa4\xa7 X"),
+                0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxX));   // 比例最大 X
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86 X"),
+                0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiX));     // 积分 X
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe5\xbe\xae\xe5\x88\x86 X"),
+                0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdX));      // 微分 X
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86\xe4\xb8\x8a\xe9\x99\x90 X"),
+                0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxX));   // 积分上限 X
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9b\xb2\xe7\x8e\x87 X"),
+                0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorX)); // 比例曲率 X
             {   QSlider* sl_ = nullptr;
                 al->addWidget(FormKit::sliderRow(
-                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4 KP X(ms)"), 0, 10000, 0, sl_, m_clsTimeX));  // 时间 KP X(ms)
+                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe6\xb8\x90\xe5\x8f\x98 X(ms)"),
+                    0, 10000, 0, sl_, m_clsTimeX));  // 时间渐变 X(ms)
             }
             m_clsTimeDynX = new ToggleSwitch;
             al->addWidget(FormKit::fieldRow(
                 QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe5\x8a\xa8\xe6\x80\x81 X"), m_clsTimeDynX));  // 时间动态 X
 
             al->addWidget(new QLabel(QStringLiteral("── Y \xe8\xbd\xb4 ──")));  // ── Y 轴 ──
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KP Min Y"), 0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KP Max Y"), 0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KI Y"),     0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("KD Y"),     0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("I Max Y"),  0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("P Factor Y"), 0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xb0\x8f Y"),
+                0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xa4\xa7 Y"),
+                0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86 Y"),
+                0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe5\xbe\xae\xe5\x88\x86 Y"),
+                0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86\xe4\xb8\x8a\xe9\x99\x90 Y"),
+                0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxY));
+            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9b\xb2\xe7\x8e\x87 Y"),
+                0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorY));
             {   QSlider* sl_ = nullptr;
                 al->addWidget(FormKit::sliderRow(
-                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4 KP Y(ms)"), 0, 10000, 0, sl_, m_clsTimeY));
+                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe6\xb8\x90\xe5\x8f\x98 Y(ms)"),
+                    0, 10000, 0, sl_, m_clsTimeY));  // 时间渐变 Y(ms)
             }
             m_clsTimeDynY = new ToggleSwitch;
             al->addWidget(FormKit::fieldRow(
@@ -655,9 +957,9 @@ void HotkeyPage::buildBossAimCard()
 
         // 预测
         m_clsPredModeCombo = new QComboBox;
-        m_clsPredModeCombo->addItem(QStringLiteral("\xe6\x97\xa0"));     // 无
-        m_clsPredModeCombo->addItem(QStringLiteral("EMA"));
-        m_clsPredModeCombo->addItem(QStringLiteral("Kalman"));
+        m_clsPredModeCombo->addItem(QStringLiteral("\xe6\x97\xa0"));                                // 无
+        m_clsPredModeCombo->addItem(QStringLiteral("\xe6\x8c\x87\xe6\x95\xb0\xe5\xb9\xb3\xe6\xbb\x91"));  // 指数平滑 (EMA)
+        m_clsPredModeCombo->addItem(QStringLiteral("\xe5\x8d\xa1\xe5\xb0\x94\xe6\x9b\xbc"));            // 卡尔曼
         pl->addWidget(FormKit::fieldRow(
             QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe6\xa8\xa1\xe5\xbc\x8f"), m_clsPredModeCombo));  // 预测模式
 
@@ -675,11 +977,18 @@ void HotkeyPage::buildBossAimCard()
             auto* kl = new QVBoxLayout(m_clsKalmanContainer);
             kl->setContentsMargins(0, 0, 0, 0);
             kl->setSpacing(6);
-            kl->addWidget(FormKit::sliderRowD(QStringLiteral("Q Pos"),       0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQPos));
-            kl->addWidget(FormKit::sliderRowD(QStringLiteral("Q Vel"),       0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQVel));
-            kl->addWidget(FormKit::sliderRowD(QStringLiteral("R Obs"),       0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanRObs));
             kl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("Lookahead(ms)"), 0.0, 100.0, 2.0, 0.1, 1, s, m_clsKalmanLookahead));
+                QStringLiteral("\xe4\xbd\x8d\xe7\xbd\xae\xe5\x99\xaa\xe5\xa3\xb0"),  // 位置噪声
+                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQPos));
+            kl->addWidget(FormKit::sliderRowD(
+                QStringLiteral("\xe9\x80\x9f\xe5\xba\xa6\xe5\x99\xaa\xe5\xa3\xb0"),  // 速度噪声
+                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQVel));
+            kl->addWidget(FormKit::sliderRowD(
+                QStringLiteral("\xe8\xa7\x82\xe6\xb5\x8b\xe5\x99\xaa\xe5\xa3\xb0"),  // 观测噪声
+                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanRObs));
+            kl->addWidget(FormKit::sliderRowD(
+                QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe6\x97\xb6\xe9\x95\xbf(ms)"),  // 预测时长(ms)
+                0.0, 100.0, 2.0, 0.1, 1, s, m_clsKalmanLookahead));
         }
         pl->addWidget(m_clsKalmanContainer);
 
@@ -694,16 +1003,47 @@ void HotkeyPage::buildBossAimCard()
         m_moverParamStack->addWidget(page);
     }
 
+    // ── Page 1: 摇光 — 连续 dt 自适应 PID + 预测 ──
+    {
+        auto* page = new QWidget;
+        auto* pl = new QVBoxLayout(page);
+        pl->setContentsMargins(0, 0, 0, 0);
+        pl->setSpacing(6);
+        QSlider* s = nullptr;
+        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"拉枪速度 X"),
+            0.0, 100.0, 60.0, 1.0, 0, s, m_ygPullSpeedX));
+        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"拉枪速度 Y"),
+            0.0, 100.0, 60.0, 1.0, 0, s, m_ygPullSpeedY));
+        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"跟踪强度"),
+            0.0, 100.0, 65.0, 1.0, 0, s, m_ygTracking));
+        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"预测时长 (ms)"),
+            0.0, 100.0, 25.0, 1.0, 0, s, m_ygPredictionMs));
+        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"稳定性"),
+            0.0, 100.0, 55.0, 1.0, 0, s, m_ygStability));
+        auto* note = new QLabel(QString::fromUtf8(
+            u8"预测时长用于摇光的目标运动预测；扳机继续使用原有目标锚点。"));
+        note->setWordWrap(true);
+        pl->addWidget(note);
+        m_moverParamStack->addWidget(page);
+    }
+
     cl->addWidget(m_moverParamStack);
 
-    // ── Wiring: combo 联动 stack + 写回 profile ──
-    connect(m_moverKindCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-                if (idx < 0) idx = 0;
-                if (idx > 2) idx = 2;
-                m_moverParamStack->setCurrentIndex(idx);
-                saveUiToCurrentProfile();
-            });
+    // ── Y 力度百分比(所有 mover 通用,应用于最终 dy)──
+    m_yStrengthPercent = new QSpinBox;
+    m_yStrengthPercent->setRange(1, 500);
+    m_yStrengthPercent->setSuffix(QStringLiteral(" %"));
+    m_yStrengthPercent->setMinimumHeight(30);
+    m_yStrengthPercent->setValue(100);
+    m_yStrengthPercent->setToolTip(QStringLiteral(
+        "Y \xe8\xbd\xb4\xe5\x8a\x9b\xe5\xba\xa6\xef\xbc\x9a\n"
+        "100 = \xe5\x8e\x9f\xe6\xa0\xb7\xef\xbc\x9b\n"
+        "< 100 = \xe5\x89\x8a\xe5\xbc\xb1\xe5\x9e\x82\xe7\x9b\xb4\xe5\x88\x86\xe9\x87\x8f\xef\xbc\x8c\xe5\xbc\xb9\xe9\x81\x93\xe6\x9b\xb4\"\xe9\xa3\x98\"\xef\xbc\x88\xe8\xbf\x91\xe4\xba\xba\xe6\x89\x8b\xe6\x84\x9f\xef\xbc\x89\xe3\x80\x82"));
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("Y \xe5\x8a\x9b\xe5\xba\xa6"),  // Y 力度
+        m_yStrengthPercent));
+    connect(m_yStrengthPercent, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this] { saveUiToCurrentProfile(); });
 
     auto wireD = [this](QDoubleSpinBox* sp) {
         connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -721,15 +1061,13 @@ void HotkeyPage::buildBossAimCard()
         connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
     };
-    // 微澜
-    wireD(m_speedXSpin);
-    wireD(m_speedYSpin);
-    wireD(m_deadZoneSpin);
-    // 疾风
-    wireD(m_predKpXSpin);
-    wireD(m_predKpYSpin);
-    wireD(m_predKdSpin);
-    wireD(m_predPwSpin);
+    connect(m_moverKindCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+                m_moverParamStack->setCurrentIndex(std::clamp(idx, 0, 1));
+                saveUiToCurrentProfile();
+            });
+    wireD(m_ygPullSpeedX); wireD(m_ygPullSpeedY); wireD(m_ygTracking);
+    wireD(m_ygPredictionMs); wireD(m_ygStability);
     // 天枢
     connect(m_clsAimModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
@@ -750,13 +1088,28 @@ void HotkeyPage::buildBossAimCard()
     connect(m_clsPredModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
                 m_clsKalmanContainer->setVisible(idx == 2);
+                // 显隐改变了天枢页高度, 兜底通知外层自适应 stack 重新取尺寸。
+                m_moverParamStack->updateGeometry();
                 saveUiToCurrentProfile();
             });
     wireD(m_clsVelLead); wireT(m_clsIndependentY);
     wireD(m_clsKalmanQPos); wireD(m_clsKalmanQVel);
     wireD(m_clsKalmanRObs); wireD(m_clsKalmanLookahead);
-    wireT(m_clsDeadzoneEnabled); wireD(m_clsDeadzonePercent);
-
+    // 天枢页内只是共享死区的镜像，双向同步到唯一数据源，避免保存时
+    // 被通用死区卡覆盖而看似“控件无效”。
+    connect(m_clsDeadzoneEnabled, &ToggleSwitch::toggled,
+            this, [this](bool on) {
+                if (m_deadzoneEnabled) m_deadzoneEnabled->setChecked(on);
+            });
+    connect(m_clsDeadzonePercent, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this](double value) {
+                if (m_deadzonePercent)
+                    m_deadzonePercent->setValue(static_cast<int>(std::lround(value)));
+            });
+    connect(m_deadzoneEnabled, &ToggleSwitch::toggled,
+            m_clsDeadzoneEnabled, &ToggleSwitch::setChecked);
+    connect(m_deadzonePercent, &QSlider::valueChanged,
+            this, [this](int value) { m_clsDeadzonePercent->setValue(value); });
     m_rightLayout->addWidget(card);
 }
 
@@ -820,6 +1173,11 @@ void HotkeyPage::buildAimPathCard()
 
     cl->addWidget(m_aimPathEditorStack);
 
+    auto* neuralTrainButton = new QPushButton(QString::fromUtf8(u8"神经网络训练曲线"));
+    neuralTrainButton->setToolTip(QString::fromUtf8(
+        u8"通过多轮随机目标鼠标移动，学习你的平均轨迹并生成自定义曲线。"));
+    cl->addWidget(neuralTrainButton);
+
     // ── Wiring ──
     auto onModeChanged = [this](int id) {
         if (id < 0) id = 0;
@@ -835,8 +1193,29 @@ void HotkeyPage::buildAimPathCard()
             });
     connect(m_aimPathFreehand, &FreehandCurveEditor::curveChanged,
             this, [this](const std::array<float, FreehandCurveEditor::kSampleCount>&) {
+                m_neuralCurveActive = false;
+                m_neuralCurveWeights.fill(0.0f);
                 saveUiToCurrentProfile();
             });
+    connect(neuralTrainButton, &QPushButton::clicked, this, [this] {
+        auto* trainer = new NeuralCurveTrainerDialog(this);
+        trainer->setAttribute(Qt::WA_DeleteOnClose);
+        connect(trainer, &NeuralCurveTrainerDialog::curveTrained,
+                this, [this](const std::array<float, NeuralCurveTrainerDialog::kSampleCount>& samples,
+                             const std::array<float, 25>& weights) {
+                    std::array<float, FreehandCurveEditor::kSampleCount> curve{};
+                    std::copy(samples.begin(), samples.end(), curve.begin());
+                    m_aimPathFreehand->setSamples(curve);
+                    m_aimPathModeCustom->setChecked(true);
+                    m_aimPathEditorStack->setCurrentIndex(2);
+                    m_neuralCurveActive = true;
+                    m_neuralCurveWeights = weights;
+                    saveUiToCurrentProfile();
+                });
+        trainer->show();
+        trainer->raise();
+        trainer->activateWindow();
+    });
 
     m_rightLayout->addWidget(card);
 }
@@ -1002,18 +1381,14 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_flashlightDetect->setChecked(hp.flashlight_detect_enabled);
     m_glassFilter->setChecked(hp.glass_filter_enabled);
 
-    {
-        const int mk = std::clamp(hp.mover_kind, 0, 2);
-        m_moverKindCombo->setCurrentIndex(mk);
-        m_moverParamStack->setCurrentIndex(mk);
-    }
-    m_speedXSpin->setValue(static_cast<double>(hp.speed_x));
-    m_speedYSpin->setValue(static_cast<double>(hp.speed_y));
-    m_deadZoneSpin->setValue(static_cast<double>(hp.dead_zone_px));
-    m_predKpXSpin->setValue(static_cast<double>(hp.predictive_kp_x));
-    m_predKpYSpin->setValue(static_cast<double>(hp.predictive_kp_y));
-    m_predKdSpin->setValue(static_cast<double>(hp.predictive_kd));
-    m_predPwSpin->setValue(static_cast<double>(hp.predictive_pred_weight));
+    m_moverKindCombo->setCurrentIndex(std::clamp(hp.mover_kind, 0, 1));
+    m_moverParamStack->setCurrentIndex(std::clamp(hp.mover_kind, 0, 1));
+    m_ygPullSpeedX->setValue(hp.yaoguang_pull_speed_x);
+    m_ygPullSpeedY->setValue(hp.yaoguang_pull_speed_y);
+    m_ygTracking->setValue(hp.yaoguang_tracking);
+    m_ygPredictionMs->setValue(hp.yaoguang_prediction_ms);
+    m_ygStability->setValue(hp.yaoguang_stability);
+
     // 天枢
     m_clsAimModeCombo->setCurrentIndex(std::clamp(hp.classic_aim_mode, 0, 1));
     m_clsAimModeStack->setCurrentIndex(std::clamp(hp.classic_aim_mode, 0, 1));
@@ -1046,12 +1421,13 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_clsKalmanRObs->setValue(static_cast<double>(hp.classic_kalman_r_obs));
     m_clsKalmanLookahead->setValue(static_cast<double>(hp.classic_kalman_lookahead));
     m_clsKalmanContainer->setVisible(hp.classic_prediction_mode == 2);
-    m_clsDeadzoneEnabled->setChecked(hp.classic_deadzone_enabled);
-    m_clsDeadzonePercent->setValue(static_cast<double>(hp.classic_deadzone_percent));
+    m_clsDeadzoneEnabled->setChecked(hp.deadzone_enabled);
+    m_clsDeadzonePercent->setValue(static_cast<double>(hp.deadzone_percent));
 
     // ── Deadzone ──
     m_deadzoneEnabled->setChecked(hp.deadzone_enabled);
     m_deadzonePercent->setValue(static_cast<int>(hp.deadzone_percent));
+    m_lostTargetCacheFrames->setValue(hp.lost_target_cache_frames);
 
     // ── Trigger ──
     m_triggerEnabled->setChecked(hp.trigger_enabled);
@@ -1059,21 +1435,17 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_triggerFireDuration->setValue(hp.trigger_fire_duration);
     m_triggerFireInterval->setValue(hp.trigger_fire_interval);
     m_triggerYPercent->setValue(hp.trigger_y_percent);
+    m_triggerDelayJitter->setValue(hp.trigger_delay_jitter_ms);
+    m_triggerDurationJitter->setValue(hp.trigger_duration_jitter_ms);
+    m_triggerIntervalJitter->setValue(hp.trigger_interval_jitter_ms);
+    m_triggerSwitchCooldown->setValue(hp.trigger_switch_cooldown_ms);
+    m_yStrengthPercent->setValue(hp.y_strength_percent);
 
-    // ── Target selection ──
-    m_targetClass1->setValue(hp.target_class_1);
-    m_targetYTop1->setValue(static_cast<int>(hp.target_y_top_1 * 100.0f));
-    m_targetYBot1->setValue(static_cast<int>(hp.target_y_bot_1 * 100.0f));
-    m_targetMinConf1->setValue(static_cast<int>(hp.target_min_conf_1 * 100.0f));
-    m_targetClass2->setValue(hp.target_class_2);
-    m_targetYTop2->setValue(static_cast<int>(hp.target_y_top_2 * 100.0f));
-    m_targetYBot2->setValue(static_cast<int>(hp.target_y_bot_2 * 100.0f));
-    m_targetMinConf2->setValue(static_cast<int>(hp.target_min_conf_2 * 100.0f));
-    m_targetClass3->setValue(hp.target_class_3);
-    m_targetYTop3->setValue(static_cast<int>(hp.target_y_top_3 * 100.0f));
-    m_targetYBot3->setValue(static_cast<int>(hp.target_y_bot_3 * 100.0f));
-    m_targetMinConf3->setValue(static_cast<int>(hp.target_min_conf_3 * 100.0f));
-    m_targetAimRange->setValue(hp.target_aim_range);
+    // ── Target selection: aim_classes 列表 ──
+    // 通过 rebuildAimClassList() 重建 (需要读 config)。loadProfileToUi 已经
+    // 持有 configMutex, 而 rebuildAimClassList 会重新拿一次同一把递归锁,
+    // 这里直接调没问题。
+    rebuildAimClassList();
 
     // ── Aim trajectory ──
     {
@@ -1086,11 +1458,22 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
             hp.aim_path_bezier_cx2, hp.aim_path_bezier_cy2);
         std::array<float, FreehandCurveEditor::kSampleCount> samples{};
         samples.fill(0.0f);
-        for (int i = 0; i < FreehandCurveEditor::kSampleCount; ++i) {
-            if (i < static_cast<int>(hp.aim_path_custom_samples.size()))
-                samples[i] = hp.aim_path_custom_samples[i];
+        static const std::vector<float> kEmptyCurve;
+        const auto& source = hp.aim_path_custom_samples
+            ? *hp.aim_path_custom_samples : kEmptyCurve;
+        if (!source.empty()) {
+            for (int i = 0; i < FreehandCurveEditor::kSampleCount; ++i) {
+                const double pos = static_cast<double>(i) * (source.size() - 1)
+                                 / (FreehandCurveEditor::kSampleCount - 1);
+                const size_t i0 = static_cast<size_t>(std::floor(pos));
+                const size_t i1 = std::min(i0 + 1, source.size() - 1);
+                const double f = pos - static_cast<double>(i0);
+                samples[i] = static_cast<float>(source[i0] + (source[i1] - source[i0]) * f);
+            }
         }
         m_aimPathFreehand->setSamples(samples);
+        m_neuralCurveActive = hp.aim_path_neural_enabled;
+        m_neuralCurveWeights = hp.aim_path_neural_weights;
     }
 
     if (m_keyCombo) {
@@ -1125,14 +1508,12 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.laser_detect_enabled      = m_laserDetect->isChecked();
     hp.flashlight_detect_enabled = m_flashlightDetect->isChecked();
     hp.glass_filter_enabled      = m_glassFilter->isChecked();
-    hp.mover_kind      = std::clamp(m_moverKindCombo->currentIndex(), 0, 2);
-    hp.speed_x         = static_cast<float>(m_speedXSpin->value());
-    hp.speed_y         = static_cast<float>(m_speedYSpin->value());
-    hp.dead_zone_px    = static_cast<float>(m_deadZoneSpin->value());
-    hp.predictive_kp_x        = static_cast<float>(m_predKpXSpin->value());
-    hp.predictive_kp_y        = static_cast<float>(m_predKpYSpin->value());
-    hp.predictive_kd          = static_cast<float>(m_predKdSpin->value());
-    hp.predictive_pred_weight = static_cast<float>(m_predPwSpin->value());
+    hp.mover_kind = std::clamp(m_moverKindCombo->currentIndex(), 0, 1);
+    hp.yaoguang_pull_speed_x = static_cast<float>(m_ygPullSpeedX->value());
+    hp.yaoguang_pull_speed_y = static_cast<float>(m_ygPullSpeedY->value());
+    hp.yaoguang_tracking = static_cast<float>(m_ygTracking->value());
+    hp.yaoguang_prediction_ms = static_cast<float>(m_ygPredictionMs->value());
+    hp.yaoguang_stability = static_cast<float>(m_ygStability->value());
     // 天枢
     hp.classic_aim_mode = std::clamp(m_clsAimModeCombo->currentIndex(), 0, 1);
     hp.classic_simple_start_speed  = static_cast<float>(m_clsStartSpeed->value());
@@ -1163,12 +1544,13 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.classic_kalman_q_vel      = static_cast<float>(m_clsKalmanQVel->value());
     hp.classic_kalman_r_obs      = static_cast<float>(m_clsKalmanRObs->value());
     hp.classic_kalman_lookahead  = static_cast<float>(m_clsKalmanLookahead->value());
-    hp.classic_deadzone_enabled  = m_clsDeadzoneEnabled->isChecked();
-    hp.classic_deadzone_percent  = static_cast<float>(m_clsDeadzonePercent->value());
+    hp.deadzone_enabled  = m_clsDeadzoneEnabled->isChecked();
+    hp.deadzone_percent  = static_cast<float>(m_clsDeadzonePercent->value());
 
     // ── Deadzone ──
     hp.deadzone_enabled = m_deadzoneEnabled->isChecked();
     hp.deadzone_percent = static_cast<float>(m_deadzonePercent->value());
+    hp.lost_target_cache_frames = m_lostTargetCacheFrames->value();
 
     // ── Trigger ──
     hp.trigger_enabled       = m_triggerEnabled->isChecked();
@@ -1176,21 +1558,15 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.trigger_fire_duration = m_triggerFireDuration->value();
     hp.trigger_fire_interval = m_triggerFireInterval->value();
     hp.trigger_y_percent     = m_triggerYPercent->value();
+    hp.trigger_delay_jitter_ms    = m_triggerDelayJitter->value();
+    hp.trigger_duration_jitter_ms = m_triggerDurationJitter->value();
+    hp.trigger_interval_jitter_ms = m_triggerIntervalJitter->value();
+    hp.trigger_switch_cooldown_ms = m_triggerSwitchCooldown->value();
+    hp.y_strength_percent         = m_yStrengthPercent->value();
 
-    // ── Target selection ──
-    hp.target_class_1    = m_targetClass1->value();
-    hp.target_y_top_1    = m_targetYTop1->value() / 100.0f;
-    hp.target_y_bot_1    = m_targetYBot1->value() / 100.0f;
-    hp.target_min_conf_1 = m_targetMinConf1->value() / 100.0f;
-    hp.target_class_2    = m_targetClass2->value();
-    hp.target_y_top_2    = m_targetYTop2->value() / 100.0f;
-    hp.target_y_bot_2    = m_targetYBot2->value() / 100.0f;
-    hp.target_min_conf_2 = m_targetMinConf2->value() / 100.0f;
-    hp.target_class_3    = m_targetClass3->value();
-    hp.target_y_top_3    = m_targetYTop3->value() / 100.0f;
-    hp.target_y_bot_3    = m_targetYBot3->value() / 100.0f;
-    hp.target_min_conf_3 = m_targetMinConf3->value() / 100.0f;
-    hp.target_aim_range  = m_targetAimRange->value();
+    // 目标选择: 每条目的 class_id / y_offset / min_conf 由行内滑条回调直接写入
+    // config.hotkeys[ri].aim_classes, 顺序由 ▲▼ 的 moveAimClass 维护
+    // (见 rebuildAimClassList / moveAimClass), 此处无需再写。
 
     // ── Aim trajectory ──
     {
@@ -1201,7 +1577,10 @@ void HotkeyPage::saveUiToCurrentProfile()
         hp.aim_path_bezier_cx2 = m_aimPathBezier->cx2();
         hp.aim_path_bezier_cy2 = m_aimPathBezier->cy2();
         const auto& samples = m_aimPathFreehand->samples();
-        hp.aim_path_custom_samples.assign(samples.begin(), samples.end());
+        hp.aim_path_custom_samples = std::make_shared<const std::vector<float>>(
+            samples.begin(), samples.end());
+        hp.aim_path_neural_enabled = m_neuralCurveActive;
+        hp.aim_path_neural_weights = m_neuralCurveWeights;
     }
 
     // Key binding

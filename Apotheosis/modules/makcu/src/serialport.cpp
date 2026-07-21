@@ -348,6 +348,8 @@ namespace makcu {
                 // In production, you might want to use a proper logging framework
                 #ifdef DEBUG
                 std::cerr << "SerialPort listener exception: " << e.what() << std::endl;
+                #else
+                (void)e;
                 #endif
                 
                 // Brief pause to prevent tight exception loops

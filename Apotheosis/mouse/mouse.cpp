@@ -120,8 +120,17 @@ void MouseThread::queueMove(int dx, int dy)
 
     std::lock_guard<std::mutex> lg(queueMtx_);
     if (moveQueue_.size() >= queueLimit_)
-        moveQueue_.pop();
-    moveQueue_.push({ dx, dy });
+    {
+        // 队列满时不能丢掉已被控制器记账的位移，否则虚拟位置
+        // 会与真实鼠标分离。合并到队尾可保持累计位移不变。
+        Move& tail = moveQueue_.back();
+        tail.dx += dx;
+        tail.dy += dy;
+    }
+    else
+    {
+        moveQueue_.push({ dx, dy, std::chrono::steady_clock::now() });
+    }
     queueCv_.notify_one();
 }
 
@@ -138,7 +147,16 @@ void MouseThread::moveWorkerLoop()
                 Move m = moveQueue_.front();
                 moveQueue_.pop();
                 ul.unlock();
-                sendMovementToDriver(m.dx, m.dy);
+                const bool sent = sendMovementToDriver(m.dx, m.dy);
+                if (sent) {
+                    appliedDx_.fetch_add(m.dx, std::memory_order_release);
+                    appliedDy_.fetch_add(m.dy, std::memory_order_release);
+                } else {
+                    failedMoves_.fetch_add(1, std::memory_order_release);
+                }
+                const auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - m.queued_at).count();
+                lastLatencyUs_.store(latency, std::memory_order_release);
                 ul.lock();
             }
         }
@@ -168,31 +186,36 @@ void MouseThread::releaseLeftButton()
     sendLeftUpToDriver();
 }
 
-void MouseThread::sendMovementToDriver(int dx, int dy)
+bool MouseThread::sendMovementToDriver(int dx, int dy)
 {
     if (dx == 0 && dy == 0)
-        return;
+        return true;
 
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (kmbox_net_)
     {
         kmbox_net_->move(dx, dy);
+        return true;
     }
     else if (kmbox_a_)
     {
         kmbox_a_->move(dx, dy);
+        return true;
     }
     else if (makcu_)
     {
         makcu_->move(dx, dy);
+        return true;
     }
     else if (arduino_)
     {
         arduino_->move(dx, dy);
+        return true;
     }
     else if (gHub_)
     {
         gHub_->mouse_xy(dx, dy);
+        return true;
     }
     else
     {
@@ -201,7 +224,7 @@ void MouseThread::sendMovementToDriver(int dx, int dy)
         in.mi.dx = dx;
         in.mi.dy = dy;
         in.mi.dwFlags = MOUSEEVENTF_MOVE;
-        SendInput(1, &in, sizeof(INPUT));
+        return SendInput(1, &in, sizeof(INPUT)) == 1;
     }
 }
 
@@ -210,6 +233,21 @@ void MouseThread::clearQueuedMoves()
     std::lock_guard<std::mutex> lock(queueMtx_);
     std::queue<Move> empty;
     moveQueue_.swap(empty);
+}
+
+MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
+{
+    MovementFeedback out;
+    out.dx = static_cast<int>(appliedDx_.exchange(0, std::memory_order_acq_rel));
+    out.dy = static_cast<int>(appliedDy_.exchange(0, std::memory_order_acq_rel));
+    out.latency_ms = static_cast<double>(
+        lastLatencyUs_.load(std::memory_order_acquire)) / 1000.0;
+    out.failed = failedMoves_.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(queueMtx_);
+        out.backlog = moveQueue_.size();
+    }
+    return out;
 }
 
 void MouseThread::setArduinoConnection(Arduino* newArduino)

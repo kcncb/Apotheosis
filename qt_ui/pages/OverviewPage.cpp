@@ -73,7 +73,7 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     // ── Hero ──
     auto* hero = makeCard();
     auto* heroRow = new QHBoxLayout(hero);
-    heroRow->setContentsMargins(17, 15, 17, 15);
+    heroRow->setContentsMargins(16, 15, 16, 15);
     heroRow->setSpacing(14);
 
     m_heroChip = makeChip(QStringLiteral("gauge"), QStringLiteral("#E7F6EC"), QStringLiteral("#16A34A"));
@@ -129,7 +129,7 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
 
     auto* chartCard = makeCard();
     auto* chartCol = new QVBoxLayout(chartCard);
-    chartCol->setContentsMargins(17, 15, 17, 15);
+    chartCol->setContentsMargins(16, 15, 16, 15);
     chartCol->setSpacing(6);
 
     auto* chartHead = new QHBoxLayout;

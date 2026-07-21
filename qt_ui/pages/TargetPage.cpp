@@ -61,7 +61,7 @@ TargetPage::TargetPage(QWidget* parent)
             "\xe7\x9e\x84\xe5\x87\x86\xef\xbc\x9a\xe4\xbd\x9c\xe4\xb8\xba\xe7\x9e\x84\xe5\x87\x86\xe5\x80\x99\xe9\x80\x89\xef\xbc\x8c"
             "\xe5\x85\xb7\xe4\xbd\x93\xe4\xbc\x98\xe5\x85\x88\xe7\xba\xa7\xe7\x94\xb1\xe7\x83\xad\xe9\x94\xae\xe7\xbb\x84\xe7\x9a\x84\xe7\xb1\xbb\xe5\x88\xab\xe9\xa1\xba\xe5\xba\x8f\xe5\x86\xb3\xe5\xae\x9a\xe3\x80\x82"));
     infoLabel->setWordWrap(true);
-    infoLabel->setStyleSheet("color:#8E8E96; font-size:12px;");
+    infoLabel->setStyleSheet("color:#71717A; font-size:12px;");
     infoCard->contentLayout()->addWidget(infoLabel);
     layout->addWidget(infoCard);
 
@@ -184,7 +184,7 @@ void TargetPage::rebuildTable()
             } else {
                 btn->setStyleSheet(
                     QStringLiteral(
-                        "QPushButton{background:transparent; color:#8E8E96; border:none;"
+                        "QPushButton{background:transparent; color:#71717A; border:none;"
                         " border-radius:5px; font-size:12px; padding:2px 10px;}"
                         "QPushButton:hover{background:%1; color:%2;}")
                         .arg(kBucketStyles[bucketIdx].hoverBg)

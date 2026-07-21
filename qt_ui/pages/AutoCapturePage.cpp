@@ -87,6 +87,17 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
         "\xe6\xb5\x8b\xe7\xbb\x93\xe6\x9e\x9c\xe8\xa7\xa6\xe5\x8f\x91\xe9\x87\x87"
         "\xe9\x9b\x86 (\xe9\x9a\xbe\xe4\xbe\x8b\xe6\xa0\xb7\xe6\x9c\xac)\xe3\x80\x82"));
 
+    // 任意检测触发(忽略高/低阈值):适合新场景数据启动阶段。
+    thcl->addWidget(FormKit::toggleRow(
+        QStringLiteral("\xe4\xbb\xbb\xe6\x84\x8f\xe6\xa3\x80\xe6\xb5\x8b\xe8\xa7\xa6\xe5\x8f\x91"
+                       " (\xe5\xbf\xbd\xe7\x95\xa5\xe9\x98\x88\xe5\x80\xbc)"),
+        false, m_anyDetection));
+
+    // 寻光命中触发(独立于 YOLO)。
+    thcl->addWidget(FormKit::toggleRow(
+        QStringLiteral("\xe5\xaf\xbb\xe5\x85\x89\xe8\xa7\xa6\xe5\x8f\x91"),  // 寻光触发
+        false, m_useFlashlight));
+
     QSlider* cdSl = nullptr;
     thcl->addWidget(FormKit::sliderRow(
         QStringLiteral("\xe9\x87\x87\xe9\x9b\x86\xe9\x97\xb4\xe9\x9a\x94"),
@@ -166,10 +177,12 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
     auto wire_save = [this](auto* w, auto sig) {
         connect(w, sig, this, &AutoCapturePage::saveToConfig);
     };
-    wire_save(m_enabled,   &ToggleSwitch::toggled);
-    wire_save(m_useHigh,   &ToggleSwitch::toggled);
-    wire_save(m_useLow,    &ToggleSwitch::toggled);
-    wire_save(m_saveLabel, &ToggleSwitch::toggled);
+    wire_save(m_enabled,       &ToggleSwitch::toggled);
+    wire_save(m_useHigh,       &ToggleSwitch::toggled);
+    wire_save(m_useLow,        &ToggleSwitch::toggled);
+    wire_save(m_anyDetection,  &ToggleSwitch::toggled);
+    wire_save(m_useFlashlight, &ToggleSwitch::toggled);
+    wire_save(m_saveLabel,     &ToggleSwitch::toggled);
     connect(m_highConf,   QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &AutoCapturePage::saveToConfig);
     connect(m_lowConf,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -216,6 +229,8 @@ void AutoCapturePage::onLoadConfig()
     m_highConf->setValue(static_cast<double>(config.auto_capture_high_conf));
     m_useLow->setChecked(config.auto_capture_use_low);
     m_lowConf->setValue(static_cast<double>(config.auto_capture_low_conf));
+    m_anyDetection->setChecked(config.auto_capture_any_detection);
+    m_useFlashlight->setChecked(config.auto_capture_use_flashlight);
     m_cooldownMs->setValue(config.auto_capture_cooldown_ms);
     m_forceKeys->setText(joinKeys(config.auto_capture_force_keys));
     m_outputDir->setText(QString::fromStdString(config.auto_capture_output_dir));
@@ -235,6 +250,8 @@ void AutoCapturePage::saveToConfig()
         config.auto_capture_high_conf   = static_cast<float>(m_highConf->value());
         config.auto_capture_use_low     = m_useLow->isChecked();
         config.auto_capture_low_conf    = static_cast<float>(m_lowConf->value());
+        config.auto_capture_any_detection  = m_anyDetection->isChecked();
+        config.auto_capture_use_flashlight = m_useFlashlight->isChecked();
         config.auto_capture_cooldown_ms = m_cooldownMs->value();
         config.auto_capture_force_keys  = splitKeysQ(m_forceKeys->text());
         config.auto_capture_output_dir  = m_outputDir->text().trimmed().toStdString();

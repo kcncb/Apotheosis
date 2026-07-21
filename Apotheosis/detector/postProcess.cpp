@@ -8,6 +8,7 @@
 #include "postProcess.h"
 #include "Apotheosis.h"
 #include "trt_detector.h"
+#include "runtime/config_snapshot.h"
 
 void applyDeleteBucketFilter(std::vector<Detection>& detections)
 {
@@ -16,8 +17,8 @@ void applyDeleteBucketFilter(std::vector<Detection>& detections)
 
     std::unordered_set<int> deleted;
     {
-        std::lock_guard<std::recursive_mutex> lock(configMutex);
-        for (const auto& cf : config.class_filters)
+        const auto snapshot = runtime_config::read();
+        for (const auto& cf : snapshot->class_filters)
         {
             if (cf.bucket == ClassBucket::Delete)
                 deleted.insert(cf.class_id);
@@ -33,11 +34,32 @@ void applyDeleteBucketFilter(std::vector<Detection>& detections)
         detections.end());
 }
 
+DetectorRuntimeSettings detectorRuntimeSettings()
+{
+    DetectorRuntimeSettings out;
+    const auto snapshot = runtime_config::read();
+    out.confidenceThreshold = snapshot->confidence_threshold;
+    out.nmsThreshold = snapshot->nms_threshold;
+    out.maxDetections = snapshot->max_detections;
+    out.detectionResolution = snapshot->detection_resolution;
+    return out;
+}
+
 SmallTargetDecode computeSmallTargetDecode()
 {
     SmallTargetDecode out;
-    const float base = config.confidence_threshold;
-    if (!config.small_target_enabled)
+    float base = 0.25f;
+    bool enabled = false;
+    float small_conf = 0.15f;
+    int resolution = 320;
+    float area_frac = 0.0025f;
+    const auto snapshot = runtime_config::read();
+    base = snapshot->confidence_threshold;
+    enabled = snapshot->small_target_enabled;
+    small_conf = snapshot->small_target_confidence;
+    resolution = snapshot->detection_resolution;
+    area_frac = snapshot->small_target_area_frac;
+    if (!enabled)
     {
         out.decodeFloor = base;
         out.baseConf = -1.0f;   // disables the CPU area-adaptive filter
@@ -45,12 +67,12 @@ SmallTargetDecode computeSmallTargetDecode()
         out.areaThreshPx = 0.0;
         return out;
     }
-    const float smallConf = config.small_target_confidence;
-    const double res = static_cast<double>(config.detection_resolution);
+    const float smallConf = small_conf;
+    const double res = static_cast<double>(resolution);
     out.decodeFloor = std::min(base, smallConf);
     out.baseConf = base;
     out.smallConf = smallConf;
-    out.areaThreshPx = static_cast<double>(config.small_target_area_frac) * res * res;
+    out.areaThreshPx = static_cast<double>(area_frac) * res * res;
     return out;
 }
 

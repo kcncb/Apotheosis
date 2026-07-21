@@ -19,6 +19,7 @@
 #include "Apotheosis.h"
 #include "capture/capture.h"
 #include "config/config.h"
+#include "crosshair/flashlight_runtime.h"
 #include "detector/detection_buffer.h"
 #include "keyboard/keyboard_listener.h"
 
@@ -49,6 +50,8 @@ struct CfgSnap
     float high_conf = 0.85f;
     bool  use_low = false;
     float low_conf = 0.30f;
+    bool  any_detection = false;   // 忽略阈值,只要有 YOLO 检测就采集
+    bool  use_flashlight = false;  // 寻光命中触发
     int   cooldown_ms = 200;
     std::vector<std::string> force_keys;
     std::string out_dir = "screenshots/auto";
@@ -65,6 +68,8 @@ CfgSnap snapshot_cfg()
     s.high_conf     = config.auto_capture_high_conf;
     s.use_low       = config.auto_capture_use_low;
     s.low_conf      = config.auto_capture_low_conf;
+    s.any_detection = config.auto_capture_any_detection;
+    s.use_flashlight= config.auto_capture_use_flashlight;
     s.cooldown_ms   = std::max(0, config.auto_capture_cooldown_ms);
     s.force_keys    = config.auto_capture_force_keys;
     s.out_dir       = config.auto_capture_output_dir.empty()
@@ -177,17 +182,40 @@ void auto_capture_thread()
         int v = -1;
         detectionBuffer.get(boxes, classes, confidences, v);
 
-        // No detections AND no force-hold → nothing to record.
-        if (boxes.empty() && !force_held) continue;
+        // 寻光触发源:独立于 YOLO,只看 flashlight_runtime 是否本轮命中。
+        bool flashlight_hit = false;
+        if (cfg.use_flashlight)
+        {
+            const auto snap = flashlight_runtime::read();
+            if (snap.valid && !snap.spots.empty())
+            {
+                // 新鲜度:snap 时间戳与 detection publish 时间同一量级 →
+                // 用 kFreshnessMs 判定即可。
+                const auto ageMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - snap.ts).count();
+                if (ageMs <= flashlight_runtime::kFreshnessMs)
+                    flashlight_hit = true;
+            }
+        }
+
+        // No detections AND no force-hold AND no flashlight → nothing to record.
+        if (boxes.empty() && !force_held && !flashlight_hit) continue;
 
         // Decide save.
         bool should_save = false;
         if (force_held)
             should_save = true;
+        else if (flashlight_hit)
+            should_save = true;
         else if (!boxes.empty())
-            should_save = any_in_zone(confidences,
-                                      cfg.use_high, cfg.high_conf,
-                                      cfg.use_low,  cfg.low_conf);
+        {
+            if (cfg.any_detection)
+                should_save = true;
+            else
+                should_save = any_in_zone(confidences,
+                                          cfg.use_high, cfg.high_conf,
+                                          cfg.use_low,  cfg.low_conf);
+        }
         if (!should_save) continue;
 
         // Cooldown gate.

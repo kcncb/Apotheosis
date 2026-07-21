@@ -6,11 +6,13 @@
 
 #include "Apotheosis.h"
 #include "config.h"
+#include "runtime/config_snapshot.h"
 #include "depth/depth_mask.h"
 #include "flashlight_detector.h"
 #include "flashlight_tracker.h"
 #include "flashlight_tuning.h"
 #include "runtime/active_hotkey.h"
+#include "runtime/event_orchestrator.h"
 
 // Defined here; declared in Apotheosis.h. Tells the capture thread to produce the
 // normalized depth map while the 寻光 depth-gate is active (depth.mode > 0).
@@ -35,8 +37,19 @@ Snapshot read()
 
 void publish(const Snapshot& snap)
 {
-    std::lock_guard<std::mutex> lk(g_mtx);
-    g_snap = snap;
+    // 事件编排:发布完整上升/下降边沿，供“持续期间循环”可靠启停。
+    bool rising = false;
+    bool falling = false;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        const bool prev_valid = g_snap.valid && !g_snap.spots.empty();
+        const bool now_valid  = snap.valid   && !snap.spots.empty();
+        rising = now_valid && !prev_valid;
+        falling = !now_valid && prev_valid;
+        g_snap = snap;
+    }
+    if (rising) event_orch::publish(event_orch::EventType::FlashlightHit);
+    if (falling) event_orch::publish(event_orch::EventType::FlashlightLost);
 }
 
 void process_frame(const cv::Mat& bgrFrame)
@@ -65,23 +78,24 @@ void process_frame(const cv::Mat& bgrFrame)
     int reject      = 50;
     int spot_size   = 50;
     {
-        std::lock_guard<std::recursive_mutex> cfg(configMutex);
-        if (active_idx >= static_cast<int>(config.hotkeys.size()))
+        const auto snapshot = runtime_config::read();
+        const auto& cfg = *snapshot;
+        if (active_idx >= static_cast<int>(cfg.hotkeys.size()))
         {
             g_tracker.reset();
             publish(Snapshot{});
             return;
         }
-        const auto& hk = config.hotkeys[active_idx];
+        const auto& hk = cfg.hotkeys[active_idx];
         if (!hk.flashlight_detect_enabled)
         {
             g_tracker.reset();
             publish(Snapshot{});
             return;
         }
-        sensitivity = config.flashlight_sensitivity;
-        reject      = config.flashlight_reject_strength;
-        spot_size   = config.flashlight_spot_size;
+        sensitivity = cfg.flashlight_sensitivity;
+        reject      = cfg.flashlight_reject_strength;
+        spot_size   = cfg.flashlight_spot_size;
     }
 
     const crosshair::FlashlightTuning tuning =
@@ -178,17 +192,25 @@ void process_frame(const cv::Mat& bgrFrame)
         if (conf < tuning.accept_conf_floor)
             continue;
 
-        const int diameter = std::max(2, static_cast<int>(std::lround(s.radius * 2.0f)));
-        const int bx = static_cast<int>(std::lround(s.center.x)) - diameter / 2;
-        const int by = static_cast<int>(std::lround(s.center.y)) - diameter / 2;
+        // Use the tracker's EMA-smoothed centre/radius (kills 1-3 px per-frame
+        // contour-moment jitter that the mover's velocity-adaptive one-euro
+        // would otherwise pass straight to the aim output during camera
+        // rotation — "疾风" buzz when a halo is the active target). Onset
+        // frames have smoothed == raw so the first lock is instant.
+        const cv::Point2f sc = v.smoothed_center;
+        const float       sr = (v.smoothed_radius > 0.0f) ? v.smoothed_radius : s.radius;
+
+        const int diameter = std::max(2, static_cast<int>(std::lround(sr * 2.0f)));
+        const int bx = static_cast<int>(std::lround(sc.x)) - diameter / 2;
+        const int by = static_cast<int>(std::lround(sc.y)) - diameter / 2;
         const cv::Rect clipped = cv::Rect(bx, by, diameter, diameter) & frame_rect;
         if (clipped.area() <= 0)
             continue;
 
         Spot out;
         out.box          = clipped;
-        out.center       = s.center;
-        out.radius       = s.radius;
+        out.center       = sc;
+        out.radius       = sr;
         out.confidence   = conf;
         out.passed_depth = passed_depth;
         out.confirmed    = v.confirmed;

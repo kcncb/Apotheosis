@@ -10,6 +10,7 @@
 #include "config.h"
 #include "capture.h"
 #include "runtime/inference_session.h"
+#include "runtime/config_snapshot.h"
 
 extern std::atomic<bool> detector_model_changed;
 
@@ -29,8 +30,15 @@ ConfigBridge& ConfigBridge::instance() {
 }
 
 void ConfigBridge::markDirty() {
+    runtime_config::publish();
     if (!m_saveTimer->isActive())
         m_saveTimer->start();
+}
+
+void ConfigBridge::flush() {
+    if (m_saveTimer->isActive())
+        m_saveTimer->stop();
+    onSaveTimeout();
 }
 
 void ConfigBridge::onSaveTimeout() {
@@ -306,6 +314,22 @@ void ConfigBridge::syncFromRuntime()
     cm.setCrosshairMinPixelCount(config.crosshair_min_pixel_count);
     cm.setCrosshairCloseRadius(config.crosshair_close_radius);
     cm.setCrosshairSmooth(config.crosshair_smooth);
+    {
+        QList<ConfigManager::ColorProfile> qcolors;
+        for (const auto& c : config.crosshair_colors) {
+            ConfigManager::ColorProfile qc;
+            qc.name    = qstr(c.name);
+            qc.enabled = c.enabled;
+            qc.hLow    = c.h_low;
+            qc.hHigh   = c.h_high;
+            qc.sMin    = c.s_min;
+            qc.sMax    = c.s_max;
+            qc.vMin    = c.v_min;
+            qc.vMax    = c.v_max;
+            qcolors.append(qc);
+        }
+        cm.setCrosshairColors(qcolors);
+    }
 
     // --- Laser ---
     cm.setLaserRectW(config.laser_rect_w);
@@ -320,6 +344,22 @@ void ConfigBridge::syncFromRuntime()
     cm.setLaserMinPixelCount(config.laser_min_pixel_count);
     cm.setLaserCloseRadius(config.laser_close_radius);
     cm.setLaserSmooth(config.laser_smooth);
+    {
+        QList<ConfigManager::ColorProfile> qcolors;
+        for (const auto& c : config.laser_colors) {
+            ConfigManager::ColorProfile qc;
+            qc.name    = qstr(c.name);
+            qc.enabled = c.enabled;
+            qc.hLow    = c.h_low;
+            qc.hHigh   = c.h_high;
+            qc.sMin    = c.s_min;
+            qc.sMax    = c.s_max;
+            qc.vMin    = c.v_min;
+            qc.vMax    = c.v_max;
+            qcolors.append(qc);
+        }
+        cm.setLaserColors(qcolors);
+    }
 
     // --- Flashlight halo ---
     cm.setFlashlightShowPreview(config.flashlight_show_preview);
@@ -377,24 +417,32 @@ void ConfigBridge::syncFromRuntime()
         hd.deadZonePx    = hp.dead_zone_px;
         hd.deadzoneEnabled     = hp.deadzone_enabled;
         hd.deadzonePercent     = hp.deadzone_percent;
+        hd.lostTargetCacheFrames = hp.lost_target_cache_frames;
         hd.triggerEnabled      = hp.trigger_enabled;
         hd.triggerFireDelay    = hp.trigger_fire_delay;
         hd.triggerFireDuration = hp.trigger_fire_duration;
         hd.triggerFireInterval = hp.trigger_fire_interval;
         hd.triggerYPercent     = hp.trigger_y_percent;
-        hd.targetClass1    = hp.target_class_1;
-        hd.targetYTop1     = hp.target_y_top_1;
-        hd.targetYBot1     = hp.target_y_bot_1;
-        hd.targetMinConf1  = hp.target_min_conf_1;
-        hd.targetClass2    = hp.target_class_2;
-        hd.targetYTop2     = hp.target_y_top_2;
-        hd.targetYBot2     = hp.target_y_bot_2;
-        hd.targetMinConf2  = hp.target_min_conf_2;
-        hd.targetClass3    = hp.target_class_3;
-        hd.targetYTop3     = hp.target_y_top_3;
-        hd.targetYBot3     = hp.target_y_bot_3;
-        hd.targetMinConf3  = hp.target_min_conf_3;
-        hd.targetAimRange  = hp.target_aim_range;
+        hd.triggerDelayJitterMs    = hp.trigger_delay_jitter_ms;
+        hd.triggerDurationJitterMs = hp.trigger_duration_jitter_ms;
+        hd.triggerIntervalJitterMs = hp.trigger_interval_jitter_ms;
+        hd.triggerSwitchCooldownMs = hp.trigger_switch_cooldown_ms;
+        hd.yStrengthPercent        = hp.y_strength_percent;
+        {
+            QString joined;
+            for (size_t ai = 0; ai < hp.aim_classes.size(); ++ai) {
+                if (ai > 0) joined.append(';');
+                const auto& ac = hp.aim_classes[ai];
+                joined.append(QString::number(ac.class_id));
+                joined.append(':');
+                joined.append(QString::number(ac.y_offset, 'f', 3));
+                joined.append(':');
+                joined.append(QString::number(ac.y_offset_max, 'f', 3));
+                joined.append(':');
+                joined.append(QString::number(ac.min_conf, 'f', 3));
+            }
+            hd.aimClasses = joined;
+        }
         hd.laserDetectEnabled      = hp.laser_detect_enabled;
         hd.crosshairDetectEnabled  = hp.crosshair_detect_enabled;
         hd.flashlightDetectEnabled = hp.flashlight_detect_enabled;
@@ -406,14 +454,9 @@ void ConfigBridge::syncFromRuntime()
         hd.aimPathBezierCy1   = hp.aim_path_bezier_cy1;
         hd.aimPathBezierCx2   = hp.aim_path_bezier_cx2;
         hd.aimPathBezierCy2   = hp.aim_path_bezier_cy2;
-        {
-            QString joined;
-            for (size_t si = 0; si < hp.aim_path_custom_samples.size(); ++si) {
-                if (si > 0) joined.append(',');
-                joined.append(QString::number(hp.aim_path_custom_samples[si], 'f', 4));
-            }
-            hd.aimPathCustomSamples = joined;
-        }
+        // 高密度曲线由 Config 的 .curve 二进制资产持久化。
+        // QSettings 不再重复保存数万个文本浮点数。
+        hd.aimPathCustomSamples.clear();
         if (i < cm.hotkeyCount())
             cm.setHotkey(i, hd);
         else

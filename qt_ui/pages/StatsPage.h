@@ -54,5 +54,8 @@ private:
     QLabel* m_rxPartialLost{};
     QLabel* m_rxPcapKernelDrop{};
     QLabel* m_rxPcapIfDrop{};
+    QLabel* m_mouseQueueLatency{};
+    QLabel* m_mouseQueueBacklog{};
+    QLabel* m_mouseSendFailures{};
     FpsGraphWidget* m_graph{};
 };

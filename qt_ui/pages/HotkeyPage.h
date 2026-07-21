@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <array>
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -45,6 +46,7 @@ private slots:
     void onDeleteGroup();
     void onContextMenu(const QPoint& pos);
     void onRenameProfile();
+    void onAimClassFiltersChanged();  // Target 页把某类切换成 Aim 桶时被调,刷新可选下拉+当前列表
 private:
     void buildLeftPanel(QWidget* parent);
     void buildRightPanel(QWidget* parent);
@@ -54,7 +56,7 @@ private:
     void buildBossAimCard();
     void buildDeadzoneCard();
     void buildTriggerCard();
-    void buildTargetSelectionCard();
+    void buildAimClassCard();
     void buildAimPathCard();
 
     void rebuildGroupCombo();
@@ -63,6 +65,10 @@ private:
     void restyleProfileItems();
     void loadProfileToUi(int runtimeIndex);
     void saveUiToCurrentProfile();
+
+    void rebuildAimClassList();       // 依 config.hotkeys[ri].aim_classes 重画列表
+    void rebuildAddClassCombo();      // 依 config.class_filters 里桶=Aim 且未加入的类别刷新下拉
+    void moveAimClass(int from, int to);  // ▲▼ 换位: 交换 aim_classes 两项后整表重建
 
     int currentRuntimeIndex() const;
 
@@ -96,17 +102,13 @@ private:
     ToggleSwitch* m_glassFilter{};
 
     // Card 4: Mover (kind dropdown + stacked per-mover params)
-    QComboBox*      m_moverKindCombo{};
     QStackedWidget* m_moverParamStack{};
-    // 微澜 (Smooth) — ART 原 3 参数
-    QDoubleSpinBox* m_speedXSpin{};
-    QDoubleSpinBox* m_speedYSpin{};
-    QDoubleSpinBox* m_deadZoneSpin{};
-    // 疾风 (Predictive) — 4 项
-    QDoubleSpinBox* m_predKpXSpin{};
-    QDoubleSpinBox* m_predKpYSpin{};
-    QDoubleSpinBox* m_predKdSpin{};
-    QDoubleSpinBox* m_predPwSpin{};
+    QComboBox*      m_moverKindCombo{};
+    QDoubleSpinBox* m_ygPullSpeedX{};
+    QDoubleSpinBox* m_ygPullSpeedY{};
+    QDoubleSpinBox* m_ygTracking{};
+    QDoubleSpinBox* m_ygPredictionMs{};
+    QDoubleSpinBox* m_ygStability{};
     // 天枢 (Classic) — 经典 PID 全参
     QComboBox*      m_clsAimModeCombo{};
     QStackedWidget* m_clsAimModeStack{};
@@ -144,9 +146,13 @@ private:
     QDoubleSpinBox* m_clsKalmanRObs{};
     QDoubleSpinBox* m_clsKalmanLookahead{};
     QWidget*        m_clsKalmanContainer{};
+    // 天枢页内死区(映射到共享 deadzone_enabled/deadzone_percent)
+    ToggleSwitch*   m_clsDeadzoneEnabled{};
+    QDoubleSpinBox* m_clsDeadzonePercent{};
     // Card: 死区 (shared deadzone)
     ToggleSwitch*   m_deadzoneEnabled{};
     QSlider*        m_deadzonePercent{};
+    QSpinBox*       m_lostTargetCacheFrames{};
 
     // Card: 扳机 (trigger FSM)
     ToggleSwitch*   m_triggerEnabled{};
@@ -154,21 +160,20 @@ private:
     QSpinBox*       m_triggerFireDuration{};
     QSpinBox*       m_triggerFireInterval{};
     QSpinBox*       m_triggerYPercent{};
+    QSpinBox*       m_triggerDelayJitter{};
+    QSpinBox*       m_triggerDurationJitter{};
+    QSpinBox*       m_triggerIntervalJitter{};
+    QSpinBox*       m_triggerSwitchCooldown{};
 
-    // Card: 目标选择 (3-slot target selection)
-    QSpinBox*       m_targetClass1{};
-    QSlider*        m_targetYTop1{};
-    QSlider*        m_targetYBot1{};
-    QSlider*        m_targetMinConf1{};
-    QSpinBox*       m_targetClass2{};
-    QSlider*        m_targetYTop2{};
-    QSlider*        m_targetYBot2{};
-    QSlider*        m_targetMinConf2{};
-    QSpinBox*       m_targetClass3{};
-    QSlider*        m_targetYTop3{};
-    QSlider*        m_targetYBot3{};
-    QSlider*        m_targetMinConf3{};
-    QSpinBox*       m_targetAimRange{};
+    // Y 轴力度百分比(所有 mover 通用,应用于最终 dy)
+    QSpinBox*       m_yStrengthPercent{};
+
+    // Card: 目标选择 (优先级排序列表)
+    CardWidget*  m_aimClassCard{};
+    QWidget*     m_aimClassContainer{};  // 承载行卡片的容器
+    QVBoxLayout* m_aimClassLayout{};     // 行卡片纵向布局, 顺序 = 优先级
+    QComboBox*   m_addClassCombo{};   // "+ 添加" 下拉候选 (来源: Target 页 Aim 桶)
+    QPushButton* m_addClassBtn{};
 
     // Card 7: Aim trajectory
     QButtonGroup*       m_aimPathModeGroup{};
@@ -178,6 +183,8 @@ private:
     QStackedWidget*     m_aimPathEditorStack{};
     BezierEditor*       m_aimPathBezier{};
     FreehandCurveEditor* m_aimPathFreehand{};
+    bool m_neuralCurveActive = false;
+    std::array<float, 25> m_neuralCurveWeights{};
 
     bool m_loading{false};
 };

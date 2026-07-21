@@ -3,6 +3,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <algorithm>
 #include <cmath>
 
 BezierEditor::BezierEditor(QWidget* parent)
@@ -16,16 +17,20 @@ QSize BezierEditor::sizeHint() const {
     return {320, 200};
 }
 
-void BezierEditor::setCx1(float v) { m_cx1 = v; update(); }
-void BezierEditor::setCy1(float v) { m_cy1 = v; update(); }
-void BezierEditor::setCx2(float v) { m_cx2 = v; update(); }
-void BezierEditor::setCy2(float v) { m_cy2 = v; update(); }
+void BezierEditor::setCx1(float v) { m_cx1 = std::clamp(v, 0.0f, m_cx2); update(); }
+void BezierEditor::setCy1(float v) { m_cy1 = std::clamp(v, -1.0f, 1.0f); update(); }
+void BezierEditor::setCx2(float v) { m_cx2 = std::clamp(v, m_cx1, 1.0f); update(); }
+void BezierEditor::setCy2(float v) { m_cy2 = std::clamp(v, -1.0f, 1.0f); update(); }
 
 void BezierEditor::setCurve(float cx1, float cy1, float cx2, float cy2) {
-    m_cx1 = cx1;
-    m_cy1 = cy1;
-    m_cx2 = cx2;
-    m_cy2 = cy2;
+    m_cx1 = std::clamp(cx1, 0.0f, 1.0f);
+    m_cy1 = std::clamp(cy1, -1.0f, 1.0f);
+    m_cx2 = std::clamp(cx2, 0.0f, 1.0f);
+    m_cy2 = std::clamp(cy2, -1.0f, 1.0f);
+    if (m_cx1 > m_cx2) {
+        std::swap(m_cx1, m_cx2);
+        std::swap(m_cy1, m_cy2);
+    }
     update();
     emit curveChanged(m_cx1, m_cy1, m_cx2, m_cy2);
 }
@@ -132,10 +137,10 @@ void BezierEditor::mouseMoveEvent(QMouseEvent* event) {
     auto [nx, ny] = screenToNorm(event->position());
 
     if (m_dragging == 1) {
-        m_cx1 = nx;
+        m_cx1 = std::min(nx, m_cx2);
         m_cy1 = ny;
     } else {
-        m_cx2 = nx;
+        m_cx2 = std::max(nx, m_cx1);
         m_cy2 = ny;
     }
 

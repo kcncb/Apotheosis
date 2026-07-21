@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <Windows.h>
 #include <iostream>
+#include <cstdint>
 #include <fstream>
 #include <filesystem>
 #include <limits>
@@ -151,8 +152,13 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngine(nvinfer1::INetworkD
     }
 
     nvinfer1::Dims inDims = inputTensor->getDimensions();
-    int H = (inDims.nbDims >= 4) ? inDims.d[2] : -1;
-    int W = (inDims.nbDims >= 4) ? inDims.d[3] : -1;
+    auto dimension_to_int = [](std::int64_t value) -> int {
+        if (value < -1 || value > static_cast<std::int64_t>(std::numeric_limits<int>::max()))
+            return -1;
+        return static_cast<int>(value);
+    };
+    int H = (inDims.nbDims >= 4) ? dimension_to_int(inDims.d[2]) : -1;
+    int W = (inDims.nbDims >= 4) ? dimension_to_int(inDims.d[3]) : -1;
 
     bool fixedByModel = (H > 0 && W > 0);
     bool fixedByConfig = config.fixed_input_size;
@@ -268,7 +274,7 @@ std::unique_ptr<nvinfer1::IHostMemory> buildSerializedEngineFromOnnxMemory(const
         return nullptr;
     }
 
-    ImGuiProgressMonitor progressMonitor;
+    TrtProgressMonitor progressMonitor;
     cfg->setProgressMonitor(&progressMonitor);
     ScopedExportState exportState;
 

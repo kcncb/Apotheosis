@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -375,15 +376,23 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         static crosshair::FlashlightDetector flashlight_detector;
         const auto cands = flashlight_detector.detectVerbose(canvas, fs);
 
-        const cv::Scalar ringOk    = bgr(0, 255, 0);     // green = accepted
-        const cv::Scalar ringBad   = bgr(60, 60, 255);   // red   = rejected
+        const cv::Scalar ringOk    = bgr(0, 255, 0);     // green  = accepted
+        const cv::Scalar ringTrim  = bgr(0, 200, 255);   // yellow = NMS/cap loser
+        const cv::Scalar ringBad   = bgr(60, 60, 255);   // red    = shape-gate rejected
         const cv::Scalar centerCol = bgr(255, 255, 255);
+        auto ring_color = [&](const crosshair::FlashlightCandidate& cd) {
+            if (cd.accepted) return ringOk;
+            const char* rr = cd.reject_reason ? cd.reject_reason : "";
+            if (std::strcmp(rr, "merged") == 0 || std::strcmp(rr, "capped") == 0)
+                return ringTrim;
+            return ringBad;
+        };
         for (const auto& cd : cands)
         {
             const cv::Point c(static_cast<int>(std::lround(cd.center.x)),
                               static_cast<int>(std::lround(cd.center.y)));
             const int r = std::max(2, static_cast<int>(std::lround(cd.radius)));
-            const cv::Scalar col = cd.accepted ? ringOk : ringBad;
+            const cv::Scalar col = ring_color(cd);
 
             // Dark underlay + coloured ring on top.
             cv::circle(canvas, c, r, bgr(0, 0, 0), 3, cv::LINE_AA);

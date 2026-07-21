@@ -98,6 +98,24 @@ void walk_contours(const cv::Mat& bgrFrame,
         cv::morphologyEx(mask, mask, cv::MORPH_OPEN, ker);
     }
 
+    // CLOSE to re-bridge a single physical light that the threshold split into
+    // multiple connected components. This happens when a foreground silhouette
+    // (an enemy body, a door frame, window mullions, blinds) cuts across a
+    // bright background — RETR_EXTERNAL then yields N small contours sitting
+    // around the silhouette instead of one big halo. Each fragment scores low
+    // on circularity and lands a slot in the candidate list, polluting both
+    // the cap and the eventual aim point.
+    //
+    // Kernel sized to ¼ of max_radius so it can span the typical silhouette
+    // gap (≈10–30 px at 1080p detection) without merging genuinely separate
+    // distant lights (those are caught by NMS later). Capped at 15 px so a
+    // huge max_radius can't pull the cost off a cliff (OpenCV CPU morph is
+    // O(k²) per pixel). Floored at 3 so it always does *something*.
+    const int close_r = std::clamp(max_r / 4, 3, 15);
+    const int close_k = 2 * close_r + 1;
+    const cv::Mat close_ker = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(close_k, close_k));
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_ker);
+
     // Near-field flood: a point-blank flashlight washes out most of the view,
     // leaving no localizable contour (it's a screen-filling gradient, not a
     // blob). Detect that by sheer coverage and report a single centre spot —
@@ -275,9 +293,15 @@ std::vector<FlashlightSpot> FlashlightDetector::detectAll(
     // Dedup + cap. One physical glare can split into a saturated core plus a
     // softer halo ring (two contours, near-identical centres); collapse those
     // so they don't each eat a slot. Greedy NMS over the confidence-sorted list
-    // keeps the strongest and drops any later spot whose centre falls within the
-    // larger of the two radii. Then truncate to max_spots so a noisy frame can
-    // never hand the aim pipeline a swarm of phantom lights.
+    // keeps the strongest and drops any later spot whose centre falls within
+    // 1.5× the larger of the two radii. The 1.5× (vs strict 1×) is the
+    // residual-merge step after the CLOSE morph above: when a single physical
+    // light leaves multiple fragments at 30–50 px apart (small ring + small
+    // core post-split), 1×r-radius NMS misses them but 1.5×r catches them
+    // without eating genuinely distant lights — those sit well past 2×r.
+    // Then truncate to max_spots so a noisy frame can never hand the aim
+    // pipeline a swarm of phantom lights.
+    constexpr float kMergeScale = 1.5f;
     const int cap = std::max(1, settings.max_spots);
     std::vector<FlashlightSpot> kept;
     kept.reserve(std::min(spots.size(), static_cast<size_t>(cap)));
@@ -288,7 +312,7 @@ std::vector<FlashlightSpot> FlashlightDetector::detectAll(
         {
             const float dx = s.center.x - k.center.x;
             const float dy = s.center.y - k.center.y;
-            const float merge = std::max(s.radius, k.radius);
+            const float merge = kMergeScale * std::max(s.radius, k.radius);
             if (dx * dx + dy * dy < merge * merge) { dup = true; break; }
         }
         if (dup) continue;
@@ -319,7 +343,97 @@ std::vector<FlashlightCandidate> FlashlightDetector::detectVerbose(
     FlashlightDetectorSettings active = settings;
     active.enabled = true;
     walk_contours(bgrFrame, active, cands, /*keep_rejects=*/true);
-    return cands;
+
+    // Replay detectAll's post-pipeline (confidence sort → NMS → max_spots cap)
+    // on the shape-gate survivors and mark the losers so the preview matches
+    // exactly what the aim loop sees. Without this the user sees N>max_spots
+    // green circles and thinks the cap isn't working — the cap IS working in
+    // detectAll, but detectVerbose was emitting raw contours.
+    //
+    // Visual contract for the overlay:
+    //   accepted=true                     → green  (final survivors, ≤ max_spots)
+    //   accepted=false, reason="merged"   → yellow (killed by NMS dedup)
+    //   accepted=false, reason="capped"   → yellow (lost the max_spots race)
+    //   accepted=false, any other reason  → red    (failed the shape gate)
+    const int thr         = std::clamp(settings.brightness_threshold, 0, 255);
+    const float bright_norm = std::clamp(static_cast<float>(thr) / 255.0f, 0.0f, 1.0f);
+    const int cap         = std::max(1, settings.max_spots);
+
+    struct Ref { size_t idx; float conf; float radius; cv::Point2f c; };
+    std::vector<Ref> accepted;
+    accepted.reserve(cands.size());
+    for (size_t i = 0; i < cands.size(); ++i)
+    {
+        if (!cands[i].accepted) continue;
+        const float contrast_norm = std::clamp(cands[i].contrast / 255.0f, 0.0f, 1.0f);
+        const float conf = std::clamp(
+            0.5f * cands[i].circularity + 0.3f * contrast_norm + 0.2f * bright_norm,
+            0.0f, 1.0f);
+        accepted.push_back({i, conf, cands[i].radius, cands[i].center});
+    }
+    std::sort(accepted.begin(), accepted.end(),
+              [](const Ref& a, const Ref& b) {
+                  if (a.conf != b.conf)   return a.conf > b.conf;
+                  return a.radius > b.radius;
+              });
+
+    constexpr float kMergeScale = 1.5f;
+    std::vector<Ref> kept;
+    kept.reserve(std::min(accepted.size(), static_cast<size_t>(cap)));
+    for (const auto& r : accepted)
+    {
+        bool dup = false;
+        for (const auto& k : kept)
+        {
+            const float dx = r.c.x - k.c.x;
+            const float dy = r.c.y - k.c.y;
+            const float merge = kMergeScale * std::max(r.radius, k.radius);
+            if (dx * dx + dy * dy < merge * merge) { dup = true; break; }
+        }
+        if (dup)
+        {
+            cands[r.idx].accepted      = false;
+            cands[r.idx].reject_reason = "merged";
+            continue;
+        }
+        if (static_cast<int>(kept.size()) >= cap)
+        {
+            cands[r.idx].accepted      = false;
+            cands[r.idx].reject_reason = "capped";
+            continue;
+        }
+        kept.push_back(r);
+    }
+
+    // Final TOTAL cap: limit the preview to max_spots markers altogether
+    // (green + yellow + red), not max_spots green plus an unbounded swarm of
+    // red. Without this, a bright-cluttered frame paints a forest of red
+    // rejected circles even though the aim pipeline only ever sees ≤ cap
+    // accepted spots — user has no way to read the picture.
+    //
+    // Priority: accepted (green) first — those drive the aim and must all be
+    // visible. Remaining slots filled by the most flashlight-looking rejects
+    // (highest circularity × radius), so the user still sees the strongest
+    // near-misses for tuning circularity / contrast / radius bands. Drop the
+    // rest entirely.
+    std::vector<size_t> order;
+    order.reserve(cands.size());
+    for (size_t i = 0; i < cands.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(),
+              [&](size_t a, size_t b) {
+                  const auto& ca = cands[a];
+                  const auto& cb = cands[b];
+                  if (ca.accepted != cb.accepted) return ca.accepted; // green first
+                  const float sa = ca.circularity * std::max(1.0f, ca.radius);
+                  const float sb = cb.circularity * std::max(1.0f, cb.radius);
+                  return sa > sb;
+              });
+    if (static_cast<int>(order.size()) > cap) order.resize(cap);
+
+    std::vector<FlashlightCandidate> trimmed;
+    trimmed.reserve(order.size());
+    for (size_t idx : order) trimmed.push_back(cands[idx]);
+    return trimmed;
 }
 
 } // namespace crosshair

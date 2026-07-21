@@ -30,6 +30,15 @@ struct MouseRuntimeParams
 class MouseThread
 {
 public:
+    struct MovementFeedback
+    {
+        int dx = 0;
+        int dy = 0;
+        double latency_ms = 0.0;
+        size_t backlog = 0;
+        unsigned long long failed = 0;
+    };
+
     MouseThread(
         const MouseRuntimeParams& params,
         Arduino* arduinoConnection = nullptr,
@@ -45,6 +54,7 @@ public:
     void updateParams(const MouseRuntimeParams& params);
 
     void clearQueuedMoves();
+    MovementFeedback consumeMovementFeedback();
 
     // Recursive: a high-level aim op holds this lock while
     // sendLeft{Down,Up}ToDriver may chain into the same lock on the same thread.
@@ -67,11 +77,12 @@ private:
     {
         int dx = 0;
         int dy = 0;
+        std::chrono::steady_clock::time_point queued_at{};
     };
 
     void moveWorkerLoop();
     void queueMove(int dx, int dy);
-    void sendMovementToDriver(int dx, int dy);
+    bool sendMovementToDriver(int dx, int dy);
 
     void sendLeftDownToDriver();
     void sendLeftUpToDriver();
@@ -88,6 +99,10 @@ private:
     const size_t queueLimit_ = 5;
     std::thread moveWorker_;
     std::atomic<bool> workerStop_{ false };
+    std::atomic<long long> appliedDx_{ 0 };
+    std::atomic<long long> appliedDy_{ 0 };
+    std::atomic<long long> lastLatencyUs_{ 0 };
+    std::atomic<unsigned long long> failedMoves_{ 0 };
 
     Arduino* arduino_ = nullptr;
     KmboxAConnection* kmbox_a_ = nullptr;

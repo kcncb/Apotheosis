@@ -128,6 +128,7 @@ QWidget* toggleRow(const QString& label, bool checked, ToggleSwitch*& toggleOut)
     QWidget* row = makeRow(h);
 
     auto* l = new QLabel(label);
+    l->setProperty("class", "secondary");
     auto* toggle = new ToggleSwitch;
     toggle->setChecked(checked);
 

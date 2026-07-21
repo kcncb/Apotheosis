@@ -24,7 +24,7 @@ class FreehandCurveEditor : public QWidget {
     Q_OBJECT
 
 public:
-    static constexpr int kSampleCount = 32;
+    static constexpr int kSampleCount = 32768;
 
     explicit FreehandCurveEditor(QWidget* parent = nullptr);
 

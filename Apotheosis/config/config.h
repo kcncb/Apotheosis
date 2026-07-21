@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <memory>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,19 @@ struct ClassFilterState
     int class_id = 0;
     std::string class_name; // best-effort display name, falls back to "class_<id>"
     ClassBucket bucket = ClassBucket::Delete;
+};
+
+// One aim class entry in a hotkey's priority-ordered aim list. Order in
+// HotkeyProfile::aim_classes IS the priority (index 0 wins over index 1).
+// y_offset..y_offset_max: 每次新锁定时随机抽取的 Y 锁点范围。
+// 1=框顶, 0.5=中心, 0=框底 (数值大 = 更靠上);两端相等就是固定锁点。
+// min_conf: 该类别的最低置信度 (0=不过滤)。低于阈值的检测不会参与该槽位的匹配。
+struct HotkeyAimClass
+{
+    int   class_id = 0;
+    float y_offset = 0.5f;
+    float y_offset_max = 0.5f;
+    float min_conf = 0.0f;
 };
 
 // Reserved synthetic class id for the flashlight halo "detection". Kept far
@@ -55,24 +70,20 @@ struct HotkeyProfile
     float speed_y = 0.6f;
     float dead_zone_px = 2.0f;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 移动控制器选择 (mover_kind):
-    //   0 = 微澜 (Smooth)     — 默认,boss::AimEngine 走 ART/path 原路径,
-    //                           speed_x/y/dead_zone_px 直接喂 ART::drive。
-    //   1 = 疾风 (Predictive) — 位置式 PID + 导数估计预测器,参数完全暴露。
-    //   2 = 天枢 (Classic)    — 动态 KP + 全参 PID + EMA/Kalman 预测,
-    //                           移植自 zimumodule,参数完全暴露。
-    // 不为 0 时,engine 旁路 AimPathDriver,把 (filtered aim − crosshair) 喂给
-    // PID 直接出 dx/dy(此时 aim_path_mode 被忽略)。
-    // ─────────────────────────────────────────────────────────────────────
-    int mover_kind = 0;
-
     // 疾风 (Predictive) 4 项可调: 每轴灵敏度(Kp)、阻尼(Kd)、预测权重(双轴共用)。
     // 渐入 / 输出上限 / 死区都硬编默认值(见 movers.cpp)。
     float predictive_kp_x       = 0.6f;
     float predictive_kp_y       = 0.6f;
     float predictive_kd         = 0.10f;
     float predictive_pred_weight= 0.5f;
+
+    // 控制器:0=天枢,1=摇光。摇光五个宏参数中预测使用毫秒，其余为 0..100。
+    int   mover_kind = 0;
+    float yaoguang_pull_speed_x = 60.0f;
+    float yaoguang_pull_speed_y = 60.0f;
+    float yaoguang_tracking = 65.0f;
+    float yaoguang_prediction_ms = 25.0f;
+    float yaoguang_stability = 55.0f;
 
     // ─────────────────────────────────────────────────────────────────────
     // 天枢 (Classic) — 经典全参 PID + 动态 KP + EMA/Kalman 预测。
@@ -121,10 +132,11 @@ struct HotkeyProfile
     float classic_kalman_lookahead = 2.0f;
 
     // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────
     // 瞄准轨迹曲线 (aim path).
     //   0 = Linear:   直接朝目标走 (ART 原行为)
     //   1 = Bezier:   起点(0,0)→终点(1,0) 的三次贝塞尔, 控制点 cx1/cy1, cx2/cy2
-    //   2 = Custom:   用户在 UI 上自由画的偏离曲线, 32 个 Y 采样均匀分布在 X∈[0,1]
+    //   2 = Custom:   用户在 UI 上自由画的偏离曲线, 32768 个 Y 采样均匀分布在 X∈[0,1]
     // X = 沿 start→goal 主轴的进度, Y = 垂直方向的偏离量(以 path 长度为单位)。
     // Linear 模式下后续 bezier / custom 参数被忽略, 不必清零。
     // ─────────────────────────────────────────────────────────────────────
@@ -133,9 +145,14 @@ struct HotkeyProfile
     float aim_path_bezier_cy1 = 0.00f;
     float aim_path_bezier_cx2 = 0.70f;
     float aim_path_bezier_cy2 = 0.00f;
-    // 32 个采样, Y∈[-1, 1], 端点(index 0 / 31) 固定 = 0。
-    static constexpr int kAimPathSampleCount = 32;
-    std::vector<float> aim_path_custom_samples; // 留空 = 全 0 (= 直线)
+    // 32768 个采样, Y∈[-1, 1], 首尾端点固定 = 0。
+    static constexpr int kAimPathSampleCount = 32768;
+    // 不可变共享曲线资产:HotkeyProfile 快照只复制指针，UI 修改时才重建。
+    std::shared_ptr<const std::vector<float>> aim_path_custom_samples =
+        std::make_shared<const std::vector<float>>(); // 空 = 直线
+    bool aim_path_neural_enabled = false;
+    // 1→8→1 MLP:w1[8], b1[8], w2[8], b2。
+    std::array<float, 25> aim_path_neural_weights{};
 
     // ─────────────────────────────────────────────────────────────────────
     // 死区 (shared, 三套 mover 通用):准星在目标框 N% 内时停止移动。
@@ -144,43 +161,46 @@ struct HotkeyProfile
     bool  deadzone_enabled = false;
     float deadzone_percent = 0.0f;
 
+    // 检测暂时丢失时继续保留同一 track 的帧数。期间不发送旧坐标移动，
+    // 只等待同一目标重新出现；0 = 当帧丢失即释放，默认 5 与旧行为一致。
+    int   lost_target_cache_frames = 5;
+
     // ─────────────────────────────────────────────────────────────────────
-    // 扳机 — 4 态状态机 (idle/delay/pressed/cooldown)。
+    // 扳机 — 5 态状态机 (idle/delay/pressed/cooldown/switch_cd)。
     //   trigger_fire_delay:    进入命中区后延迟 N ms 才按下(0=立即)
     //   trigger_fire_duration: 每次按住持续 N ms
     //   trigger_fire_interval: 松手后冷却 N ms 才能再次触发
-    //   trigger_y_percent:     命中区占 bbox 的百分比(100=整框)
+    //   trigger_y_percent:     命中区占 bbox 的百分比 (100=整框, >100=预开火)
+    //   trigger_*_jitter_ms:   对应延迟的随机 ±N ms 抖动(破除机械感)
+    //   trigger_switch_cooldown_ms: 目标 track_id 变化时的转火冷却
     // ─────────────────────────────────────────────────────────────────────
     bool  trigger_enabled = false;
     int   trigger_fire_delay = 0;
     int   trigger_fire_duration = 100;
     int   trigger_fire_interval = 200;
     int   trigger_y_percent = 100;
+    int   trigger_delay_jitter_ms    = 0;
+    int   trigger_duration_jitter_ms = 0;
+    int   trigger_interval_jitter_ms = 0;
+    int   trigger_switch_cooldown_ms = 0;
 
     // ─────────────────────────────────────────────────────────────────────
-    // 目标选择 — 3 个类别槽位,各带隐式优先级(1 > 2 > 3)。
-    //   target_class_N:     该槽位匹配的 class_id
-    //   target_y_top/bot_N: Y 轴瞄准区间 (0.0=框顶, 1.0=框底)
-    //   target_min_conf_N:  最低置信度(0=不过滤)
-    //   target_aim_range:   最大瞄准像素距离
-    // 优先级优先,距离次之;未命中任何槽位的 class 被忽略。
+    // Y 轴力度百分比(应用于所有 mover 输出的最终 dy)。
+    //   100 = 原样;<100 削弱垂直分量,使弹道更"飘"(近人手感);
+    //   >100 加强(不常用)。X 分量不动。
     // ─────────────────────────────────────────────────────────────────────
-    int   target_class_1 = 0;
-    float target_y_top_1 = 0.0f;
-    float target_y_bot_1 = 1.0f;
-    float target_min_conf_1 = 0.0f;
+    int   y_strength_percent = 100;
 
-    int   target_class_2 = 1;
-    float target_y_top_2 = 0.0f;
-    float target_y_bot_2 = 0.4f;
-    float target_min_conf_2 = 0.0f;
-
-    int   target_class_3 = 2;
-    float target_y_top_3 = 0.0f;
-    float target_y_bot_3 = 0.3f;
-    float target_min_conf_3 = 0.0f;
-
-    int   target_aim_range = 150;
+    // ─────────────────────────────────────────────────────────────────────
+    // 目标选择 — 按优先级排序的类别列表。列表顺序 = 优先级 (index 0 最高)。
+    //   aim_classes[i].class_id: 该条目匹配的 class_id
+    //   aim_classes[i].y_offset..y_offset_max: 每次新锁定随机抽取的 Y 范围
+    //   aim_classes[i].min_conf: 该类别的最低置信度 (0=不过滤)
+    // 优先级优先, 距离次之; 未在列表内的 class 被忽略。类别只能加一次
+    // (来源: Target 页 "瞄准" 桶), 通过 UI 拖动整行调整上下顺序。距离上限
+    // 已由 FOV 椭圆(HotkeyProfile::fovX/fovY)承担, 不再单独设。
+    // ─────────────────────────────────────────────────────────────────────
+    std::vector<HotkeyAimClass> aim_classes;
 
     // Per-hotkey crosshair color detection toggle. Global config still owns
     // the ROI size / color palette / area filters; each hotkey just opts in.
@@ -369,10 +389,20 @@ public:
     float  auto_capture_high_conf  = 0.85f;
     bool   auto_capture_use_low    = false;
     float  auto_capture_low_conf   = 0.30f;
+    // "任意检测" 触发:忽略 high/low 阈值,只要该帧有一个 YOLO 检测就采集。
+    // 用于快速积累样本(适合刚训完模型或新场景数据启动阶段)。
+    bool   auto_capture_any_detection = false;
+    // "寻光" 触发:当 flashlight_runtime 本帧有 valid 命中时采集
+    // (跟 YOLO detection 独立)。适合专门收集光晕样本。
+    bool   auto_capture_use_flashlight = false;
     int    auto_capture_cooldown_ms = 200;
     std::vector<std::string> auto_capture_force_keys;
     std::string auto_capture_output_dir = "screenshots/auto";
     bool   auto_capture_save_label = true;
+
+    // 事件编排规则(每行一条,单行序列化,见 event_orchestrator::serialize_rule)。
+    // 引擎启动时反序列化并 event_orch::set_rules;UI 修改后重新序列化写回。
+    std::vector<std::string> event_rules_serialized;
 
     // Class filter table (one entry per class_id the user has seen). New
     // classes discovered after a model change start in Delete and the user

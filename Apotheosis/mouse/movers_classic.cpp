@@ -38,6 +38,15 @@ void ClassicPidMover::configure(const ClassicPidParams& p)
     params_ = p;
 }
 
+void ClassicPidMover::applyMove(int dx, int dy)
+{
+    if (params_.prediction_mode == 2)
+    {
+        accum_x_ += static_cast<double>(dx);
+        accum_y_ += static_cast<double>(dy);
+    }
+}
+
 // ── 动态 KP: 按距离衰减 (pow 曲线) ──
 static double CalcDistanceKP(double dist, double kp_min, double kp_max,
                              double factor, double img_w, double img_h)
@@ -196,6 +205,10 @@ Move ClassicPidMover::step(
         }
     }
 
+    // 暴露给上层曲线 shaper:aim = 预测后的目标点。
+    out.aim_x = aim_x;
+    out.aim_y = aim_y;
+
     // ── 计算 KP / KI / KD ──
     double kp_x, kp_y;
     double ki_x, ki_y, kd_x, kd_y;
@@ -280,13 +293,6 @@ Move ClassicPidMover::step(
 
     out.dx = static_cast<int>(ox + (ox >= 0 ? 0.5 : -0.5));
     out.dy = static_cast<int>(oy + (oy >= 0 ? 0.5 : -0.5));
-
-    // 更新 Kalman 累计量
-    if (pred_mode == 2)
-    {
-        accum_x_ += static_cast<double>(out.dx);
-        accum_y_ += static_cast<double>(out.dy);
-    }
 
     return out;
 }

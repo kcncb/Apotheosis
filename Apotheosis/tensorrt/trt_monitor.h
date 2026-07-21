@@ -29,7 +29,7 @@ inline void TrtExportResetState() noexcept
     gTrtExportLastUpdateMs = TrtNowMs();
 }
 
-class ImGuiProgressMonitor : public nvinfer1::IProgressMonitor {
+class TrtProgressMonitor : public nvinfer1::IProgressMonitor {
 public:
     void phaseStart(const char* phaseName, const char* parentPhase, int32_t nbSteps) noexcept override {
         std::lock_guard<std::mutex> lock(gProgressMutex);

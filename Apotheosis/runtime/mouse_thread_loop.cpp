@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <random>
 #include <vector>
 
 #include "AimbotTarget.h"
@@ -21,6 +22,8 @@
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
+#include "runtime/event_orchestrator.h"
+#include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,14 +97,31 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     return out;
 }
 
-enum class TriggerPhase { Idle, Delay, Pressed, Cooldown };
+enum class TriggerPhase { Idle, Delay, Pressed, Cooldown, SwitchCooldown };
 
 struct TriggerState
 {
     TriggerPhase phase = TriggerPhase::Idle;
     int64_t phase_time_ms = 0;
+    // in_zone 起点时间戳:进入 Idle 后一旦目标进入命中区就 stamp,
+    // 使 (now - in_zone_since_ms) ≥ delay 立即触发,不再空转一帧。
+    int64_t in_zone_since_ms = -1;
+    // 上次开火 / 上次锁定的 target track id,用于检测转火并进入 SwitchCooldown。
+    int last_fire_track_id = -1;
+    // 本轮 phase 目标时长(delay/duration/interval)已经算入随机抖动,
+    // 避免在同一 phase 里每帧重摇导致门槛漂移。
+    int32_t phase_target_ms = 0;
     void reset() { *this = {}; }
 };
+
+// 对基础延迟做 ±jitter 抖动,结果不小于 0。thread_local RNG 避免锁竞争。
+inline int jitter_ms(int base, int jitter)
+{
+    if (jitter <= 0) return std::max(0, base);
+    thread_local std::mt19937 rng{ std::random_device{}() };
+    std::uniform_int_distribution<int> d(-jitter, jitter);
+    return std::max(0, base + d(rng));
+}
 
 void publish_boss_debug(const boss::AimEngine& engine)
 {
@@ -152,12 +172,18 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
     TriggerState trigger;
 
+    // 事件编排状态:跨帧追踪 target 锁定 id 与鼠标 fire 状态。
+    int  ev_last_track_id = -1;   // -1 = 无锁定
+    bool ev_fire_pressed  = false;
+
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
 
     while (!shouldExit && !session_stop_requested.load())
     {
         bool hasNewDetection = false;
+        double detection_age_ms = 0.0;
+        double detection_interval_ms = 0.0;
 
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);
@@ -172,10 +198,28 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 boxes = detectionBuffer.boxes;
                 classes = detectionBuffer.classes;
                 confidences = detectionBuffer.confidences;
+                const size_t aligned = std::min({ boxes.size(), classes.size(), confidences.size() });
+                boxes.resize(aligned);
+                classes.resize(aligned);
+                confidences.resize(aligned);
                 lastVersion = detectionBuffer.version;
                 hasNewDetection = true;
             }
+            detection_interval_ms = detectionBuffer.last_interval_ms;
+            if (detectionBuffer.stamp.time_since_epoch().count() != 0)
+                detection_age_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - detectionBuffer.stamp).count();
         }
+
+        // 只用硬件工作线程已完成的位移更新控制器测量状态。
+        // 队列中尚未发送的命令不再被误当成真实鼠标位移。
+        const auto movement_feedback = mouseThread.consumeMovementFeedback();
+        g_mouse_queue_latency_ms.store(static_cast<float>(movement_feedback.latency_ms));
+        g_mouse_queue_backlog.store(static_cast<int>(movement_feedback.backlog));
+        g_mouse_send_failures.store(movement_feedback.failed);
+        if (movement_feedback.dx != 0 || movement_feedback.dy != 0)
+            engine.applyMove(movement_feedback.dx, movement_feedback.dy);
+        const auto config_snapshot = runtime_config::read();
 
         // Glass filter — drop boxes whose edge ring is dominated by glass-
         // film colour (the打不穿玻璃后面识别到的人形)。Runs BEFORE flashlight
@@ -190,22 +234,21 @@ void mouseThreadFunction(MouseThread& mouseThread)
             crosshair::GlassFilterSettings gs;
             if (filter_active_idx >= 0)
             {
-                std::lock_guard<std::recursive_mutex> cfg(configMutex);
-                if (filter_active_idx < static_cast<int>(config.hotkeys.size())
-                    && config.hotkeys[filter_active_idx].glass_filter_enabled)
+                if (filter_active_idx < static_cast<int>(config_snapshot->hotkeys.size())
+                    && config_snapshot->hotkeys[filter_active_idx].glass_filter_enabled)
                 {
                     glass_on = true;
                     gs.enabled              = true;
                     // Single macro knob → concrete params (ring fixed, min-box
                     // auto-scaled to detection resolution). See glass_tuning.h.
                     const auto gd = crosshair::glass_derive_settings(
-                        config.glass_filter_strength,
-                        cv::Size(config.detection_resolution, config.detection_resolution));
+                        config_snapshot->glass_filter_strength,
+                        cv::Size(config_snapshot->detection_resolution, config_snapshot->detection_resolution));
                     gs.edge_ring_frac       = gd.edge_ring_frac;
                     gs.coverage_threshold   = gd.coverage_threshold;
                     gs.min_box_short_side   = gd.min_box_short_side;
-                    gs.colors.reserve(config.glass_colors.size());
-                    for (const auto& c : config.glass_colors)
+                    gs.colors.reserve(config_snapshot->glass_colors.size());
+                    for (const auto& c : config_snapshot->glass_colors)
                     {
                         crosshair::CrosshairColorBand b;
                         b.name = c.name; b.enabled = c.enabled;
@@ -273,6 +316,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // (kFlashlightClassId) so the tracker / FOV / smart-trigger treat it like
         // a real model detection. Whether it is actually aimed still depends on
         // the user routing `shoudiantong` into a target slot.
+        if (hasNewDetection)
         {
             constexpr float kColocateOverlapFrac = 0.10f; // halo∩box / halo-area
             constexpr float kColocateBoost       = 0.25f; // confidence bump when colocated
@@ -342,37 +386,41 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
 
         // Snapshot active hotkey.
-        HotkeyProfile profile_snapshot;
         const HotkeyProfile* profile_ptr = nullptr;
+        const int config_resolution = config_snapshot->detection_resolution;
+        const float config_confidence = static_cast<float>(config_snapshot->confidence_threshold);
+        const bool replay_enabled = config_snapshot->replay_record_enabled;
+        const int replay_seconds = config_snapshot->replay_seconds;
         int active_idx = runtime::g_active_hotkey_index.load();
-        {
-            std::lock_guard<std::recursive_mutex> cfg(configMutex);
-            if (active_idx >= 0 && active_idx < static_cast<int>(config.hotkeys.size()))
-            {
-                profile_snapshot = config.hotkeys[active_idx];
-                profile_ptr = &profile_snapshot;
-            }
-        }
+        if (active_idx >= 0 && active_idx < static_cast<int>(config_snapshot->hotkeys.size()))
+            profile_ptr = &config_snapshot->hotkeys[active_idx];
         aiming.store(profile_ptr != nullptr);
 
         const bool hotkey_changed = (active_idx != last_hotkey_index_seen);
-        const bool resolution_changed = (config.detection_resolution != last_resolution_seen);
+        const bool resolution_changed = (config_resolution != last_resolution_seen);
 
         if (hotkey_changed || resolution_changed || detection_resolution_changed.load())
         {
             MouseRuntimeParams rp;
-            rp.detection_resolution = config.detection_resolution;
+            rp.detection_resolution = config_resolution;
             mouseThread.updateParams(rp);
             last_hotkey_index_seen = active_idx;
-            last_resolution_seen = config.detection_resolution;
+            last_resolution_seen = config_resolution;
             detection_resolution_changed.store(false);
 
             if (resolution_changed || hotkey_changed)
             {
+                if (ev_last_track_id != -1)
+                    event_orch::publish(event_orch::EventType::TargetLost);
+                if (ev_fire_pressed)
+                    event_orch::publish(event_orch::EventType::FireReleased);
+                ev_last_track_id = -1;
+                ev_fire_pressed = false;
                 engine.reset();
                 if (trigger.phase == TriggerPhase::Pressed)
                     mouseThread.releaseLeftButton();
                 trigger.reset();
+                mouseThread.clearQueuedMoves();
                 last_tick_ts = std::chrono::steady_clock::time_point::min();
                 publish_boss_debug(engine);
             }
@@ -393,8 +441,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 in.boxes = &boxes;
                 in.classes = &classes;
                 in.confidences = &confidences;
-                in.crosshair_x = config.detection_resolution * 0.5;
-                in.crosshair_y = config.detection_resolution * 0.5;
+                in.crosshair_x = config_resolution * 0.5;
+                in.crosshair_y = config_resolution * 0.5;
                 const auto now = std::chrono::steady_clock::now();
                 double dt = 1.0 / 60.0;
                 if (last_tick_ts != std::chrono::steady_clock::time_point::min())
@@ -406,13 +454,35 @@ void mouseThreadFunction(MouseThread& mouseThread)
             continue;
         }
 
-        // Only step the engine when a fresh detection arrives. Without new
-        // observations there's no Layer A work to do, and Layer B without an
-        // updated anchor would just oscillate around stale data.
+        // 正常缓存按“空检测帧”递增 missed；若采集/推理完全停更，就没有新
+        // version 可递增。用最近检测节奏把缓存帧数换算成超时，避免旧锁定
+        // 永久挂住，同时仍不拿陈旧 anchor 驱动 mover。
         if (!hasNewDetection)
+        {
+            const double cadence_ms = (detection_interval_ms > 0.0)
+                ? std::clamp(detection_interval_ms, 1.0, 1000.0)
+                : (1000.0 / 60.0);
+            const double cache_timeout_ms = cadence_ms
+                * static_cast<double>(std::max(1, profile_ptr->lost_target_cache_frames + 1));
+            if (ev_last_track_id != -1 && detection_age_ms > cache_timeout_ms)
+            {
+                engine.reset();
+                publish_boss_debug(engine);
+                mouseThread.clearQueuedMoves();
+                if (trigger.phase == TriggerPhase::Pressed)
+                    mouseThread.releaseLeftButton();
+                trigger.reset();
+                event_orch::publish(event_orch::EventType::TargetLost);
+                if (ev_fire_pressed)
+                    event_orch::publish(event_orch::EventType::FireReleased);
+                ev_last_track_id = -1;
+                ev_fire_pressed = false;
+                g_pid_last_err_px.store(0.0f);
+            }
             continue;
+        }
 
-        const auto pivot = resolve_crosshair_pivot(profile_ptr, config.detection_resolution);
+        const auto pivot = resolve_crosshair_pivot(profile_ptr, config_resolution);
 
         // FOV ellipse radii: half of the user's fovX / fovY. The engine drops
         // detections outside this ellipse before tracker association.
@@ -425,32 +495,41 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.boxes = &boxes;
         in.classes = &classes;
         in.confidences = &confidences;
-        in.target_slots[0] = { profile_ptr->target_class_1, profile_ptr->target_y_top_1,
-                               profile_ptr->target_y_bot_1, profile_ptr->target_min_conf_1 };
-        in.target_slots[1] = { profile_ptr->target_class_2, profile_ptr->target_y_top_2,
-                               profile_ptr->target_y_bot_2, profile_ptr->target_min_conf_2 };
-        in.target_slots[2] = { profile_ptr->target_class_3, profile_ptr->target_y_top_3,
-                               profile_ptr->target_y_bot_3, profile_ptr->target_min_conf_3 };
-        in.target_aim_range = profile_ptr->target_aim_range;
+        // 目标槽位 = 该热键的 aim_classes 列表 (顺序即优先级)。
+        // 用户面范围语义:1 = 框顶,0 = 框底。引擎在每次新锁定时
+        // 从范围内抽一次并保持，切换/重新锁定才重新抽样。
+        in.target_slots.clear();
+        in.target_slots.reserve(profile_ptr->aim_classes.size());
+        // min_conf 语义: >0 视作该类别的私有阈值; ==0 视作 "跟随全局",
+        // 用 AI 页的 config.confidence_threshold 顶上, 从而和 GPU/CPU 侧
+        // 的 NMS/后处理阈值保持一致(不会低于全局设置)。
+        const float global_conf = config_confidence;
+        for (const auto& ac : profile_ptr->aim_classes)
+        {
+            boss::TargetSlot s;
+            s.class_id = ac.class_id;
+            s.y_offset_min = std::clamp(ac.y_offset, 0.0f, 1.0f);
+            s.y_offset_max = std::clamp(ac.y_offset_max, 0.0f, 1.0f);
+            if (s.y_offset_min > s.y_offset_max)
+                std::swap(s.y_offset_min, s.y_offset_max);
+            s.min_conf = (ac.min_conf > 0.0f) ? ac.min_conf : global_conf;
+            in.target_slots.push_back(s);
+        }
         in.deadzone_enabled = profile_ptr->deadzone_enabled;
         in.deadzone_percent = profile_ptr->deadzone_percent;
+        in.lost_target_cache_frames = profile_ptr->lost_target_cache_frames;
         in.crosshair_x = pivot.x;
         in.crosshair_y = pivot.y;
         in.fov_radius_x = fov_rx;
         in.fov_radius_y = fov_ry;
-        in.image_size   = static_cast<double>(config.detection_resolution);
-        in.aim.speed_x        = static_cast<double>(profile_ptr->speed_x);
-        in.aim.speed_y        = static_cast<double>(profile_ptr->speed_y);
-        in.aim.dead_zone_px   = static_cast<double>(profile_ptr->dead_zone_px);
+        in.image_size   = static_cast<double>(config_resolution);
 
-        // 移动控制器选择 (0=微澜/Smooth, 1=疾风/Predictive, 2=天枢/Classic)。
-        in.mover_kind = static_cast<mover::Kind>(
-            std::clamp(profile_ptr->mover_kind, 0, 2));
-
-        in.predictive_params.kp_x        = static_cast<double>(profile_ptr->predictive_kp_x);
-        in.predictive_params.kp_y        = static_cast<double>(profile_ptr->predictive_kp_y);
-        in.predictive_params.kd          = static_cast<double>(profile_ptr->predictive_kd);
-        in.predictive_params.pred_weight = static_cast<double>(profile_ptr->predictive_pred_weight);
+        in.mover_kind = static_cast<mover::Kind>(std::clamp(profile_ptr->mover_kind, 0, 1));
+        in.yaoguang_params.pull_speed_x = profile_ptr->yaoguang_pull_speed_x;
+        in.yaoguang_params.pull_speed_y = profile_ptr->yaoguang_pull_speed_y;
+        in.yaoguang_params.tracking = profile_ptr->yaoguang_tracking;
+        in.yaoguang_params.prediction_ms = profile_ptr->yaoguang_prediction_ms;
+        in.yaoguang_params.stability = profile_ptr->yaoguang_stability;
 
         // 天枢参数
         {
@@ -498,23 +577,17 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.path.cy1 = static_cast<double>(profile_ptr->aim_path_bezier_cy1);
         in.path.cx2 = static_cast<double>(profile_ptr->aim_path_bezier_cx2);
         in.path.cy2 = static_cast<double>(profile_ptr->aim_path_bezier_cy2);
-        {
-            const int N = boss::AimPathDriver::kCustomSamples;
-            for (int i = 0; i < N; ++i)
-            {
-                in.path.custom_samples[i] =
-                    (i < static_cast<int>(profile_ptr->aim_path_custom_samples.size()))
-                        ? profile_ptr->aim_path_custom_samples[i]
-                        : 0.0f;
-            }
-        }
+        // HotkeyProfile 持有不可变共享资产，每帧只复制 shared_ptr。
+        in.path.custom_samples = profile_ptr->aim_path_custom_samples;
+        in.path.neural_enabled = profile_ptr->aim_path_neural_enabled;
+        in.path.neural_weights = profile_ptr->aim_path_neural_weights;
 
-        // dt = wall-clock since the previous engine tick. Doc §9 §11:
-        // 「dt 必须用真实帧间隔,不要硬编 1/60」。
+        // 使用检测器发布相邻推理结果的真实间隔，而不是鼠标线程被唤醒并
+        // 消费结果的时间；后者会混入线程调度和鼠标队列抖动。
         const auto now = std::chrono::steady_clock::now();
-        double dt = 1.0 / 60.0;
-        if (last_tick_ts != std::chrono::steady_clock::time_point::min())
-            dt = std::chrono::duration<double>(now - last_tick_ts).count();
+        double dt = (detection_interval_ms > 0.0)
+            ? std::clamp(detection_interval_ms * 0.001, 1.0 / 1000.0, 0.1)
+            : 1.0 / 60.0;
         last_tick_ts = now;
 
         const boss::EngineOutput out = engine.tick(in, dt);
@@ -524,11 +597,40 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // ─── Drive mouse ───
         if (out.have_target)
         {
-            mouseThread.sendRawMove(out.dx, out.dy);
+            // ─── 事件编排:target 锁定/切换事件 ───
+            if (ev_last_track_id == -1)
+                event_orch::publish(event_orch::EventType::TargetLocked);
+            else if (ev_last_track_id != out.current_track_id)
+                event_orch::publish(event_orch::EventType::TargetSwitched);
+            ev_last_track_id = out.current_track_id;
+
+            // Y 力度百分比:1..500,应用于所有 mover 的最终 dy(X 不动)。
+            // 100 = 原样;<100 削弱垂直分量 → 弹道更"飘"(近人手感)。
+            int drive_dx = out.dx;
+            int drive_dy = out.dy;
+            if (profile_ptr->y_strength_percent != 100)
+            {
+                const double sy = static_cast<double>(profile_ptr->y_strength_percent) / 100.0;
+                drive_dy = static_cast<int>(std::lround(static_cast<double>(out.dy) * sy));
+            }
+            if (out.motion_suppressed)
+                mouseThread.clearQueuedMoves();
+            if (!out.coasting)
+            {
+                mouseThread.sendRawMove(drive_dx, drive_dy);
+            }
+
+            if (out.coasting)
+            {
+                if (trigger.phase == TriggerPhase::Pressed)
+                    mouseThread.releaseLeftButton();
+                trigger.reset();
+            }
 
             // ─── 扳机 FSM ───
-            if (profile_ptr->trigger_enabled)
+            if (!out.coasting && profile_ptr->trigger_enabled)
             {
+                // trigger_y_percent > 100 = 命中区大于 bbox (预开火)。
                 const double tx_range = out.bbox.width  * profile_ptr->trigger_y_percent / 100.0 * 0.5;
                 const double ty_range = out.bbox.height * profile_ptr->trigger_y_percent / 100.0 * 0.5;
                 const bool in_zone = std::abs(pivot.x - static_cast<double>(out.anchor.x)) <= tx_range &&
@@ -537,48 +639,106 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now.time_since_epoch()).count();
 
+                // 转火检测:锁定的 target track_id 变化 → 进 SwitchCooldown。
+                // 首次锁定 (last_fire_track_id == -1) 不算转火,直接走 Idle。
+                if (out.current_track_id != trigger.last_fire_track_id &&
+                    trigger.last_fire_track_id != -1 &&
+                    profile_ptr->trigger_switch_cooldown_ms > 0 &&
+                    trigger.phase != TriggerPhase::SwitchCooldown)
+                {
+                    if (trigger.phase == TriggerPhase::Pressed)
+                        mouseThread.releaseLeftButton();
+                    trigger.phase = TriggerPhase::SwitchCooldown;
+                    trigger.phase_time_ms = now_ms;
+                    // 转火冷却本身可以带抖动(用 delay_jitter,懒得再加参数)。
+                    trigger.phase_target_ms = jitter_ms(
+                        profile_ptr->trigger_switch_cooldown_ms,
+                        profile_ptr->trigger_delay_jitter_ms);
+                    trigger.in_zone_since_ms = -1;
+                }
+                trigger.last_fire_track_id = out.current_track_id;
+
                 switch (trigger.phase)
                 {
                 case TriggerPhase::Idle:
                     if (in_zone)
                     {
-                        if (profile_ptr->trigger_fire_delay > 0)
+                        // 记录 in_zone 起点。已经 in_zone 就沿用旧 stamp,
+                        // 达到累计时长即触发 —— 1ms delay 不再空转一整帧。
+                        if (trigger.in_zone_since_ms < 0)
                         {
-                            trigger.phase = TriggerPhase::Delay;
-                            trigger.phase_time_ms = now_ms;
+                            trigger.in_zone_since_ms = now_ms;
+                            trigger.phase_target_ms = jitter_ms(
+                                profile_ptr->trigger_fire_delay,
+                                profile_ptr->trigger_delay_jitter_ms);
                         }
-                        else
+                        if (now_ms - trigger.in_zone_since_ms >= trigger.phase_target_ms)
                         {
                             mouseThread.pressLeftButton();
                             trigger.phase = TriggerPhase::Pressed;
                             trigger.phase_time_ms = now_ms;
+                            trigger.phase_target_ms = jitter_ms(
+                                profile_ptr->trigger_fire_duration,
+                                profile_ptr->trigger_duration_jitter_ms);
+                            trigger.in_zone_since_ms = -1;
                         }
+                        else
+                        {
+                            trigger.phase = TriggerPhase::Delay;
+                            trigger.phase_time_ms = trigger.in_zone_since_ms;
+                        }
+                    }
+                    else
+                    {
+                        trigger.in_zone_since_ms = -1;
                     }
                     break;
                 case TriggerPhase::Delay:
-                    if (!in_zone) { trigger.phase = TriggerPhase::Idle; break; }
-                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_delay)
+                    if (!in_zone)
+                    {
+                        trigger.phase = TriggerPhase::Idle;
+                        trigger.in_zone_since_ms = -1;
+                        break;
+                    }
+                    if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
                     {
                         mouseThread.pressLeftButton();
                         trigger.phase = TriggerPhase::Pressed;
                         trigger.phase_time_ms = now_ms;
+                        trigger.phase_target_ms = jitter_ms(
+                            profile_ptr->trigger_fire_duration,
+                            profile_ptr->trigger_duration_jitter_ms);
+                        trigger.in_zone_since_ms = -1;
                     }
                     break;
                 case TriggerPhase::Pressed:
-                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_duration)
+                    if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
                     {
                         mouseThread.releaseLeftButton();
                         trigger.phase = TriggerPhase::Cooldown;
                         trigger.phase_time_ms = now_ms;
+                        trigger.phase_target_ms = jitter_ms(
+                            profile_ptr->trigger_fire_interval,
+                            profile_ptr->trigger_interval_jitter_ms);
                     }
                     break;
                 case TriggerPhase::Cooldown:
-                    if (now_ms - trigger.phase_time_ms >= profile_ptr->trigger_fire_interval)
+                    if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
+                    {
                         trigger.phase = TriggerPhase::Idle;
+                        trigger.in_zone_since_ms = -1;
+                    }
+                    break;
+                case TriggerPhase::SwitchCooldown:
+                    if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
+                    {
+                        trigger.phase = TriggerPhase::Idle;
+                        trigger.in_zone_since_ms = -1;
+                    }
                     break;
                 }
             }
-            else
+            else if (!out.coasting)
             {
                 if (trigger.phase == TriggerPhase::Pressed)
                     mouseThread.releaseLeftButton();
@@ -597,13 +757,28 @@ void mouseThreadFunction(MouseThread& mouseThread)
             trigger.reset();
             mouseThread.clearQueuedMoves();
             g_pid_last_err_px.store(0.0f);
+
+            // ─── 事件编排:target 丢失事件 ───
+            if (ev_last_track_id != -1)
+                event_orch::publish(event_orch::EventType::TargetLost);
+            ev_last_track_id = -1;
+        }
+
+        // ─── 事件编排:扳机 Fire 状态 diff → FirePressed / FireReleased ───
+        {
+            const bool now_pressed = (trigger.phase == TriggerPhase::Pressed);
+            if (now_pressed && !ev_fire_pressed)
+                event_orch::publish(event_orch::EventType::FirePressed);
+            else if (!now_pressed && ev_fire_pressed)
+                event_orch::publish(event_orch::EventType::FireReleased);
+            ev_fire_pressed = now_pressed;
         }
 
         // ─── Replay buffer (one snapshot per detection) ─────────────────
         auto& replay = runtime::ReplayBuffer::instance();
-        replay.setEnabled(config.replay_record_enabled);
-        replay.setRetentionSeconds(config.replay_seconds);
-        if (config.replay_record_enabled)
+        replay.setEnabled(replay_enabled);
+        replay.setRetentionSeconds(replay_seconds);
+        if (replay_enabled)
         {
             runtime::ReplayFrame f;
             f.ts = now;
@@ -652,4 +827,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
     // On shutdown make absolutely sure the fire button is released.
     mouseThread.releaseLeftButton();
+    mouseThread.clearQueuedMoves();
+    if (ev_last_track_id != -1)
+        event_orch::publish(event_orch::EventType::TargetLost);
+    if (ev_fire_pressed)
+        event_orch::publish(event_orch::EventType::FireReleased);
 }

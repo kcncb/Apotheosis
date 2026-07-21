@@ -14,6 +14,7 @@
 #include <dxgi.h>
 
 #include "dml_detector.h"
+#include "runtime/config_snapshot.h"
 #include "Apotheosis.h"
 #include "postProcess.h"
 #include "capture.h"
@@ -176,7 +177,8 @@ bool DirectMLDetector::initialize(const std::string& model_path)
         session_options.SetInterOpNumThreads(1);
 
         bool using_dml_provider = true;
-        const ProviderAppendResult dml_status = appendDirectMLProviderSafely(session_options, config.dml_device_id);
+        const auto runtimeConfig = runtime_config::read();
+        const ProviderAppendResult dml_status = appendDirectMLProviderSafely(session_options, runtimeConfig->dml_device_id);
         if (dml_status.status || dml_status.seh_code != 0)
         {
             using_dml_provider = false;
@@ -184,7 +186,7 @@ bool DirectMLDetector::initialize(const std::string& model_path)
                 ? consumeOrtStatusMessage(dml_status.status)
                 : ("SEH exception " + codeToHex(dml_status.seh_code));
             std::cerr << "[DirectML] provider initialization failed on adapter "
-                      << config.dml_device_id << " (" << GetDMLDeviceName(config.dml_device_id)
+                      << runtimeConfig->dml_device_id << " (" << GetDMLDeviceName(runtimeConfig->dml_device_id)
                       << "): " << reason << ". Falling back to ONNX Runtime CPU provider." << std::endl;
             session_options = Ort::SessionOptions{};
             session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -193,10 +195,10 @@ bool DirectMLDetector::initialize(const std::string& model_path)
             session_options.SetInterOpNumThreads(1);
         }
 
-        if (config.verbose)
+        if (runtimeConfig->verbose)
         {
             if (using_dml_provider)
-                std::cout << "[DirectML] Using adapter: " << GetDMLDeviceName(config.dml_device_id) << std::endl;
+                std::cout << "[DirectML] Using adapter: " << GetDMLDeviceName(runtimeConfig->dml_device_id) << std::endl;
             else
                 std::cout << "[DirectML] Running with ONNX Runtime CPU provider fallback." << std::endl;
         }
@@ -270,9 +272,13 @@ void DirectMLDetector::readModelMetadata(const std::string& model_path)
     bool isStatic = true;
     for (auto d : input_shape) if (d <= 0) isStatic = false;
 
-    if (isStatic != config.fixed_input_size)
+    if (isStatic != runtime_config::read()->fixed_input_size)
     {
-        config.fixed_input_size = isStatic;
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            config.fixed_input_size = isStatic;
+        }
+        runtime_config::publish();
         detector_model_changed.store(true);
         std::cout << "[DML] Automatically set fixed_input_size = " << (isStatic ? "true" : "false") << std::endl;
     }
@@ -339,7 +345,7 @@ void DirectMLDetector::readModelMetadata(const std::string& model_path)
     }
     catch (const std::exception& e)
     {
-        if (config.verbose)
+        if (runtime_config::read()->verbose)
             std::cerr << "[DirectMLDetector] Reading ONNX metadata failed: " << e.what() << std::endl;
     }
 
@@ -388,10 +394,11 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
             model_w = converted;
         }
     }
-    const bool useFixed = config.fixed_input_size && model_h > 0 && model_w > 0;
+    const auto runtimeConfig = runtime_config::read();
+    const bool useFixed = runtimeConfig->fixed_input_size && model_h > 0 && model_w > 0;
 
-    const int target_h = useFixed ? model_h : config.detection_resolution;
-    const int target_w = useFixed ? model_w : config.detection_resolution;
+    const int target_h = useFixed ? model_h : runtimeConfig->detection_resolution;
+    const int target_w = useFixed ? model_w : runtimeConfig->detection_resolution;
 
     auto t0 = std::chrono::steady_clock::now();
     std::vector<float> input_tensor_values(
@@ -474,8 +481,9 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
 
     std::vector<std::vector<Detection>> batchDetections(batch_size);
     const SmallTargetDecode st = computeSmallTargetDecode();
+    const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
     float conf_thr = st.decodeFloor;
-    float nms_thr = config.nms_threshold;
+    float nms_thr = runtime.nmsThreshold;
 
     auto t4 = std::chrono::steady_clock::now();
     std::chrono::duration<double, std::milli> nmsTimeTmp{ 0 };
@@ -489,9 +497,9 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
         detections = postProcessYoloDML(ptr, shp, num_classes, conf_thr, nms_thr, &nmsTimeTmp,
                                         st.baseConf, st.areaThreshPx);
 
-        if (useFixed && (target_w != config.detection_resolution))
+        if (useFixed && (target_w != runtime.detectionResolution))
         {
-            float scale = static_cast<float>(config.detection_resolution) / target_w;
+            float scale = static_cast<float>(runtime.detectionResolution) / target_w;
             for (auto& d : detections)
             {
                 d.box.x = static_cast<int>(d.box.x * scale);
@@ -531,11 +539,12 @@ void DirectMLDetector::inferenceThread()
         {
             if (detector_model_changed.load())
             {
-                initializeModel("models/" + config.ai_model);
+                const auto runtimeConfig = runtime_config::read();
+                initializeModel("models/" + runtimeConfig->ai_model);
                 publishDmlModelMetadata(*this);
                 detection_resolution_changed.store(true);
                 detector_model_changed.store(false);
-                std::cout << "[DML] Detector reloaded: " << config.ai_model << std::endl;
+                std::cout << "[DML] Detector reloaded: " << runtimeConfig->ai_model << std::endl;
             }
 
 
@@ -566,7 +575,8 @@ void DirectMLDetector::inferenceThread()
                 }
                 const std::vector<Detection>& detections = detectionsBatch.back();
                 std::vector<Detection> filteredDetections = detections;
-                capDetectionsToMax(filteredDetections, config.max_detections);
+                const auto runtime = detectorRuntimeSettings();
+                capDetectionsToMax(filteredDetections, runtime.maxDetections);
 
                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
                 detectionBuffer.boxes.clear();

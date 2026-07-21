@@ -70,5 +70,8 @@ private:
 #include <atomic>
 extern std::atomic<bool> g_replay_playback_active;
 extern std::atomic<int>  g_replay_playback_frame;
+extern std::atomic<float> g_mouse_queue_latency_ms;
+extern std::atomic<int> g_mouse_queue_backlog;
+extern std::atomic<unsigned long long> g_mouse_send_failures;
 
 #endif // RUNTIME_AIM_TELEMETRY_H

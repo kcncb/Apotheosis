@@ -9,6 +9,7 @@
 
 #include "Apotheosis.h"
 #include "config.h"
+#include "runtime/config_snapshot.h"
 #include "flashlight_runtime.h"
 #include "laser_detector.h"
 #include "runtime/active_hotkey.h"
@@ -176,13 +177,14 @@ void process_frame(const cv::Mat& bgrFrame)
     crosshair::LaserDetectorSettings     laser_settings;
 
     {
-        std::lock_guard<std::recursive_mutex> cfg(configMutex);
-        if (active_idx >= static_cast<int>(config.hotkeys.size()))
+        const auto snapshot = runtime_config::read();
+        const auto& cfg = *snapshot;
+        if (active_idx >= static_cast<int>(cfg.hotkeys.size()))
         {
             publish(PivotSnapshot{});
             return;
         }
-        const auto& hk = config.hotkeys[active_idx];
+        const auto& hk = cfg.hotkeys[active_idx];
         cross_enabled = hk.crosshair_detect_enabled;
         laser_enabled = hk.laser_detect_enabled;
         if (hk.trigger_enabled)
@@ -194,16 +196,16 @@ void process_frame(const cv::Mat& bgrFrame)
             return;
         }
 
-        cross_smooth = config.crosshair_smooth;
-        laser_smooth = config.laser_smooth;
+        cross_smooth = cfg.crosshair_smooth;
+        laser_smooth = cfg.laser_smooth;
 
         cross_settings.enabled         = true;
-        cross_settings.rect_w          = config.crosshair_rect_w;
-        cross_settings.rect_h          = config.crosshair_rect_h;
-        cross_settings.min_pixel_count = config.crosshair_min_pixel_count;
-        cross_settings.close_radius    = config.crosshair_close_radius;
-        cross_settings.colors.reserve(config.crosshair_colors.size());
-        for (const auto& c : config.crosshair_colors)
+        cross_settings.rect_w          = cfg.crosshair_rect_w;
+        cross_settings.rect_h          = cfg.crosshair_rect_h;
+        cross_settings.min_pixel_count = cfg.crosshair_min_pixel_count;
+        cross_settings.close_radius    = cfg.crosshair_close_radius;
+        cross_settings.colors.reserve(cfg.crosshair_colors.size());
+        for (const auto& c : cfg.crosshair_colors)
         {
             crosshair::CrosshairColorBand b;
             b.name = c.name; b.enabled = c.enabled;
@@ -215,19 +217,19 @@ void process_frame(const cv::Mat& bgrFrame)
         }
 
         laser_settings.enabled         = true;
-        laser_settings.rect_w          = config.laser_rect_w;
-        laser_settings.rect_h          = config.laser_rect_h;
-        laser_settings.center_x        = config.laser_center_x;
-        laser_settings.center_y        = config.laser_center_y;
-        laser_settings.min_pixel_count = config.laser_min_pixel_count;
-        laser_settings.close_radius    = config.laser_close_radius;
-        laser_settings.min_elongation  = config.laser_min_elongation;
-        laser_settings.target_center_x = config.laser_target_center_x;
-        laser_settings.target_center_y = config.laser_target_center_y;
-        laser_settings.target_rect_w   = config.laser_target_rect_w;
-        laser_settings.target_rect_h   = config.laser_target_rect_h;
-        laser_settings.colors.reserve(config.laser_colors.size());
-        for (const auto& c : config.laser_colors)
+        laser_settings.rect_w          = cfg.laser_rect_w;
+        laser_settings.rect_h          = cfg.laser_rect_h;
+        laser_settings.center_x        = cfg.laser_center_x;
+        laser_settings.center_y        = cfg.laser_center_y;
+        laser_settings.min_pixel_count = cfg.laser_min_pixel_count;
+        laser_settings.close_radius    = cfg.laser_close_radius;
+        laser_settings.min_elongation  = cfg.laser_min_elongation;
+        laser_settings.target_center_x = cfg.laser_target_center_x;
+        laser_settings.target_center_y = cfg.laser_target_center_y;
+        laser_settings.target_rect_w   = cfg.laser_target_rect_w;
+        laser_settings.target_rect_h   = cfg.laser_target_rect_h;
+        laser_settings.colors.reserve(cfg.laser_colors.size());
+        for (const auto& c : cfg.laser_colors)
         {
             crosshair::CrosshairColorBand b;
             b.name = c.name; b.enabled = c.enabled;

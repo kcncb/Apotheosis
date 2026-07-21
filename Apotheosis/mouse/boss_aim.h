@@ -33,8 +33,9 @@ struct Track
 struct TargetSlot
 {
     int   class_id = -1;
-    float y_top = 0.0f;
-    float y_bot = 1.0f;
+    // 用户坐标:0=框底,1=框顶。新锁定时在 [min,max] 中抽一次并保持。
+    float y_offset_min = 0.5f;
+    float y_offset_max = 0.5f;
     float min_conf = 0.0f;
 };
 
@@ -44,11 +45,12 @@ struct EngineInput
     const std::vector<int>* classes = nullptr;
     const std::vector<float>* confidences = nullptr;
 
-    TargetSlot target_slots[3];
-    int target_aim_range = 150;
+    // 优先级 = 索引顺序 (0 最高)。空表示当前热键没有可瞄类别 → 不选目标。
+    std::vector<TargetSlot> target_slots;
 
     bool  deadzone_enabled = false;
     float deadzone_percent = 0.0f;
+    int   lost_target_cache_frames = 5;
 
     double crosshair_x = 0.0;
     double crosshair_y = 0.0;
@@ -60,7 +62,6 @@ struct EngineInput
     // 驱动 box 大小自适应(大框压增益/小框抬增益)。微澜不使用。
     double image_size = 0.0;
 
-    ArtSettings aim{};
 
     // Trajectory shaper. When mode == Linear the engine uses ART's
     // built-in proportional drive (legacy / default). Otherwise the
@@ -72,9 +73,9 @@ struct EngineInput
     // 移动控制器选择 (见 movers.h)。Smooth = 走 ART/path 原路径,
     // Predictive = 引擎旁路 AimPathDriver,把 (ART filtered aim − crosshair) 喂给
     // 位置式 PID + 预测器直接出 dx/dy。
-    mover::Kind             mover_kind = mover::Kind::Smooth;
-    mover::PredictiveParams predictive_params{};
+    mover::Kind             mover_kind = mover::Kind::Classic;
     mover::ClassicPidParams classic_params{};
+    mover::YaoguangParams   yaoguang_params{};
 };
 
 struct EngineOutput
@@ -92,6 +93,8 @@ struct EngineOutput
     double cutoff_hz = 0;
     double consistency = 0;
     bool   snapped = false;
+    bool   coasting = false;          // track 在缓存期，但本帧没有真实检测
+    bool   motion_suppressed = false; // 要求上层清空尚未发送的旧移动
 };
 
 class AimEngine
@@ -99,29 +102,38 @@ class AimEngine
 public:
     void reset();
     EngineOutput tick(const EngineInput& in, double dt);
+    void applyMove(int dx, int dy);
 
     int  lockedTrackId() const { return current_id_; }
     const std::vector<Track>& tracks() const { return tracks_; }
 
 private:
-    static constexpr int   kMDrop      = 5;
     static constexpr float kMatchRatio = 0.5f;
     static constexpr float kMatchMinPx = 28.0f;
 
     void assignDetections(const EngineInput& in);
-    void purgeLost();
+    void purgeLost(int max_missed_frames);
+    void resetMotionControllers();
 
     std::vector<Track> tracks_;
     int next_id_ = 1;
     int current_id_ = -1;
     int prev_current_id_ = -1;
-    AdaptiveReactiveTracker art_;
     AimPathDriver path_;
     // 疾风 PID + 预测器,作为成员长期持有 (state 跨帧)。
-    mover::PredictiveMover predictive_mover_{};
     // 天枢 经典 PID + 动态 KP + 预测器。
     mover::ClassicPidMover classic_mover_{};
-    mover::Kind            last_mover_kind_ = mover::Kind::Smooth;
+    mover::YaoguangMover   yaoguang_mover_{};
+
+    // 共享死区采用进入/退出滞回，避免检测噪声在边界每帧开关。
+    bool deadzone_latched_ = false;
+    int  deadzone_track_id_ = -1;
+
+    // 每次锁定只抽一次随机 Y，锁定期间保持，避免“随机”本身变成抖动。
+    int   random_y_track_id_ = -1;
+    float random_y_min_ = 0.5f;
+    float random_y_max_ = 0.5f;
+    float random_y_value_ = 0.5f;
 };
 
 } // namespace boss

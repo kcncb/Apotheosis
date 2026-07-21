@@ -77,12 +77,7 @@ int main(int argc, char* argv[]) {
 
     const bool shotMode = app.arguments().contains("--shot");
 
-    if (!shotMode) {
-        LoginDialog login;
-        if (login.exec() != QDialog::Accepted)
-            return 0;
-    }
-
+    // 单机自用：跳过登录对话框
     MainWindow window;
     window.resize(960, 640);
     window.show();

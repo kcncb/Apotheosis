@@ -166,10 +166,15 @@ void FreehandCurveEditor::paintEvent(QPaintEvent*) {
 
     // Stored sample polyline.
     QPainterPath path;
-    for (int i = 0; i < kSampleCount; ++i) {
-        const float x = static_cast<float>(i) / (kSampleCount - 1);
+    // 内部保留 32768 点，显示时按画布像素宽度降采样，避免每帧
+    // 提交数万个无法在屏幕上区分的绘图顶点。
+    const int displayCount = std::clamp(static_cast<int>(r.width()) * 2, 64, 2048);
+    for (int di = 0; di < displayCount; ++di) {
+        const float x = static_cast<float>(di) / (displayCount - 1);
+        const int i = std::clamp(static_cast<int>(std::lround(x * (kSampleCount - 1))),
+                                 0, kSampleCount - 1);
         const QPointF pt = normToScreen(x, m_samples[i]);
-        if (i == 0) path.moveTo(pt);
+        if (di == 0) path.moveTo(pt);
         else        path.lineTo(pt);
     }
     p.setPen(QPen(QColor("#4A7FE5"), 2));
@@ -179,9 +184,12 @@ void FreehandCurveEditor::paintEvent(QPaintEvent*) {
     // Sample dots.
     p.setPen(Qt::NoPen);
     p.setBrush(QColor("#4A7FE5"));
-    for (int i = 0; i < kSampleCount; ++i) {
-        const float x = static_cast<float>(i) / (kSampleCount - 1);
-        p.drawEllipse(normToScreen(x, m_samples[i]), 2, 2);
+    constexpr int visibleDots = 128;
+    for (int di = 0; di < visibleDots; ++di) {
+        const float x = static_cast<float>(di) / (visibleDots - 1);
+        const int i = std::clamp(static_cast<int>(std::lround(x * (kSampleCount - 1))),
+                                 0, kSampleCount - 1);
+        p.drawEllipse(normToScreen(x, m_samples[i]), 1.5, 1.5);
     }
 
     // In-progress stroke (lighter color over the top).

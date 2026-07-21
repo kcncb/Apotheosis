@@ -1,6 +1,7 @@
 #include "pages/StatsPage.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
+#include "runtime/aim_telemetry.h"
 
 #include <QGridLayout>
 #include <QLabel>
@@ -8,6 +9,7 @@
 #include <QPainterPath>
 #include <QPaintEvent>
 #include <QScrollArea>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -206,6 +208,28 @@ StatsPage::StatsPage(QWidget* parent)
     addRxRow(QStringLiteral("NIC 驱动丢"),  m_rxPcapIfDrop);
 
     layout->addWidget(rxCard);
+
+    auto* mouseCard = new CardWidget(QString::fromUtf8(u8"鼠标发送队列"), QStringLiteral("activity"));
+    mouseCard->setCollapsible(true);
+    auto addMouseRow = [mouseCard](const QString& caption, QLabel*& output) {
+        output = new QLabel(QStringLiteral("--"));
+        output->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        mouseCard->contentLayout()->addWidget(FormKit::fieldRow(caption, output));
+    };
+    addMouseRow(QString::fromUtf8(u8"发送延迟"), m_mouseQueueLatency);
+    addMouseRow(QString::fromUtf8(u8"队列积压"), m_mouseQueueBacklog);
+    addMouseRow(QString::fromUtf8(u8"发送失败"), m_mouseSendFailures);
+    layout->addWidget(mouseCard);
+
+    auto* mouseTimer = new QTimer(this);
+    mouseTimer->setInterval(250);
+    connect(mouseTimer, &QTimer::timeout, this, [this] {
+        m_mouseQueueLatency->setText(
+            QString::number(g_mouse_queue_latency_ms.load(), 'f', 2) + QStringLiteral(" ms"));
+        m_mouseQueueBacklog->setText(QString::number(g_mouse_queue_backlog.load()));
+        m_mouseSendFailures->setText(QString::number(g_mouse_send_failures.load()));
+    });
+    mouseTimer->start();
 
     // ── Card 4: 系统资源 (collapsible) ──
     auto* sysCard = new CardWidget(QStringLiteral("系统资源"), QStringLiteral("cpu"));

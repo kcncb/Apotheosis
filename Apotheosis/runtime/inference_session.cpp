@@ -22,6 +22,7 @@
 #include "detector/model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "auth/auth_state.h"
+#include "runtime/config_snapshot.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> detection_resolution_changed;
@@ -33,9 +34,9 @@ namespace runtime
 namespace
 {
 template <typename Func>
-std::thread start_guarded(const char* name, Func func)
+std::thread start_guarded(const char* name, Func func, std::atomic<bool>* running)
 {
-    return std::thread([name, func]() mutable {
+    return std::thread([name, func, running]() mutable {
         try
         {
             func();
@@ -43,11 +44,13 @@ std::thread start_guarded(const char* name, Func func)
         catch (const std::exception& e)
         {
             std::cerr << "[Session] Thread '" << name << "' crashed: " << e.what() << std::endl;
+            if (running) running->store(false, std::memory_order_release);
             shouldExit = true;
         }
         catch (...)
         {
             std::cerr << "[Session] Thread '" << name << "' crashed with unknown exception." << std::endl;
+            if (running) running->store(false, std::memory_order_release);
             shouldExit = true;
         }
     });
@@ -73,6 +76,7 @@ void publish_model_metadata(IDetector* detector)
         std::lock_guard<std::recursive_mutex> lock(configMutex);
         config.sync_class_filters_from_model(md.class_count, md.class_names);
     }
+    runtime_config::publish();
 
     {
         std::lock_guard<std::mutex> lock(g_model_metadata_mutex);
@@ -85,18 +89,18 @@ void publish_model_metadata(detector::ModelMetadata md)
     detector::pad_class_names(md, md.class_count);
 
     bool config_changed = false;
-    if (md.fixed_input_size_known && config.fixed_input_size != md.fixed_input_size)
-    {
-        config.fixed_input_size = md.fixed_input_size;
-        config_changed = true;
-        std::cout << "[ModelInspector] Automatically set fixed_input_size = "
-                  << (md.fixed_input_size ? "true" : "false") << std::endl;
-    }
-
     {
         std::lock_guard<std::recursive_mutex> lock(configMutex);
+        if (md.fixed_input_size_known && config.fixed_input_size != md.fixed_input_size)
+        {
+            config.fixed_input_size = md.fixed_input_size;
+            config_changed = true;
+            std::cout << "[ModelInspector] Automatically set fixed_input_size = "
+                      << (md.fixed_input_size ? "true" : "false") << std::endl;
+        }
         config.sync_class_filters_from_model(md.class_count, md.class_names);
     }
+    runtime_config::publish();
 
     {
         std::lock_guard<std::mutex> lock(g_model_metadata_mutex);
@@ -112,7 +116,7 @@ detector::ModelMetadata inspect_model_metadata_for_ui(const std::string& model_p
     std::filesystem::path path(std::filesystem::u8path(model_path));
     const std::string ext = path.extension().u8string();
     if (_stricmp(ext.c_str(), ".onnx") == 0 || oliver::is_oliver_path(model_path))
-        return detector::inspect_onnx_model(model_path, config.verbose);
+        return detector::inspect_onnx_model(model_path, runtime_config::read()->verbose);
 
     detector::ModelMetadata md;
     if (_stricmp(ext.c_str(), ".engine") == 0)
@@ -156,30 +160,7 @@ bool preload_model_metadata(const std::string& model_path, bool persist_config, 
         return false;
     }
 
-    if (oliver::is_oliver_path(model_path))
-    {
-        std::string model_id;
-        std::string id_error;
-        if (!oliver::read_model_id_from_file(model_path, model_id, id_error))
-        {
-            if (error) *error = id_error;
-            return false;
-        }
-        if (!auth::state().ensure_model_key(model_id))
-        {
-            if (error) *error = auth::state().last_error();
-            return false;
-        }
-    }
-    else if (config.auth_require_online)
-    {
-        if (!auth::state().heartbeat_if_due())
-        {
-            if (error) *error = auth::state().last_error();
-            return false;
-        }
-    }
-
+    // 单机自用：跳过 oliver 密钥/心跳检查
     detector::ModelMetadata md = inspect_model_metadata_for_ui(model_path);
     publish_model_metadata(std::move(md));
 
@@ -214,28 +195,7 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
     current_model_path_ = model_path;
     last_error_.clear();
 
-    if (config.auth_require_online && !oliver::is_oliver_path(model_path) && !auth::state().heartbeat_if_due())
-    {
-        last_error_ = auth::state().last_error();
-        return false;
-    }
-
-    if (oliver::is_oliver_path(model_path))
-    {
-        std::string model_id;
-        std::string id_error;
-        if (!oliver::read_model_id_from_file(model_path, model_id, id_error))
-        {
-            last_error_ = id_error;
-            return false;
-        }
-        if (!auth::state().ensure_model_key(model_id))
-        {
-            last_error_ = auth::state().last_error();
-            return false;
-        }
-    }
-
+    // 单机自用：跳过 oliver 密钥/心跳检查
     if (backend == "DML")
     {
         auto dml = std::make_unique<DirectMLDetector>();
@@ -283,39 +243,27 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
 
     session_stop_requested.store(false);
 
-    capture_thread_ = start_guarded("CaptureThread", [] {
-        captureThread(config.detection_resolution, config.detection_resolution);
-    });
+    int capture_resolution = 320;
+    {
+        std::lock_guard<std::recursive_mutex> config_lock(configMutex);
+        capture_resolution = runtime_config::read()->detection_resolution;
+    }
+    running_.store(true, std::memory_order_release);
+
+    capture_thread_ = start_guarded("CaptureThread", [capture_resolution] {
+        captureThread(capture_resolution, capture_resolution);
+    }, &running_);
 
     detector_thread_ = start_guarded("DetectorThread", [] {
         if (g_detector)
             g_detector->inferenceThread();
-    });
+    }, &running_);
 
     mouse_thread_ = start_guarded("MouseThread", [this] {
         mouseThreadFunction(mouse_driver_);
-    });
+    }, &running_);
 
-    heartbeat_thread_ = start_guarded("AuthHeartbeat", [this] {
-        while (!session_stop_requested.load() && !shouldExit.load())
-        {
-            if (config.auth_require_online && !auth::state().heartbeat_if_due())
-            {
-                last_error_ = auth::state().last_error();
-                std::cerr << "[Auth] Heartbeat failed: " << last_error_ << std::endl;
-                session_stop_requested.store(true);
-                if (detector_raw_)
-                    detector_raw_->requestExit();
-                detectionBuffer.cv.notify_all();
-                frameCV.notify_all();
-                break;
-            }
-            for (int i = 0; i < 50 && !session_stop_requested.load() && !shouldExit.load(); ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    });
-
-    running_.store(true, std::memory_order_release);
+    // 单机自用：不再启动鉴权心跳线程
     std::cout << "[Session] Started with backend=" << backend
               << " model=" << model_path << std::endl;
     return true;

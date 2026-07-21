@@ -148,8 +148,8 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
     "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
-    "${SRC_DIR}/mouse/movers.cpp"
     "${SRC_DIR}/mouse/movers_classic.cpp"
+    "${SRC_DIR}/mouse/movers_yaoguang.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
     "${SRC_DIR}/mouse/KmboxAConnection.cpp"
@@ -163,6 +163,9 @@ set(APP_SOURCES
     "${SRC_DIR}/runtime/active_hotkey.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
+    "${SRC_DIR}/runtime/config_snapshot.cpp"
+    "${SRC_DIR}/runtime/config_snapshot.h"
+    "${SRC_DIR}/runtime/event_orchestrator.cpp"
     "${SRC_DIR}/runtime/inference_session.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
     "${SRC_DIR}/scr/file_picker.cpp"
@@ -185,6 +188,8 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/CrosshairPage.h"
     "${QT_UI_DIR}/pages/DebugPage.cpp"
     "${QT_UI_DIR}/pages/DebugPage.h"
+    "${QT_UI_DIR}/pages/EventPage.cpp"
+    "${QT_UI_DIR}/pages/EventPage.h"
     "${QT_UI_DIR}/pages/DepthPage.cpp"
     "${QT_UI_DIR}/pages/DepthPage.h"
     "${QT_UI_DIR}/pages/FlashlightPage.cpp"
@@ -211,10 +216,13 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/StatsPage.h"
     "${QT_UI_DIR}/pages/TargetPage.cpp"
     "${QT_UI_DIR}/pages/TargetPage.h"
+    "${QT_UI_DIR}/widgets/AdaptiveStack.h"
     "${QT_UI_DIR}/widgets/BezierEditor.cpp"
     "${QT_UI_DIR}/widgets/BezierEditor.h"
     "${QT_UI_DIR}/widgets/FreehandCurveEditor.cpp"
     "${QT_UI_DIR}/widgets/FreehandCurveEditor.h"
+    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.cpp"
+    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.h"
     "${QT_UI_DIR}/widgets/CardWidget.cpp"
     "${QT_UI_DIR}/widgets/CardWidget.h"
     "${QT_UI_DIR}/widgets/FormKit.cpp"
@@ -323,6 +331,7 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
         $<$<COMPILE_LANGUAGE:CXX>:/W3>
         $<$<COMPILE_LANGUAGE:CXX>:/sdl>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4005>
         $<$<COMPILE_LANGUAGE:CXX>:/wd4996>
         $<$<COMPILE_LANGUAGE:CXX>:/permissive->
         $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
@@ -456,6 +465,23 @@ add_custom_command(TARGET ai POST_BUILD
             "${QT_UI_DIR}/assets/tabler-icons.ttf"
             "$<TARGET_FILE_DIR:ai>/assets/tabler-icons.ttf"
     VERBATIM)
+
+# Pure C++ regression harness for the fixed-crosshair curve control path.
+# Kept out of the default build; build explicitly with --target aim_control_test.
+add_executable(aim_control_test EXCLUDE_FROM_ALL
+    "${SRC_DIR}/mouse/tests/control_regression_test.cpp"
+    "${SRC_DIR}/mouse/boss_aim.cpp"
+    "${SRC_DIR}/mouse/movers_classic.cpp"
+    "${SRC_DIR}/mouse/movers_yaoguang.cpp")
+target_include_directories(aim_control_test PRIVATE
+    "${SRC_DIR}/mouse"
+    "${SRC_DIR}/include"
+    "${OPENCV_INCLUDE_DIR}")
+target_link_libraries(aim_control_test PRIVATE "${OPENCV_LIB}")
+target_compile_features(aim_control_test PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(aim_control_test PRIVATE /utf-8)
+endif()
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")

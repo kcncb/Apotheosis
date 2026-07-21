@@ -41,6 +41,17 @@ struct SmallTargetDecode
     double areaThreshPx = 0.0;
 };
 
+struct DetectorRuntimeSettings
+{
+    float confidenceThreshold = 0.25f;
+    float nmsThreshold = 0.45f;
+    int maxDetections = 100;
+    int detectionResolution = 320;
+};
+
+// 在 configMutex 内一次性生成帧级只读快照。
+DetectorRuntimeSettings detectorRuntimeSettings();
+
 // Read the small-target config and derive the decode floor / filter params.
 SmallTargetDecode computeSmallTargetDecode();
 

@@ -610,6 +610,7 @@ namespace makcu {
         try {
             m_impl->monitoringThread = std::thread(&Impl::connectionMonitoringLoop, m_impl.get());
         } catch (const std::system_error& e) {
+            (void)e;
             // Thread creation failed - cleanup and return error
             m_impl->connected.store(false, std::memory_order_release);
             m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);

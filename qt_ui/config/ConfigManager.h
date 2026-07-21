@@ -253,15 +253,19 @@ public:
         float deadZonePx = 2.0f;
         bool deadzoneEnabled = false;
         float deadzonePercent = 0.0f;
+        int lostTargetCacheFrames = 5;
         bool triggerEnabled = false;
         int triggerFireDelay = 0;
         int triggerFireDuration = 100;
         int triggerFireInterval = 200;
         int triggerYPercent = 100;
-        int targetClass1 = 0;   float targetYTop1 = 0.0f; float targetYBot1 = 1.0f; float targetMinConf1 = 0.0f;
-        int targetClass2 = 1;   float targetYTop2 = 0.0f; float targetYBot2 = 0.4f; float targetMinConf2 = 0.0f;
-        int targetClass3 = 2;   float targetYTop3 = 0.0f; float targetYBot3 = 0.3f; float targetMinConf3 = 0.0f;
-        int targetAimRange = 150;
+        int triggerDelayJitterMs    = 0;
+        int triggerDurationJitterMs = 0;
+        int triggerIntervalJitterMs = 0;
+        int triggerSwitchCooldownMs = 0;
+        int yStrengthPercent        = 100;
+        // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
+        QString aimClasses;
         bool laserDetectEnabled = false;
         bool crosshairDetectEnabled = false;
         bool flashlightDetectEnabled = false;
@@ -274,7 +278,7 @@ public:
         float aimPathBezierCy1 = 0.00f;
         float aimPathBezierCx2 = 0.70f;
         float aimPathBezierCy2 = 0.00f;
-        // Comma-separated 32 floats. Empty = all zeros (straight line).
+        // Comma-separated high-resolution floats. Empty = straight line.
         QString aimPathCustomSamples;
     };
 

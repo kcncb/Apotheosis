@@ -31,6 +31,7 @@
 #include "mem/gpu_resource_manager.h"
 #include "mem/cpu_affinity_manager.h"
 #include "runtime/cuda_availability.h"
+#include "runtime/event_orchestrator.h"
 #include "runtime/inference_session.h"
 #include "runtime/thread_loops.h"
 #include "detector/dml_detector.h"
@@ -294,9 +295,7 @@ int main(int argc, char* argv[])
         return FatalExit("[Config] Error with loading config!");
     }
 
-    auth::state().initialize(config.auth_server_url);
-    auth::state().try_restore_session();
-
+    // 单机自用：跳过登录/鉴权初始化
     CPUAffinityManager cpuManager;
 
     if (config.cpuCoreReserveCount > 0)
@@ -508,6 +507,19 @@ int main(int argc, char* argv[])
             AutoCapture::auto_capture_thread();
         });
 
+        // 事件编排:启动后台执行线程,把 config 里的规则灌入引擎。
+        event_orch::start();
+        {
+            std::vector<event_orch::Rule> rules;
+            {
+                std::lock_guard<std::recursive_mutex> lk(configMutex);
+                rules.reserve(config.event_rules_serialized.size());
+                for (const auto& s : config.event_rules_serialized)
+                    rules.push_back(event_orch::deserialize_rule(s));
+            }
+            event_orch::set_rules(std::move(rules));
+        }
+
         PreviewWindow_Start();
 
         welcome_message();
@@ -526,32 +538,20 @@ int main(int argc, char* argv[])
         ConfigManager::instance().load("config.ini");
         ConfigBridge::instance().syncFromRuntime();
 
-        if (!LoginDialog::tryAutoLogin()) {
-            LoginDialog login;
-            if (login.exec() != QDialog::Accepted)
-            {
-                shouldExit = true;
-                keyThread.join();
-                if (autoCapThread.joinable()) autoCapThread.join();
-                PreviewWindow_Stop();
-                macro::runtime_stop();
-                session.stop();
-                g_inference_session = nullptr;
-                return 0;
-            }
-        }
-
+        // 单机自用：跳过登录对话框，直接进入主界面
         MainWindow window;
         window.resize(960, 640);
         window.show();
 
         QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
+            ConfigBridge::instance().flush();
             shouldExit = true;
         });
 
         int result = app.exec();
 
         shouldExit = true;
+        event_orch::stop();
         keyThread.join();
         if (autoCapThread.joinable()) autoCapThread.join();
 

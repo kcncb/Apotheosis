@@ -36,6 +36,7 @@
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
+#include "pages/EventPage.h"
 #include "pages/LinksPage.h"
 #include "capture/auto_capture.h"
 
@@ -61,9 +62,9 @@ const QVector<GroupDef>& navGroups() {
           QStringLiteral("cpu"), QStringLiteral("stack-2")}},
         {QStringLiteral("控制"),
          {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"),
-          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本")},
+          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本"), QStringLiteral("事件编排")},
          {QStringLiteral("keyboard"), QStringLiteral("color-swatch"), QStringLiteral("world"),
-          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2")}},
+          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("activity")}},
         {QStringLiteral("监控"),
          {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"),
           QStringLiteral("调试")},
@@ -245,6 +246,7 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QStringLiteral("寻光"))       return new FlashlightPage();
     if (name == QStringLiteral("玻璃过滤"))   return new GlassFilterPage();
     if (name == QStringLiteral("宏脚本"))     return new MacroPage();
+    if (name == QStringLiteral("事件编排"))   return new EventPage();
     if (name == QStringLiteral("性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QStringLiteral("日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QStringLiteral("自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }

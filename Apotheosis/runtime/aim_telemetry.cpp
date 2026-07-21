@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
+std::atomic<float> g_mouse_queue_latency_ms{0.0f};
+std::atomic<int> g_mouse_queue_backlog{0};
+std::atomic<unsigned long long> g_mouse_send_failures{0};
+
 namespace runtime
 {
 

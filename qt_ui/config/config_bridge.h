@@ -13,6 +13,7 @@ public:
     void syncToRuntime();
     void syncFromRuntime();
     void markDirty();
+    void flush();
 
 private slots:
     void onSaveTimeout();

@@ -35,7 +35,7 @@ LoginDialog::LoginDialog(QWidget* parent)
 
     m_subtitle = new QLabel(QStringLiteral("\xe7\x99\xbb\xe5\xbd\x95\xe4\xbb\xa5\xe7\xbb\xa7\xe7\xbb\xad"));
     m_subtitle->setAlignment(Qt::AlignCenter);
-    m_subtitle->setStyleSheet("color:#8E8E96; font-size:13px;");
+    m_subtitle->setStyleSheet("color:#71717A; font-size:13px;");
     lay->addWidget(m_subtitle);
 
     lay->addSpacing(26);

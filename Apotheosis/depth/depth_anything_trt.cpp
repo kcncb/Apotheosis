@@ -6,6 +6,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <system_error>
 
 #include "tensorrt/trt_monitor.h"
@@ -364,9 +365,11 @@ namespace depth_anything
         }
         else
         {
-            input_h = input_dims.d[input_dims.nbDims - 2];
-            input_w = input_dims.d[input_dims.nbDims - 1];
-            if (input_h <= 0 || input_w <= 0)
+            const auto raw_h = input_dims.d[input_dims.nbDims - 2];
+            const auto raw_w = input_dims.d[input_dims.nbDims - 1];
+            if (raw_h <= 0 || raw_w <= 0 ||
+                raw_h > std::numeric_limits<int>::max() ||
+                raw_w > std::numeric_limits<int>::max())
             {
                 last_error = "Depth input dimensions are invalid.";
                 auto err = last_error;
@@ -374,6 +377,8 @@ namespace depth_anything
                 last_error = err;
                 return false;
             }
+            input_h = static_cast<int>(raw_h);
+            input_w = static_cast<int>(raw_w);
             min_input_size = input_w;
             max_input_size = input_w;
         }
@@ -740,7 +745,7 @@ namespace depth_anything
             return false;
         }
 
-        ImGuiProgressMonitor progressMonitor;
+        TrtProgressMonitor progressMonitor;
         config->setProgressMonitor(&progressMonitor);
         TrtExportResetState();
         gIsTrtExporting = true;
@@ -924,13 +929,17 @@ namespace depth_anything
             elements *= static_cast<size_t>(output_dims.d[i]);
         }
 
-        out_h = output_dims.d[output_dims.nbDims - 2];
-        out_w = output_dims.d[output_dims.nbDims - 1];
-        if (out_h <= 0 || out_w <= 0)
+        const auto raw_out_h = output_dims.d[output_dims.nbDims - 2];
+        const auto raw_out_w = output_dims.d[output_dims.nbDims - 1];
+        if (raw_out_h <= 0 || raw_out_w <= 0 ||
+            raw_out_h > std::numeric_limits<int>::max() ||
+            raw_out_w > std::numeric_limits<int>::max())
         {
             last_error = "Depth output dimensions are invalid.";
             return false;
         }
+        out_h = static_cast<int>(raw_out_h);
+        out_w = static_cast<int>(raw_out_w);
 
         const size_t spatial = static_cast<size_t>(out_h) * static_cast<size_t>(out_w);
         if (spatial == 0 || elements % spatial != 0 || (elements / spatial) != 1)

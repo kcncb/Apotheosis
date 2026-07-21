@@ -36,9 +36,12 @@ FlashlightTuning flashlight_derive_tuning(int sensitivity,
     t.accept_conf_floor        = lerpf(0.50f, 0.24f, s);
 
     // ---- 光斑大小 → 半径档 (scaled to detection resolution) ----
-    // Small floor always present so far/tiny lights still pass; the knob raises
-    // the ceiling so up-close floods count too.
-    t.det.min_radius = std::max(3, static_cast<int>(std::lround(H * 0.005f)));
+    // Floor raised to 15 px: in real scenes anything smaller is reflective
+    // sparkle / muzzle micro-glare / floor specular — not a flashlight halo —
+    // and was the dominant source of "too small" rejects polluting both the
+    // preview and the candidate pool. Above 15 px ⇒ real circular light. The
+    // resolution-scaled term still wins at 4K+ (0.005·H grows past 15).
+    t.det.min_radius = std::max(15, static_cast<int>(std::lround(H * 0.005f)));
     t.det.max_radius = std::max(t.det.min_radius + 1,
                                 static_cast<int>(std::lround(H * lerpf(0.12f, 0.50f, z))));
 
