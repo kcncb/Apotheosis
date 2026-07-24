@@ -7,9 +7,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QStyle>
+#include <QTimer>
 
 namespace {
-constexpr int kBarHeight = 57;
+constexpr int kBarHeight = 60;
 }
 
 TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
@@ -18,7 +20,7 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
     setFixedHeight(kBarHeight);
 
     auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(16, 0, 16, 0);
+    row->setContentsMargins(18, 0, 18, 0);
     row->setSpacing(0);
 
     // ── Brand ──
@@ -58,27 +60,26 @@ TopNavBar::TopNavBar(QWidget* parent) : QWidget(parent) {
 
     // ── Global actions ──
     m_status = new StatusPill(this);
-    m_status->setStatus(QStringLiteral("已停止"), StatusPill::Neutral);
+    m_status->setStatus(QString::fromUtf8(u8"已停止"), StatusPill::Neutral);
     row->addWidget(m_status);
     row->addSpacing(10);
 
-    auto* save = new QPushButton(QStringLiteral("保存配置"), this);
-    save->setObjectName("saveBtn");
-    save->setProperty("class", "primary");
-    save->setCursor(Qt::PointingHandCursor);
-    connect(save, &QPushButton::clicked, this, &TopNavBar::saveClicked);
-    row->addWidget(save);
-    row->addSpacing(10);
+    m_saveButton = new QPushButton(QString::fromUtf8(u8"保存设置"), this);
+    m_saveButton->setObjectName("saveBtn");
+    m_saveButton->setProperty("class", "primary");
+    m_saveButton->setCursor(Qt::PointingHandCursor);
+    m_saveButton->setToolTip(QString::fromUtf8(u8"保存当前设置（Ctrl+S）"));
+    connect(m_saveButton, &QPushButton::clicked, this, &TopNavBar::saveClicked);
+    row->addWidget(m_saveButton);
 
-    auto* avatar = new QLabel(this);
-    avatar->setObjectName("avatar");
-    avatar->setFixedSize(32, 32);
-    avatar->setAlignment(Qt::AlignCenter);
-    if (IconFont::available()) {
-        avatar->setFont(IconFont::font(18));
-        avatar->setText(QString(IconFont::glyph("user-circle")));
-    }
-    row->addWidget(avatar);
+    m_saveFeedbackTimer = new QTimer(this);
+    m_saveFeedbackTimer->setSingleShot(true);
+    connect(m_saveFeedbackTimer, &QTimer::timeout, this, [this] {
+        m_saveButton->setText(QString::fromUtf8(u8"保存设置"));
+        m_saveButton->setProperty("saved", false);
+        m_saveButton->style()->unpolish(m_saveButton);
+        m_saveButton->style()->polish(m_saveButton);
+    });
 }
 
 void TopNavBar::setPrimaryItems(const QStringList& labels) {
@@ -113,4 +114,13 @@ int TopNavBar::currentPrimary() const {
 
 void TopNavBar::setSessionStatus(bool running, const QString& text) {
     m_status->setStatus(text, running ? StatusPill::Success : StatusPill::Neutral);
+}
+
+void TopNavBar::showSaveFeedback() {
+    m_saveButton->setText(QString::fromUtf8(u8"已保存"));
+    m_saveButton->setProperty("saved", true);
+    m_saveButton->style()->unpolish(m_saveButton);
+    m_saveButton->style()->polish(m_saveButton);
+
+    m_saveFeedbackTimer->start(1200);
 }

@@ -5,6 +5,7 @@
 class QLabel;
 class QVBoxLayout;
 class QHBoxLayout;
+class QPropertyAnimation;
 
 class CardWidget : public QWidget {
     Q_OBJECT
@@ -31,6 +32,7 @@ private:
     QWidget* m_headerWidget{};
     QWidget* m_contentWidget{};
     QVBoxLayout* m_contentLayout{};
+    QPropertyAnimation* m_contentAnimation{};
     bool m_collapsible = false;
     bool m_collapsed = false;
 };

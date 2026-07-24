@@ -10,10 +10,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "latest_move_slot.h"
 
 // Forward declarations so that mouse.h stays light.
 class Arduino;
@@ -73,13 +74,6 @@ public:
     void setGHubMouse(GhubMouse* ghub);
 
 private:
-    struct Move
-    {
-        int dx = 0;
-        int dy = 0;
-        std::chrono::steady_clock::time_point queued_at{};
-    };
-
     void moveWorkerLoop();
     void queueMove(int dx, int dy);
     bool sendMovementToDriver(int dx, int dy);
@@ -93,10 +87,9 @@ private:
     double screen_height_ = 320.0;
 
     // Async driver dispatch.
-    std::queue<Move> moveQueue_;
+    mouse_async::LatestMoveSlot moveSlot_;
     std::mutex queueMtx_;
     std::condition_variable queueCv_;
-    const size_t queueLimit_ = 5;
     std::thread moveWorker_;
     std::atomic<bool> workerStop_{ false };
     std::atomic<long long> appliedDx_{ 0 };

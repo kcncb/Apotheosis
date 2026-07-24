@@ -55,7 +55,11 @@ MouseThread::MouseThread(
 
 MouseThread::~MouseThread()
 {
-    workerStop_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(queueMtx_);
+        workerStop_.store(true);
+        moveSlot_.clear();
+    }
     queueCv_.notify_all();
     if (moveWorker_.joinable())
         moveWorker_.join();
@@ -118,19 +122,16 @@ void MouseThread::queueMove(int dx, int dy)
     if (dx == 0 && dy == 0)
         return;
 
+    // CVM sanitizer：任一轴越出 inclusive [-30000,30000] 时丢弃整条移动。
+    const auto valid_component = [](int value) {
+        return static_cast<std::uint32_t>(value) + 30000u <= 60000u;
+    };
+    if (!valid_component(dx) || !valid_component(dy))
+        return;
+
     std::lock_guard<std::mutex> lg(queueMtx_);
-    if (moveQueue_.size() >= queueLimit_)
-    {
-        // 队列满时不能丢掉已被控制器记账的位移，否则虚拟位置
-        // 会与真实鼠标分离。合并到队尾可保持累计位移不变。
-        Move& tail = moveQueue_.back();
-        tail.dx += dx;
-        tail.dy += dy;
-    }
-    else
-    {
-        moveQueue_.push({ dx, dy, std::chrono::steady_clock::now() });
-    }
+    // latest-only：新检测帧直接覆盖尚未消费的旧移动，并提升 generation。
+    moveSlot_.replace(dx, dy, std::chrono::steady_clock::now());
     queueCv_.notify_one();
 }
 
@@ -141,24 +142,32 @@ void MouseThread::moveWorkerLoop()
         while (!workerStop_.load())
         {
             std::unique_lock<std::mutex> ul(queueMtx_);
-            queueCv_.wait(ul, [&] { return workerStop_.load() || !moveQueue_.empty(); });
-            while (!moveQueue_.empty())
-            {
-                Move m = moveQueue_.front();
-                moveQueue_.pop();
-                ul.unlock();
-                const bool sent = sendMovementToDriver(m.dx, m.dy);
-                if (sent) {
-                    appliedDx_.fetch_add(m.dx, std::memory_order_release);
-                    appliedDy_.fetch_add(m.dy, std::memory_order_release);
-                } else {
-                    failedMoves_.fetch_add(1, std::memory_order_release);
-                }
-                const auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - m.queued_at).count();
-                lastLatencyUs_.store(latency, std::memory_order_release);
-                ul.lock();
+            queueCv_.wait(ul, [&] {
+                return workerStop_.load() || moveSlot_.hasPending();
+            });
+            if (workerStop_.load())
+                break;
+
+            mouse_async::PendingMove move;
+            if (!moveSlot_.take(move))
+                continue;
+            ul.unlock();
+
+            // 每个 movement pair 发送前检查 generation。新帧到达后，
+            // 已取出的旧批次立即作废，不再沿旧方向继续发送。
+            if (!moveSlot_.isCurrent(move.generation))
+                continue;
+
+            const bool sent = sendMovementToDriver(move.dx, move.dy);
+            if (sent) {
+                appliedDx_.fetch_add(move.dx, std::memory_order_release);
+                appliedDy_.fetch_add(move.dy, std::memory_order_release);
+            } else {
+                failedMoves_.fetch_add(1, std::memory_order_release);
             }
+            const auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - move.queued_at).count();
+            lastLatencyUs_.store(latency, std::memory_order_release);
         }
     }
     catch (const std::exception& e)
@@ -231,8 +240,8 @@ bool MouseThread::sendMovementToDriver(int dx, int dy)
 void MouseThread::clearQueuedMoves()
 {
     std::lock_guard<std::mutex> lock(queueMtx_);
-    std::queue<Move> empty;
-    moveQueue_.swap(empty);
+    // generation 同步提升，可抢占 worker 已取出但尚未发送的旧移动。
+    moveSlot_.clear();
 }
 
 MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
@@ -245,7 +254,7 @@ MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
     out.failed = failedMoves_.load(std::memory_order_acquire);
     {
         std::lock_guard<std::mutex> lock(queueMtx_);
-        out.backlog = moveQueue_.size();
+        out.backlog = moveSlot_.pendingCount();
     }
     return out;
 }

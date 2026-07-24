@@ -5,7 +5,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,14 +18,15 @@
 #include "config/config.h"
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
-#include "crosshair/flashlight_detector.h"
-#include "crosshair/flashlight_tuning.h"
+#include "crosshair/flashlight_runtime.h"
+#include "crosshair/glass_runtime.h"
 #include "crosshair/laser_detector.h"
 #include "detection_buffer.h"
 #include "i_detector.h"
 #include "preview_window.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/inference_session.h"
+#include "runtime/aim_telemetry.h"
 
 namespace
 {
@@ -122,6 +122,9 @@ struct PreviewConfigSnapshot
     int    fov_base_y = 0;
     bool   dynamic_fov_enabled = false;
     bool   hotkey_active = false;
+    bool   glass_filter_show_preview = false;
+    bool   show_fps = false;
+    float  replay_playback_speed = 0.25f;
 };
 
 PreviewConfigSnapshot snapshot_config()
@@ -163,6 +166,9 @@ PreviewConfigSnapshot snapshot_config()
     s.flashlight_sensitivity       = config.flashlight_sensitivity;
     s.flashlight_reject_strength   = config.flashlight_reject_strength;
     s.flashlight_spot_size         = config.flashlight_spot_size;
+    s.glass_filter_show_preview    = config.glass_filter_show_preview;
+    s.show_fps                     = config.show_fps;
+    s.replay_playback_speed        = config.replay_playback_speed;
     s.laser_colors.reserve(config.laser_colors.size());
     for (const auto& c : config.laser_colors)
     {
@@ -223,6 +229,35 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         draw_text_with_bg(canvas, label,
                           cv::Point(clipped.x, std::max(12, clipped.y)),
                           textFg, textBg);
+    }
+
+    // Glass-filter verdicts are published by the actual aim path after it has
+    // evaluated each detection. Drawing that snapshot keeps preview and runtime
+    // decisions identical and adds no extra image processing on this thread.
+    if (cfg.glass_filter_show_preview)
+    {
+        const auto glass = glass_runtime::read();
+        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - glass.ts).count();
+        if (age_ms >= 0 && age_ms <= glass_runtime::kFreshnessMs)
+        {
+            for (const auto& judgement : glass.judgements)
+            {
+                const cv::Rect clipped = judgement.box & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                if (clipped.area() <= 0) continue;
+                const cv::Scalar color = !judgement.evaluated
+                    ? bgr(150, 150, 150)
+                    : (judgement.is_glass ? bgr(60, 60, 255) : bgr(70, 210, 255));
+                cv::rectangle(canvas, clipped, color, judgement.is_glass ? 3 : 2, cv::LINE_AA);
+                char label[64];
+                std::snprintf(label, sizeof(label), judgement.evaluated
+                    ? (judgement.is_glass ? "GLASS %.0f%%" : "PASS %.0f%%")
+                    : "SKIP", judgement.coverage * 100.0f);
+                draw_text_with_bg(canvas, label,
+                                  cv::Point(clipped.x, std::max(12, clipped.y + clipped.height)),
+                                  color, bgr(0, 0, 0));
+            }
+        }
     }
 
     // 2. FOV ellipses (base + dynamic gate).
@@ -356,66 +391,25 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
     }
 
-    // 4c. Flashlight halo preview. Independent of crosshair / laser / hotkey
-    //     gates — when the user enables it on the Flashlight page we draw
-    //     every bright contour the detector evaluated, green when accepted,
-    //     red when rejected with the reason printed. This is purely visual
-    //     diagnostics; the runtime path consumes its own snapshot.
+    // 4c. 寻光预览只画运行时最终认定的那个白核。候选、拒绝原因、文字和
+    //     中心十字全部不显示，避免“单帧外观通过”与真正可瞄结果混在一起。
     if (cfg.flashlight_show_preview && canvas.type() == CV_8UC3)
     {
-        // Derive appearance settings from the three macro knobs exactly like the
-        // runtime, so the preview's accept/reject matches what gets aimed. (The
-        // depth / temporal / colocation gates run only in the runtime; the
-        // preview shows the single-frame appearance verdict.)
-        const crosshair::FlashlightTuning ft = crosshair::flashlight_derive_tuning(
-            cfg.flashlight_sensitivity, cfg.flashlight_reject_strength,
-            cfg.flashlight_spot_size, canvas.size());
-        crosshair::FlashlightDetectorSettings fs = ft.det;
-        fs.enabled = true;
-
-        static crosshair::FlashlightDetector flashlight_detector;
-        const auto cands = flashlight_detector.detectVerbose(canvas, fs);
-
-        const cv::Scalar ringOk    = bgr(0, 255, 0);     // green  = accepted
-        const cv::Scalar ringTrim  = bgr(0, 200, 255);   // yellow = NMS/cap loser
-        const cv::Scalar ringBad   = bgr(60, 60, 255);   // red    = shape-gate rejected
-        const cv::Scalar centerCol = bgr(255, 255, 255);
-        auto ring_color = [&](const crosshair::FlashlightCandidate& cd) {
-            if (cd.accepted) return ringOk;
-            const char* rr = cd.reject_reason ? cd.reject_reason : "";
-            if (std::strcmp(rr, "merged") == 0 || std::strcmp(rr, "capped") == 0)
-                return ringTrim;
-            return ringBad;
-        };
-        for (const auto& cd : cands)
+        const auto fs = flashlight_runtime::read();
+        if (fs.valid && !fs.spots.empty())
         {
-            const cv::Point c(static_cast<int>(std::lround(cd.center.x)),
-                              static_cast<int>(std::lround(cd.center.y)));
-            const int r = std::max(2, static_cast<int>(std::lround(cd.radius)));
-            const cv::Scalar col = ring_color(cd);
-
-            // Dark underlay + coloured ring on top.
+            const auto& spot = fs.spots.front();
+            const cv::Point c(static_cast<int>(std::lround(spot.center.x)),
+                              static_cast<int>(std::lround(spot.center.y)));
+            const int r = std::max(2, static_cast<int>(std::lround(spot.radius)));
             cv::circle(canvas, c, r, bgr(0, 0, 0), 3, cv::LINE_AA);
-            cv::circle(canvas, c, r, col,          1, cv::LINE_AA);
-
-            // Centre cross (4 px arms) to mark the picked centroid.
-            cv::line(canvas, cv::Point(c.x - 4, c.y), cv::Point(c.x + 4, c.y), centerCol, 1, cv::LINE_AA);
-            cv::line(canvas, cv::Point(c.x, c.y - 4), cv::Point(c.x, c.y + 4), centerCol, 1, cv::LINE_AA);
-
-            // Label: "circ r=12" when accepted, "r=12 deformed" etc. when not.
-            char lbuf[48];
-            if (cd.accepted)
-                std::snprintf(lbuf, sizeof(lbuf), "OK c=%.2f r=%d", cd.circularity, r);
-            else
-                std::snprintf(lbuf, sizeof(lbuf), "%s c=%.2f r=%d",
-                              cd.reject_reason ? cd.reject_reason : "rejected",
-                              cd.circularity, r);
-            const cv::Point label_org(c.x + r + 4, std::max(12, c.y - r));
-            draw_text_with_bg(canvas, lbuf, label_org, col, bgr(0, 0, 0));
+            cv::circle(canvas, c, r, bgr(0, 255, 0), 1, cv::LINE_AA);
         }
     }
 
-    // 5. Top-left status banner with inference FPS + latency.
+    // 5. Optional top-left status banner with inference FPS + latency.
+    if (!cfg.show_fps)
+        return;
     runtime::InferenceSession* session = g_inference_session;
     float infer_ms = 0.0f;
     if (session && session->detector())
@@ -536,9 +530,62 @@ void draw_pick_overlay(cv::Mat& canvas)
         cv::rectangle(canvas, foot, bgr(255, 255, 255), 1, cv::LINE_AA);
 }
 
+void render_replay_frame(cv::Mat& canvas,
+                         const std::vector<runtime::ReplayFrame>& frames,
+                         size_t frame_index,
+                         float playback_speed)
+{
+    if (canvas.empty() || frames.empty()) return;
+    frame_index = std::min(frame_index, frames.size() - 1);
+    const auto& frame = frames[frame_index];
+
+    for (size_t i = 0; i < frame.boxes.size(); ++i)
+    {
+        const cv::Rect clipped = frame.boxes[i] & cv::Rect(0, 0, canvas.cols, canvas.rows);
+        if (clipped.area() <= 0) continue;
+        const int track_id = i < frame.track_ids.size() ? frame.track_ids[i] : -1;
+        const bool locked = track_id >= 0 && track_id == frame.locked_track_id;
+        const cv::Scalar color = locked ? bgr(70, 90, 255) : bgr(110, 220, 80);
+        cv::rectangle(canvas, clipped, color, locked ? 3 : 1, cv::LINE_AA);
+        const int cls = i < frame.class_ids.size() ? frame.class_ids[i] : -1;
+        char label[64];
+        std::snprintf(label, sizeof(label), locked ? "LOCK #%d" : "#%d", cls);
+        draw_text_with_bg(canvas, label, cv::Point(clipped.x, std::max(12, clipped.y)),
+                          bgr(250, 245, 240), bgr(0, 0, 0));
+    }
+
+    std::vector<cv::Point> trail;
+    const size_t first = frame_index > 90 ? frame_index - 90 : 0;
+    trail.reserve(frame_index - first + 1);
+    for (size_t i = first; i <= frame_index; ++i)
+    {
+        if (frames[i].locked_track_id >= 0)
+            trail.emplace_back(static_cast<int>(std::lround(frames[i].pivot_x)),
+                               static_cast<int>(std::lround(frames[i].pivot_y)));
+    }
+    if (trail.size() >= 2)
+        cv::polylines(canvas, trail, false, bgr(255, 190, 70), 2, cv::LINE_AA);
+    if (!trail.empty())
+    {
+        const cv::Point p = trail.back();
+        cv::circle(canvas, p, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
+        cv::circle(canvas, p, 5, bgr(255, 220, 80), 1, cv::LINE_AA);
+    }
+
+    char banner[128];
+    std::snprintf(banner, sizeof(banner), "REPLAY %.2fx | %zu / %zu",
+                  playback_speed, frame_index + 1, frames.size());
+    draw_text_with_bg(canvas, banner, cv::Point(6, 18),
+                      bgr(245, 245, 245), bgr(0, 0, 0));
+}
+
 void preview_loop()
 {
     bool window_open = false;
+    bool replay_was_active = false;
+    std::vector<runtime::ReplayFrame> replay_frames;
+    size_t replay_index = 0;
+    auto replay_next_tick = std::chrono::steady_clock::now();
 
     while (g_run.load())
     {
@@ -574,6 +621,50 @@ void preview_loop()
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 continue;
             }
+        }
+
+        bool replay_active = g_replay_playback_active.load();
+        if (replay_active && !replay_was_active)
+        {
+            replay_frames = runtime::ReplayBuffer::instance().snapshot();
+            replay_index = 0;
+            replay_next_tick = std::chrono::steady_clock::now();
+            if (replay_frames.empty())
+            {
+                replay_active = false;
+                g_replay_playback_active.store(false);
+            }
+        }
+        replay_was_active = replay_active;
+
+        if (replay_active && !replay_frames.empty())
+        {
+            const float speed = std::clamp(cfg.replay_playback_speed, 0.05f, 2.0f);
+            const auto now = std::chrono::steady_clock::now();
+            while (replay_index + 1 < replay_frames.size() && now >= replay_next_tick)
+            {
+                const auto source_delta = std::chrono::duration_cast<std::chrono::microseconds>(
+                    replay_frames[replay_index + 1].ts - replay_frames[replay_index].ts);
+                const auto scaled_us = std::clamp<long long>(
+                    static_cast<long long>(source_delta.count() / speed), 1000, 500000);
+                replay_next_tick = now + std::chrono::microseconds(scaled_us);
+                ++replay_index;
+            }
+            g_replay_playback_frame.store(static_cast<int>(replay_index));
+
+            const int dr = std::max(64, cfg.detection_resolution);
+            cv::Mat replayCanvas(dr, dr, CV_8UC3, cv::Scalar(18, 20, 24));
+            render_replay_frame(replayCanvas, replay_frames, replay_index, speed);
+            cv::imshow(kWindowName, replayCanvas);
+
+            if (replay_index + 1 >= replay_frames.size() && now >= replay_next_tick)
+            {
+                g_replay_playback_active.store(false);
+                replay_was_active = false;
+            }
+            cv::pollKey();
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            continue;
         }
 
         cv::Mat frameCopy;

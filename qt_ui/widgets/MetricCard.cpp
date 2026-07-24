@@ -24,7 +24,7 @@ MetricCard::MetricCard(const QString& label, const QString& iconName, QWidget* p
     topRow->addStretch();
 
     if (!iconName.isEmpty() && IconFont::available()) {
-        auto* icon = IconFont::label(iconName, 16, QStringLiteral("#C2C2CA"));
+        auto* icon = IconFont::label(iconName, 16, QStringLiteral("#B8C0CC"));
         topRow->addWidget(icon);
     }
     col->addLayout(topRow);

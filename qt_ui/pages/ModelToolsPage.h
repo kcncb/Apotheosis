@@ -19,6 +19,8 @@ private slots:
     void onAuthorize();
 
 private:
+    bool ensureAuthorized();
+
     QLineEdit* m_modelPath{};
     QPushButton* m_encryptBtn{};
     QProgressBar* m_encryptProgress{};
@@ -26,5 +28,6 @@ private:
 
     QLineEdit* m_authAccount{};
     QLineEdit* m_authModelId{};
+    QPushButton* m_authBtn{};
     QLabel* m_authStatus{};
 };

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <timeapi.h>
 #include <condition_variable>
 #include <filesystem>
@@ -74,6 +75,47 @@ std::deque<cv::Mat> frameQueue;
 
 namespace
 {
+std::string normalized_device_name(const std::string& value)
+{
+    std::string out;
+    for (unsigned char c : value)
+        if (std::isalnum(c)) out.push_back(static_cast<char>(std::tolower(c)));
+    return out;
+}
+
+std::optional<uint32_t> detect_avermedia_sdk_device(int system_index)
+{
+    const auto devices = MFCapture::EnumerateDevices();
+    const auto it = std::find_if(devices.begin(), devices.end(),
+        [system_index](const MFDeviceInfo& d) { return d.index == system_index; });
+    if (it == devices.end() || !avermedia::IsAverMediaFriendlyName(it->name))
+        return std::nullopt;
+
+    auto& loader = avermedia::SdkLoader::Instance();
+    if (!loader.IsUsable()) return std::nullopt;
+    const auto& api = loader.Api();
+    uint32_t count = 0;
+    if (!api.GetDeviceNum || api.GetDeviceNum(&count) != avermedia::AVER_ERR_SUCCESS)
+        return std::nullopt;
+
+    const std::string systemName = normalized_device_name(it->name);
+    std::optional<uint32_t> fallback;
+    for (uint32_t i = 0; i < count; ++i) {
+        char sdkName[512]{};
+        if (api.GetDeviceFriendlyName
+            && api.GetDeviceFriendlyName(i, sdkName, sizeof(sdkName)) == avermedia::AVER_ERR_SUCCESS) {
+            const std::string candidate = normalized_device_name(sdkName);
+            if (!candidate.empty()
+                && (systemName.find(candidate) != std::string::npos
+                    || candidate.find(systemName) != std::string::npos))
+                return i;
+        }
+        if (!fallback) fallback = i;
+    }
+    // 名称可能被 UVC/MF 驱动加后缀；单卡环境下安全回退到唯一 SDK 设备。
+    return count == 1 ? fallback : std::nullopt;
+}
+
 struct CaptureThreadConfig
 {
     std::string capture_method;
@@ -147,6 +189,8 @@ CaptureThreadConfig SnapshotCaptureConfig()
 
 std::string NormalizeCaptureMethod(const std::string& method)
 {
+    if (method == "avermedia_capture")
+        return "mf_capture";
     // 旧版本持久化的采集卡后端迁移到当前两套实现:
     //   裸 capture_card / _cv / _ds -> opencv_capture
     //   capture_card_mf            -> mf_capture(自写 Media Foundation)
@@ -160,8 +204,7 @@ std::string NormalizeCaptureMethod(const std::string& method)
         || method == "tcp_capture"
         || method == "eth_capture"
         || method == "opencv_capture"
-        || method == "mf_capture"
-        || method == "avermedia_capture")
+        || method == "mf_capture")
         return method;
     return "udp_capture";
 }
@@ -501,8 +544,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     return std::make_unique<EthCapture>(width, height, cfg.eth_adapter, cfg.eth_ethertype);
                 }
 
-                if (method == "opencv_capture" || method == "mf_capture"
-                    || method == "avermedia_capture")
+                if (method == "opencv_capture" || method == "mf_capture")
                 {
                     // The square crop, when enabled, IS the inference frame and
                     // therefore drives detection_resolution so the detector input
@@ -521,9 +563,16 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                         }
                     }
 
-                    // SDK 后端必须显式选择。不能因为检测到圆刚设备就悄悄覆盖用户
-                    // 选择的 MF GPU 路径，否则 UI 显示 GPU、实际却走 CPU clone。
-                    if (method == "avermedia_capture")
+                    // 设备下拉框中的圆刚 SDK 项使用 -1000-N 编码。它可以直接在
+                    // OpenCV 或 MF 页面选择，并由此处切换到 SDK 原生取帧链路。
+                    const bool explicitAver = cfg.opencv_capture_index <= -1000;
+                    const auto detectedAver = explicitAver ? std::optional<uint32_t>{}
+                        : detect_avermedia_sdk_device(cfg.opencv_capture_index);
+                    const bool integratedAver = explicitAver || detectedAver.has_value();
+                    const uint32_t averIndex = explicitAver
+                        ? static_cast<uint32_t>(-1000 - cfg.opencv_capture_index)
+                        : detectedAver.value_or(static_cast<uint32_t>(cfg.opencv_capture_index));
+                    if (integratedAver)
                     {
                         auto& aver = avermedia::SdkLoader::Instance();
                         if (!aver.IsUsable())
@@ -534,7 +583,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                             out_side,
                             crop_enabled,
                             cfg.opencv_capture_fps,
-                            static_cast<uint32_t>(cfg.opencv_capture_index),
+                            averIndex,
                             /*prefer_hdmi_source=*/true,
                             cfg.capture_mf_gpu);
                     }
@@ -602,6 +651,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         {
             std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
             detectionBuffer.boxes.clear();
+            detectionBuffer.precise_boxes.clear();
             detectionBuffer.classes.clear();
             detectionBuffer.confidences.clear();
             detectionBuffer.bumpVersionLocked();

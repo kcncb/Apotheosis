@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QStringList>
 #include <QWidget>
 
 class QTextEdit;
@@ -18,10 +19,13 @@ private:
     void copyToClipboard();
     void exportLog();
     void onLevelChanged(int index);
+    bool acceptsLine(const QString& line) const;
+    void rebuildView();
 
     QComboBox* m_levelCombo{};
     QTextEdit* m_logText{};
     QPushButton* m_clearBtn{};
     QPushButton* m_copyBtn{};
     QPushButton* m_exportBtn{};
+    QStringList m_allLines;
 };

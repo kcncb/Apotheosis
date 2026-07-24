@@ -27,6 +27,7 @@ private slots:
     void applyEth();
     void applyCard();
     void refreshEthAdapters();
+    void refreshCaptureDevices();
 
 private:
     void buildGeneralCard(QVBoxLayout* layout);
@@ -60,7 +61,7 @@ private:
 
     // ── OpenCV / MF capture card ──
     CardWidget* m_cardCard{};
-    QSpinBox* m_devIndex{};
+    QComboBox* m_devIndex{};
     QSpinBox* m_devWidth{};
     QSpinBox* m_devHeight{};
     QSpinBox* m_devFps{};

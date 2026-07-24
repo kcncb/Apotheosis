@@ -4,7 +4,10 @@
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
 
+#include <algorithm>
+
 #include <QFileDialog>
+#include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -64,7 +67,7 @@ DepthPage::DepthPage(QWidget* parent)
     m_modelPath = new QLineEdit;
     m_modelPath->setPlaceholderText(QStringLiteral("选择模型文件..."));
     m_modelPath->setToolTip(tr(
-        "models/depth/ 下的深度模型文件。.engine 已编译(直接用),.onnx 需要先点'导出深度引擎'。"));
+        "models/depth/ 下的深度模型文件。.engine 会直接加载；.onnx 会在首次启动深度推理时自动构建并缓存引擎。"));
     browseRow->addWidget(m_modelPath, 1);
     auto* browseBtn = new QPushButton(QStringLiteral("浏览..."));
     browseRow->addWidget(browseBtn);
@@ -86,7 +89,7 @@ DepthPage::DepthPage(QWidget* parent)
         "TensorRT 构建深度 .engine 时使用的最优输入边长(方形),用作 kernel autotune 的中心尺寸。\n"
         "例如采集是 640x640,这里设 640 可让深度推理在 640 档跑得最快;\n"
         "小尺寸(224)更省 GPU,大尺寸(640)精度更高。\n"
-        "改这个值后必须删掉 models/depth/ 下的旧 .engine 重新点'导出深度引擎'才生效。"));
+        "改这个值后必须删掉 models/depth/ 下的旧 .engine，重新启动深度推理后自动构建才生效。"));
     m_optInputSize->setToolTip(optSizeSlider->toolTip());
     connect(m_optInputSize, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setDepthOptInputSize(v); });
@@ -102,6 +105,30 @@ DepthPage::DepthPage(QWidget* parent)
     m_maskFpsRuntime->setToolTip(maskFpsSlider->toolTip());
     connect(m_maskFpsRuntime, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setDepthMaskFps(v); });
+
+    QSlider* lowPctSlider = nullptr;
+    inferCard->contentLayout()->addWidget(
+        FormKit::sliderRowD(QStringLiteral("归一化低百分位"), 0.0, 50.0, 0.0, 0.5, 1,
+                            lowPctSlider, m_normLowPct, QStringLiteral(" %")));
+    m_normLowPct->setToolTip(tr("裁掉深度图中过近的低端离群值。0% 表示不裁剪。"));
+    connect(m_normLowPct, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this](double v) {
+                if (v >= m_normHighPct->value())
+                    m_normHighPct->setValue(std::min(100.0, v + 0.5));
+                ConfigManager::instance().setDepthNormClipLowPct(static_cast<float>(v));
+            });
+
+    QSlider* highPctSlider = nullptr;
+    inferCard->contentLayout()->addWidget(
+        FormKit::sliderRowD(QStringLiteral("归一化高百分位"), 50.0, 100.0, 100.0, 0.5, 1,
+                            highPctSlider, m_normHighPct, QStringLiteral(" %")));
+    m_normHighPct->setToolTip(tr("裁掉深度图中过远的高端离群值。100% 表示不裁剪，常用值为 95%～100%。"));
+    connect(m_normHighPct, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this](double v) {
+                if (v <= m_normLowPct->value())
+                    m_normLowPct->setValue(std::max(0.0, v - 0.5));
+                ConfigManager::instance().setDepthNormClipHighPct(static_cast<float>(v));
+            });
 
     layout->addWidget(inferCard);
 
@@ -122,16 +149,22 @@ void DepthPage::onLoadConfig() {
     block(m_modelPath, true);
     block(m_optInputSize, true);
     block(m_maskFpsRuntime, true);
+    block(m_normLowPct, true);
+    block(m_normHighPct, true);
 
     m_depthEnabled->setChecked(cfg.depthInferenceEnabled());
     m_modelPath->setText(cfg.depthModelPath());
     m_optInputSize->setValue(cfg.depthOptInputSize());
     m_maskFpsRuntime->setValue(cfg.depthMaskFps());
+    m_normLowPct->setValue(cfg.depthNormClipLowPct());
+    m_normHighPct->setValue(cfg.depthNormClipHighPct());
 
     block(m_depthEnabled, false);
     block(m_modelPath, false);
     block(m_optInputSize, false);
     block(m_maskFpsRuntime, false);
+    block(m_normLowPct, false);
+    block(m_normHighPct, false);
 }
 
 void DepthPage::browseModel() {

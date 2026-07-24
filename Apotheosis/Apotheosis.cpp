@@ -225,23 +225,26 @@ static void applyLightPalette(QApplication& app)
     app.setStyle(QStyleFactory::create("Fusion"));
 
     QPalette pal;
-    pal.setColor(QPalette::Window, QColor("#F6F6F8"));
-    pal.setColor(QPalette::WindowText, QColor("#1A1A1F"));
+    pal.setColor(QPalette::Window, QColor("#F4F6FA"));
+    pal.setColor(QPalette::WindowText, QColor("#17191F"));
     pal.setColor(QPalette::Base, QColor("#FFFFFF"));
-    pal.setColor(QPalette::AlternateBase, QColor("#FAFAFB"));
-    pal.setColor(QPalette::Text, QColor("#1A1A1F"));
-    pal.setColor(QPalette::Button, QColor("#FBFBFC"));
-    pal.setColor(QPalette::ButtonText, QColor("#1A1A1F"));
-    pal.setColor(QPalette::ToolTipBase, QColor("#1A1A1F"));
+    pal.setColor(QPalette::AlternateBase, QColor("#FBFCFD"));
+    pal.setColor(QPalette::Text, QColor("#17191F"));
+    pal.setColor(QPalette::Button, QColor("#F8F9FB"));
+    pal.setColor(QPalette::ButtonText, QColor("#17191F"));
+    pal.setColor(QPalette::ToolTipBase, QColor("#17191F"));
     pal.setColor(QPalette::ToolTipText, QColor("#FFFFFF"));
-    pal.setColor(QPalette::PlaceholderText, QColor("#A1A1AA"));
-    pal.setColor(QPalette::Highlight, QColor("#5E6AD2"));
+    pal.setColor(QPalette::PlaceholderText, QColor("#98A1B0"));
+    pal.setColor(QPalette::Highlight, QColor("#5865D8"));
     pal.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
-    pal.setColor(QPalette::Disabled, QPalette::Text, QColor("#C2C2CA"));
-    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#C2C2CA"));
+    pal.setColor(QPalette::Disabled, QPalette::Text, QColor("#B8C0CC"));
+    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#B8C0CC"));
     app.setPalette(pal);
 
-    QFont appFont("Microsoft YaHei UI");
+    QFont appFont;
+    appFont.setFamilies({QStringLiteral("Segoe UI Variable"),
+                         QStringLiteral("Microsoft YaHei UI"),
+                         QStringLiteral("Segoe UI")});
     appFont.setPixelSize(13);
     app.setFont(appFont);
 }
@@ -295,7 +298,9 @@ int main(int argc, char* argv[])
         return FatalExit("[Config] Error with loading config!");
     }
 
-    // 单机自用：跳过登录/鉴权初始化
+    // 主界面可匿名使用；模型加密/授权页在需要时再弹出登录框。
+    // 服务地址属于认证模块的部署常量，不再作为一个无消费者的用户配置项。
+    auth::state().initialize("http://110.42.232.243:8787");
     CPUAffinityManager cpuManager;
 
     if (config.cpuCoreReserveCount > 0)

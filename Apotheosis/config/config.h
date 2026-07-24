@@ -61,86 +61,19 @@ struct HotkeyProfile
     int fovX = 106;
     int fovY = 74;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ART (Adaptive Reactive Tracker) — modified 1€ Filter
-    //   speed_x/y: 比例驱动灵敏度 (对准静止目标调到一次到位)
-    //   dead_zone_px: 死区半径 (px), 小于此误差不输出移动
-    // ─────────────────────────────────────────────────────────────────────
-    float speed_x = 0.6f;
-    float speed_y = 0.6f;
-    float dead_zone_px = 2.0f;
+    // AVA PIDF Mode 1。AVA 界面只暴露 Kp/Kd/Kf/LR，Ki 固定为 0。
+    int pidf_mapping_version = 2;
+    float pidf_kp_x = 1.0f, pidf_kp_y = 1.0f;
+    float pidf_ki_x = 0.0f, pidf_ki_y = 0.0f;
+    float pidf_kd_x = 0.01f, pidf_kd_y = 0.01f;
+    float pidf_kf_x = 0.0f, pidf_kf_y = 0.0f;
+    float pidf_lr_x = 0.0f, pidf_lr_y = 0.0f;
+    int pidf_deadzone_x = 0, pidf_deadzone_y = 0;
+    int pidf_limit_x = 0, pidf_limit_y = 0;
 
-    // 疾风 (Predictive) 4 项可调: 每轴灵敏度(Kp)、阻尼(Kd)、预测权重(双轴共用)。
-    // 渐入 / 输出上限 / 死区都硬编默认值(见 movers.cpp)。
-    float predictive_kp_x       = 0.6f;
-    float predictive_kp_y       = 0.6f;
-    float predictive_kd         = 0.10f;
-    float predictive_pred_weight= 0.5f;
-
-    // 控制器:0=天枢,1=摇光。摇光五个宏参数中预测使用毫秒，其余为 0..100。
-    int   mover_kind = 0;
-    float yaoguang_pull_speed_x = 60.0f;
-    float yaoguang_pull_speed_y = 60.0f;
-    float yaoguang_tracking = 65.0f;
-    float yaoguang_prediction_ms = 25.0f;
-    float yaoguang_stability = 55.0f;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 天枢 (Classic) — 经典全参 PID + 动态 KP + EMA/Kalman 预测。
-    //   aim_mode 0 = 简单(对称 KP + 共用 KI/KD);
-    //   aim_mode 1 = 高级(独立 XY 全 PID + 距离/时间 KP 调度)。
-    //   prediction_mode 0 = 无; 1 = EMA 速度外推; 2 = Kalman + lookahead。
-    // ─────────────────────────────────────────────────────────────────────
-    int   classic_aim_mode = 0;
-
-    // 简单模式
-    float classic_simple_start_speed = 0.3f;
-    float classic_simple_end_speed   = 0.8f;
-    int   classic_simple_transition_ms = 0;
-    float classic_simple_ki = 0.0f;
-    float classic_simple_kd = 0.0f;
-
-    // 高级模式 X
-    float classic_adv_kpmin_x = 0.3f;
-    float classic_adv_kpmax_x = 0.8f;
-    float classic_adv_ki_x = 0.0f;
-    float classic_adv_kd_x = 0.0f;
-    float classic_adv_imax_x = 0.0f;
-    float classic_adv_pfactor_x = 1.0f;
-    int   classic_adv_time_x = 0;
-    bool  classic_adv_time_dynamic_x = false;
-
-    // 高级模式 Y
-    float classic_adv_kpmin_y = 0.3f;
-    float classic_adv_kpmax_y = 0.8f;
-    float classic_adv_ki_y = 0.0f;
-    float classic_adv_kd_y = 0.0f;
-    float classic_adv_imax_y = 0.0f;
-    float classic_adv_pfactor_y = 1.0f;
-    int   classic_adv_time_y = 0;
-    bool  classic_adv_time_dynamic_y = false;
-
-    // 预测
-    int   classic_prediction_mode = 0;
-    float classic_velocity_lead_frames = 1.0f;
-    bool  classic_independent_y = false;
-
-    // Kalman
-    float classic_kalman_q_pos = 1.0f;
-    float classic_kalman_q_vel = 1.0f;
-    float classic_kalman_r_obs = 1.0f;
-    float classic_kalman_lookahead = 2.0f;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────
-    // 瞄准轨迹曲线 (aim path).
-    //   0 = Linear:   直接朝目标走 (ART 原行为)
-    //   1 = Bezier:   起点(0,0)→终点(1,0) 的三次贝塞尔, 控制点 cx1/cy1, cx2/cy2
-    //   2 = Custom:   用户在 UI 上自由画的偏离曲线, 32768 个 Y 采样均匀分布在 X∈[0,1]
-    // X = 沿 start→goal 主轴的进度, Y = 垂直方向的偏离量(以 path 长度为单位)。
-    // Linear 模式下后续 bezier / custom 参数被忽略, 不必清零。
-    // ─────────────────────────────────────────────────────────────────────
+    // 用户 AimPath：在 AVA PIDF 输出后执行轨迹整形。
     int   aim_path_mode = 0;
+    int   aim_path_influence = 25; // 0..100，仅影响 PIDF 主方向
     float aim_path_bezier_cx1 = 0.30f;
     float aim_path_bezier_cy1 = 0.00f;
     float aim_path_bezier_cx2 = 0.70f;
@@ -155,11 +88,7 @@ struct HotkeyProfile
     std::array<float, 25> aim_path_neural_weights{};
 
     // ─────────────────────────────────────────────────────────────────────
-    // 死区 (shared, 三套 mover 通用):准星在目标框 N% 内时停止移动。
-    // 在 engine tick() 层检查,mover dispatch 之前生效。
     // ─────────────────────────────────────────────────────────────────────
-    bool  deadzone_enabled = false;
-    float deadzone_percent = 0.0f;
 
     // 检测暂时丢失时继续保留同一 track 的帧数。期间不发送旧坐标移动，
     // 只等待同一目标重新出现；0 = 当帧丢失即释放，默认 5 与旧行为一致。
@@ -184,17 +113,11 @@ struct HotkeyProfile
     int   trigger_interval_jitter_ms = 0;
     int   trigger_switch_cooldown_ms = 0;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Y 轴力度百分比(应用于所有 mover 输出的最终 dy)。
-    //   100 = 原样;<100 削弱垂直分量,使弹道更"飘"(近人手感);
-    //   >100 加强(不常用)。X 分量不动。
-    // ─────────────────────────────────────────────────────────────────────
-    int   y_strength_percent = 100;
 
     // ─────────────────────────────────────────────────────────────────────
     // 目标选择 — 按优先级排序的类别列表。列表顺序 = 优先级 (index 0 最高)。
     //   aim_classes[i].class_id: 该条目匹配的 class_id
-    //   aim_classes[i].y_offset..y_offset_max: 每次新锁定随机抽取的 Y 范围
+    //   aim_classes[i].y_offset..y_offset_max: AVA 瞄点稳定范围
     //   aim_classes[i].min_conf: 该类别的最低置信度 (0=不过滤)
     // 优先级优先, 距离次之; 未在列表内的 class 被忽略。类别只能加一次
     // (来源: Target 页 "瞄准" 桶), 通过 UI 拖动整行调整上下顺序。距离上限
@@ -317,8 +240,6 @@ public:
     bool  small_target_enabled = false;
     float small_target_area_frac = 0.012f;
     float small_target_confidence = 0.06f;
-    bool export_enable_fp8 = false;
-    bool export_enable_fp16 = true;
     bool fixed_input_size = false;
 
     // CUDA / System
@@ -330,20 +251,10 @@ public:
     // path. The 1-frame extra latency is well below typical capture jitter
     // (~8ms at 120fps), and downstream Kalman prediction compensates.
     bool use_double_buffer = true;
-    bool use_pinned_memory = true;
     int gpuMemoryReserveMB = 2048;
     bool enableGpuExclusiveMode = true;
-    bool capture_use_cuda = true;
     int cpuCoreReserveCount = 4;
     int systemMemoryReserveMB = 2048;
-
-    // Overlay
-    int overlay_opacity = 240;
-    float overlay_ui_scale = 1.0f;
-
-    // Authorization
-    bool auth_require_online = true;
-    std::string auth_server_url = "http://110.42.232.243:8787";
 
     // Depth
     bool depth_inference_enabled = true;
@@ -462,10 +373,9 @@ public:
     int   laser_target_rect_h = 60;    // target box height (det px)
 
     // ---- Flashlight halo detector (whole-frame, brightness-based) ----------
-    // 寻光 / 手电筒检测。Hue-agnostic: thresholds on max(B,G,R) so any colour
-    // tinted flashlight glare matches; circularity gate rejects bright UI
-    // bars and elongated sun glints. See crosshair/flashlight_detector.h for
-    // the geometry of the search. Per-hotkey opt-in lives on
+    // 寻光 / 手电筒检测。提取近白过曝核心，并用圆度、局部对比与多方向
+    // 径向衰减拒绝 UI/灯牌/反光；连续确认与人物框关联见 runtime。
+    // Per-hotkey opt-in lives on
     // HotkeyProfile::flashlight_detect_enabled.
     bool  flashlight_show_preview = false;     // overlay debug toggle
     // Three behaviour-level macro knobs (each 0..100). ALL internal detection /

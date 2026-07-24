@@ -6,13 +6,13 @@ if(NOT WIN32)
     message(FATAL_ERROR "Apotheosis only supports Windows builds.")
 endif()
 
-if(NOT CMAKE_GENERATOR STREQUAL "Visual Studio 18 2026")
-    message(FATAL_ERROR "Use Visual Studio 18 2026 generator. Current: ${CMAKE_GENERATOR}")
+if(NOT CMAKE_GENERATOR MATCHES "^Visual Studio (17 2022|18 2026)$")
+    message(FATAL_ERROR "Use Visual Studio 2022 or 2026 generator. Current: ${CMAKE_GENERATOR}")
 endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -95,6 +95,33 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 set(QT_UI_DIR "${CMAKE_SOURCE_DIR}/qt_ui")
 
+set(AVA_EXACT_SOURCES
+    "${SRC_DIR}/mouse/ava_exact/aim_key_selector.cpp"
+    "${SRC_DIR}/mouse/ava_exact/aim_movement_pipeline_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/controller_orchestration_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/hotkey_eval_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/key_vk_table_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/humanization_math_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/process_humanization_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_region_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_selector_top_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pid_input_pipeline.cpp"
+    "${SRC_DIR}/mouse/ava_exact/qx_curve_config_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/qx_curve_target_reset_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/qx_curve_step_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pidf_postprocess_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pidf_update_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pidf_mode1_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pidf_mode2_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/pidf_axis_policy_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/mouse_output_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/timed_button_exact.cpp"
+)
+
 set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
     "${SRC_DIR}/capture/auto_capture.cpp"
@@ -148,8 +175,7 @@ set(APP_SOURCES
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
     "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
-    "${SRC_DIR}/mouse/movers_classic.cpp"
-    "${SRC_DIR}/mouse/movers_yaoguang.cpp"
+    ${AVA_EXACT_SOURCES}
     "${SRC_DIR}/mouse/ghub.cpp"
     "${SRC_DIR}/mouse/hid.c"
     "${SRC_DIR}/mouse/KmboxAConnection.cpp"
@@ -200,8 +226,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/HardwarePage.h"
     "${QT_UI_DIR}/pages/HotkeyPage.cpp"
     "${QT_UI_DIR}/pages/HotkeyPage.h"
-    "${QT_UI_DIR}/pages/LinksPage.cpp"
-    "${QT_UI_DIR}/pages/LinksPage.h"
     "${QT_UI_DIR}/pages/LogPage.cpp"
     "${QT_UI_DIR}/pages/LogPage.h"
     "${QT_UI_DIR}/pages/MacroPage.cpp"
@@ -317,7 +341,10 @@ set_target_properties(ai PROPERTIES
     OUTPUT_NAME "Apotheosis"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
-    CUDA_ARCHITECTURES "70-real;75-real;80-real;86-real;89-real;90-real;100-real;120-real")
+    # 运行机使用的 CMP 40HX/TU106 是 sm_75，开发机 RTX 3060 是 sm_86。
+    # 同时保留 compute_86 PTX，供更新架构的驱动进行前向 JIT，避免再次出现
+    # “解码/产帧 FPS 正常，但 CUDA 转色核无法启动而画面全黑”。
+    CUDA_ARCHITECTURES "75-real;86-real;86-virtual")
 
 foreach(target serial_embedded ai)
     if(MSVC)
@@ -328,7 +355,7 @@ endforeach()
 target_compile_definitions(ai PRIVATE UNICODE _UNICODE _WINDOWS NOMINMAX WIN32_LEAN_AND_MEAN USE_CUDA)
 if(MSVC)
     target_compile_options(ai PRIVATE
-        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8 /Zc:char8_t->
         $<$<COMPILE_LANGUAGE:CXX>:/W3>
         $<$<COMPILE_LANGUAGE:CXX>:/sdl>
         $<$<COMPILE_LANGUAGE:CXX>:/wd4005>
@@ -466,21 +493,17 @@ add_custom_command(TARGET ai POST_BUILD
             "$<TARGET_FILE_DIR:ai>/assets/tabler-icons.ttf"
     VERBATIM)
 
-# Pure C++ regression harness for the fixed-crosshair curve control path.
-# Kept out of the default build; build explicitly with --target aim_control_test.
-add_executable(aim_control_test EXCLUDE_FROM_ALL
-    "${SRC_DIR}/mouse/tests/control_regression_test.cpp"
+add_executable(ava_chain_test EXCLUDE_FROM_ALL
+    "${SRC_DIR}/mouse/tests/ava_chain_regression_test.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
-    "${SRC_DIR}/mouse/movers_classic.cpp"
-    "${SRC_DIR}/mouse/movers_yaoguang.cpp")
-target_include_directories(aim_control_test PRIVATE
+    ${AVA_EXACT_SOURCES})
+target_include_directories(ava_chain_test PRIVATE
     "${SRC_DIR}/mouse"
-    "${SRC_DIR}/include"
     "${OPENCV_INCLUDE_DIR}")
-target_link_libraries(aim_control_test PRIVATE "${OPENCV_LIB}")
-target_compile_features(aim_control_test PRIVATE cxx_std_17)
+target_link_libraries(ava_chain_test PRIVATE "${OPENCV_LIB}" user32)
+target_compile_features(ava_chain_test PRIVATE cxx_std_20)
 if(MSVC)
-    target_compile_options(aim_control_test PRIVATE /utf-8)
+    target_compile_options(ava_chain_test PRIVATE /utf-8 /Zc:char8_t-)
 endif()
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")

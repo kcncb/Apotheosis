@@ -3,7 +3,7 @@
 #include <QWidget>
 
 class QLabel;
-class QLineEdit;
+class QComboBox;
 class QPushButton;
 class QSpinBox;
 class QSlider;
@@ -30,7 +30,7 @@ private:
     void buildDynamicFovCard(QVBoxLayout* layout);
 
     // ── Screenshot ──
-    QLineEdit* m_screenshotKey{};
+    QComboBox* m_screenshotKey{};
     QSlider* m_screenshotDelaySlider{};
     QSpinBox* m_screenshotDelay{};
 
@@ -40,6 +40,9 @@ private:
     QSpinBox* m_replayDuration{};
     QSlider* m_replaySpeedSlider{};
     QDoubleSpinBox* m_replaySpeed{};
+    QPushButton* m_playReplay{};
+    QPushButton* m_stopReplay{};
+    QLabel* m_replayStatus{};
 
     // ── Diagnostics ──
     ToggleSwitch* m_verboseLog{};

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QStringList>
 #include <QWidget>
 
 class QLineEdit;
@@ -37,4 +38,5 @@ private:
     // Log card
     QTextEdit* m_logView{};
     QPushButton* m_clearLogBtn{};
+    QStringList m_lastLogSnapshot;
 };

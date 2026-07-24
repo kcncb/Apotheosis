@@ -20,6 +20,8 @@ private:
     void onBackendChanged(int index);
     void browseModel();
     void onSmallTargetToggled(bool enabled);
+    void updateModelInfo();
+    void updateBackendStatus();
 
     // Model card
     QComboBox* m_modelCombo{};
@@ -46,7 +48,4 @@ private:
     QWidget* m_smallTargetConfRow{};
     QWidget* m_smallTargetAreaRow{};
 
-    // Export card
-    ToggleSwitch* m_fp16{};
-    ToggleSwitch* m_fp8{};
 };

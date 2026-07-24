@@ -26,7 +26,34 @@ namespace
 std::mutex                    g_mtx;
 Snapshot                      g_snap{};
 crosshair::FlashlightDetector g_detector;
-crosshair::FlashlightTracker  g_tracker; // capture-thread only (process_frame)
+crosshair::FlashlightTracker  g_tracker; // mouse inference consumer only
+int                           g_selected_track_id = -1;
+
+bool associated_with_box(cv::Point2f p, const std::vector<cv::Rect>& boxes,
+                         float max_box_widths)
+{
+    for (const cv::Rect& raw_box : boxes)
+    {
+        if (raw_box.area() <= 0) continue;
+        const float left   = static_cast<float>(raw_box.x);
+        const float right  = static_cast<float>(raw_box.x + raw_box.width);
+        const float top    = static_cast<float>(raw_box.y);
+        const float bottom = static_cast<float>(raw_box.y + raw_box.height);
+        const float dx = std::max({left - p.x, 0.0f, p.x - right});
+        const float dy = std::max({top - p.y, 0.0f, p.y - bottom});
+        const float allowed = std::max(2.0f, raw_box.width * max_box_widths);
+        if (dx * dx + dy * dy <= allowed * allowed)
+            return true;
+    }
+    return false;
+}
+
+void reset_and_clear()
+{
+    g_tracker.reset();
+    g_selected_track_id = -1;
+    publish(Snapshot{});
+}
 } // namespace
 
 Snapshot read()
@@ -52,15 +79,15 @@ void publish(const Snapshot& snap)
     if (falling) event_orch::publish(event_orch::EventType::FlashlightLost);
 }
 
-void process_frame(const cv::Mat& bgrFrame)
+void process_inference_frame(const cv::Mat& bgrFrame,
+                             const std::vector<cv::Rect>& modelBoxes)
 {
     // Default: don't request depth. Set true below once we know the gate engages.
     ::g_flashlight_depth_required.store(false);
 
     if (bgrFrame.empty() || bgrFrame.type() != CV_8UC3)
     {
-        g_tracker.reset();
-        publish(Snapshot{});
+        reset_and_clear();
         return;
     }
 
@@ -69,8 +96,7 @@ void process_frame(const cv::Mat& bgrFrame)
     const int active_idx = runtime::g_active_hotkey_index.load();
     if (active_idx < 0)
     {
-        g_tracker.reset();
-        publish(Snapshot{});
+        reset_and_clear();
         return;
     }
 
@@ -82,15 +108,13 @@ void process_frame(const cv::Mat& bgrFrame)
         const auto& cfg = *snapshot;
         if (active_idx >= static_cast<int>(cfg.hotkeys.size()))
         {
-            g_tracker.reset();
-            publish(Snapshot{});
+            reset_and_clear();
             return;
         }
         const auto& hk = cfg.hotkeys[active_idx];
         if (!hk.flashlight_detect_enabled)
         {
-            g_tracker.reset();
-            publish(Snapshot{});
+            reset_and_clear();
             return;
         }
         sensitivity = cfg.flashlight_sensitivity;
@@ -107,8 +131,9 @@ void process_frame(const cv::Mat& bgrFrame)
     const auto raw = g_detector.detectAll(bgrFrame, tuning.det);
     if (raw.empty())
     {
-        // Tick the tracker with no spots so ages decay and dead tracks drop.
+        // YOLO 时钟上的一次完整 miss：立即释放，不跨帧保留旧锁点。
         g_tracker.update({}, {}, tuning.temporal);
+        g_selected_track_id = -1;
         publish(Snapshot{});
         return;
     }
@@ -116,23 +141,11 @@ void process_frame(const cv::Mat& bgrFrame)
     // ---- Depth-gate prep (杀太阳/天空/远处泛光) ----
     cv::Mat depthN;
     bool    depth_map_ok = false;
-    bool    sky_present  = false;
     if (tuning.depth.mode > 0)
     {
         depthN = depth_anything::GetDepthMaskGenerator().getDepthNormalized();
         depth_map_ok = !depthN.empty() && depthN.type() == CV_8UC1 &&
                        depthN.size() == bgrFrame.size();
-        if (depth_map_ok)
-        {
-            // depthN: 255 = nearest, 0 = farthest (per-frame relative). A large
-            // far-cluster means open sky is in view → safe to HARD-reject far
-            // spots; without it we only soft-penalize (avoids killing a real
-            // enemy at the far end of an indoor corridor).
-            const cv::Mat farMask = depthN <= tuning.depth.far_level;
-            const double frac = static_cast<double>(cv::countNonZero(farMask)) /
-                                static_cast<double>(depthN.rows * depthN.cols);
-            sky_present = frac >= tuning.depth.sky_cluster_frac;
-        }
     }
 
     // ---- Temporal tracker (杀水面/玻璃闪烁反光) ----
@@ -168,9 +181,8 @@ void process_frame(const cv::Mat& bgrFrame)
                 const bool is_far = depthN.at<uint8_t>(cy, cx) <= tuning.depth.far_level;
                 if (is_far)
                 {
-                    if (tuning.depth.mode == 2 && sky_present)
-                        passed_depth = false; // hard-reject sun/sky (loop can still
-                                              // rescue via colocation)
+                    if (tuning.depth.mode == 2)
+                        passed_depth = false; // 严格模式下孤立远景光直接拒绝
                     else
                         penalty += tuning.depth.soft_penalty;
                 }
@@ -180,7 +192,11 @@ void process_frame(const cv::Mat& bgrFrame)
                 // No usable depth map → positional fallback: sun/sky sit high in
                 // the frame, so penalize the top band.
                 if (s.center.y < bgrFrame.rows * 0.30f)
+                {
                     penalty += tuning.depth.top_band_penalty;
+                    if (tuning.depth.mode == 2)
+                        passed_depth = false;
+                }
             }
         }
 
@@ -212,24 +228,57 @@ void process_frame(const cv::Mat& bgrFrame)
         out.center       = sc;
         out.radius       = sr;
         out.confidence   = conf;
+        out.track_id     = v.track_id;
         out.passed_depth = passed_depth;
         out.confirmed    = v.confirmed;
         out.onset        = v.onset;
+        out.associated_with_model = associated_with_box(
+            sc, modelBoxes, tuning.coloc.max_box_widths);
+        out.independent_aimable = !out.associated_with_model && passed_depth && v.confirmed;
+
+        // 有人物框时第一帧即可认定“这是人物携带的手电”，但不注入光斑；
+        // 无人物框必须通过深度和连续三次确认才成为独立目标。
+        if (!out.associated_with_model && !out.independent_aimable)
+            continue;
         spots.push_back(out);
     }
 
     if (spots.empty())
     {
+        g_selected_track_id = -1;
         publish(Snapshot{});
         return;
     }
 
-    std::sort(spots.begin(), spots.end(),
-              [](const Spot& a, const Spot& b) { return a.confidence > b.confidence; });
+    std::sort(spots.begin(), spots.end(), [](const Spot& a, const Spot& b) {
+        if (a.associated_with_model != b.associated_with_model)
+            return a.associated_with_model; // 有模型框时最终应由模型框瞄准
+        return a.confidence > b.confidence;
+    });
+
+    auto selected = spots.end();
+    if (g_selected_track_id >= 0)
+    {
+        selected = std::find_if(spots.begin(), spots.end(), [](const Spot& s) {
+            return s.track_id == g_selected_track_id;
+        });
+        if (selected == spots.end())
+        {
+            // 原目标本轮消失：先明确丢失，不在同一帧无缝跳到另一盏灯。
+            g_selected_track_id = -1;
+            publish(Snapshot{});
+            return;
+        }
+    }
+    else
+    {
+        selected = spots.begin();
+        g_selected_track_id = selected->track_id;
+    }
 
     Snapshot snap;
     snap.valid = true;
-    snap.spots = std::move(spots);
+    snap.spots.push_back(*selected); // 对外永远只有稳定选中的一个结果
     snap.ts    = std::chrono::steady_clock::now();
     publish(snap);
 }

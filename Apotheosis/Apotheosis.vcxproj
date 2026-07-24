@@ -87,7 +87,6 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">false</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="include\other_tools.h" />
-    <ClInclude Include="include\adaptive_reactive_tracker.h" />
     <ClInclude Include="detector\model_inspector.h" />
     <ClInclude Include="runtime\active_hotkey.h" />
     <ClInclude Include="crosshair\crosshair_detector.h" />

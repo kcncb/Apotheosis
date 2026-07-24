@@ -119,7 +119,13 @@ QWidget* fieldRow(const QString& label, QWidget* control) {
     QHBoxLayout* h = nullptr;
     QWidget* row = makeRow(h);
     h->addWidget(makeLabel(label));
-    h->addWidget(control, 1);
+    if (control->sizePolicy().horizontalPolicy() == QSizePolicy::Fixed) {
+        // 固定尺寸控件（例如开关）保持在标签之后，不拉伸控件，也不改变原有间距。
+        h->addWidget(control);
+        h->addStretch();
+    } else {
+        h->addWidget(control, 1);
+    }
     return row;
 }
 

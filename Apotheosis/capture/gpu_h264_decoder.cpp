@@ -204,6 +204,27 @@ int CUDAAPI GpuH264Decoder::dispCb(void* user, CUVIDPARSERDISPINFO* disp)
         self->cw_, self->ch_,
         self->activeStream_);
 
+    // 若 exe 不包含当前 GPU 架构的 cubin，NVDEC 和收帧计数仍会正常，
+    // 但转色 kernel 无法启动，BGR 缓冲区保持全零，预览只剩黑底上的 ROI。
+    const cudaError_t conversionStatus = cudaPeekAtLastError();
+    if (conversionStatus != cudaSuccess)
+    {
+        if (!self->conversion_error_reported_)
+        {
+            int device = 0;
+            cudaDeviceProp prop{};
+            cudaGetDevice(&device);
+            cudaGetDeviceProperties(&prop, device);
+            std::cerr << "[GpuH264Decoder] YUV444->BGR CUDA kernel launch failed on "
+                      << prop.name << " (sm_" << prop.major << prop.minor << "): "
+                      << cudaGetErrorString(conversionStatus) << "\n";
+            self->conversion_error_reported_ = true;
+        }
+        cudaGetLastError(); // 清除本次启动错误，避免污染后续 CUDA 调用。
+        self->cuvid_->cuvidUnmapVideoFrame(self->decoder_, devPtr);
+        return 0;
+    }
+
     // sink 不再等 kernel——每个输出槽都有独立 readyEvent，consumer 从自己的
     // stream 等待它，避免单一事件被后续帧重复 record。
     GpuImage out = slot;

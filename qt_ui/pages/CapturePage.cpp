@@ -5,6 +5,7 @@
 #include "widgets/ToggleSwitch.h"
 
 #include "capture/eth_capture.h"
+#include "capture/mf_capture.h"
 
 #include <QComboBox>
 #include <QLabel>
@@ -15,6 +16,7 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+
 // ── capture method key <-> combo index mapping ──
 static const QStringList kMethodKeys = {
     QStringLiteral("udp_capture"),
@@ -22,7 +24,6 @@ static const QStringList kMethodKeys = {
     QStringLiteral("eth_capture"),
     QStringLiteral("opencv_capture"),
     QStringLiteral("mf_capture"),
-    QStringLiteral("avermedia_capture"),
 };
 static const QStringList kMethodLabels = {
     QStringLiteral("UDP"),
@@ -30,7 +31,6 @@ static const QStringList kMethodLabels = {
     QStringLiteral("以太网原始帧 (ProSexy)"),   // 以太网原始帧
     QStringLiteral("OpenCV 采集卡"),                         // OpenCV 采集卡
     QStringLiteral("MF 采集卡（自写）"),     // MF 采集卡（自写）
-    QStringLiteral("圆刚 SDK 采集卡"),
 };
 
 static const QStringList kApiKeys = {
@@ -283,28 +283,30 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
         QStringLiteral("采集卡 (直采)"),   // 采集卡 (直采)
         QStringLiteral("device-camera-phone"));
 
-    // ── Device index ──
-    m_devIndex = new QSpinBox;
-    m_devIndex->setRange(0, 63);
+    // ── 真实设备枚举 ──
+    m_devIndex = new QComboBox;
     m_devIndex->setToolTip(tr(
-        "采集卡在系统中的编号（0 = 第一个视频输入）。"));
+        "显示系统实际枚举到的视频采集设备；圆刚设备同时支持 SDK 原生路径。"));
     m_cardCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("设备索引"), m_devIndex));   // 设备索引
+        FormKit::fieldRow(QStringLiteral("采集设备"), m_devIndex));
+    auto* refreshDevices = new QPushButton(QStringLiteral("刷新设备列表"));
+    m_cardCard->contentLayout()->addWidget(refreshDevices);
+    connect(refreshDevices, &QPushButton::clicked, this, &CapturePage::refreshCaptureDevices);
+    connect(m_devIndex, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this] { updateSectionVisibility(); });
 
     // ── Width / Height ──
     m_devWidth = new QSpinBox;
     m_devWidth->setRange(0, 7680);
-    m_devWidth->setToolTip(tr(
-        "采集卡输出的原始画面宽度，0 = 让设备自己决定。"));
+    m_devWidth->setToolTip(tr("采集卡输出的原始画面宽度。"));
     m_cardCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("原始宽度 (0=自动)"), m_devWidth));
+        FormKit::fieldRow(QStringLiteral("原始宽度"), m_devWidth));
 
     m_devHeight = new QSpinBox;
     m_devHeight->setRange(0, 4320);
-    m_devHeight->setToolTip(tr(
-        "采集卡输出的原始画面高度，0 = 让设备自己决定。"));
+    m_devHeight->setToolTip(tr("采集卡输出的原始画面高度。"));
     m_cardCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("原始高度 (0=自动)"), m_devHeight));
+        FormKit::fieldRow(QStringLiteral("原始高度"), m_devHeight));
 
     // ── Crop ──
     m_devCrop = new QSpinBox;
@@ -320,10 +322,9 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     // ── FPS ──
     m_devFps = new QSpinBox;
     m_devFps->setRange(0, 240);
-    m_devFps->setToolTip(tr(
-        "采集卡的目标 FPS，0 = 取设备默认。设过高会被设备截断。"));
+    m_devFps->setToolTip(tr("采集卡的目标 FPS，设过高会被设备截断。"));
     m_cardCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("采集 FPS (0=自动)"), m_devFps));
+        FormKit::fieldRow(QStringLiteral("采集 FPS"), m_devFps));
 
     // ── Pixel format ──
     m_devFormat = new QComboBox;
@@ -366,6 +367,21 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     layout->addWidget(m_cardCard);
 }
 
+void CapturePage::refreshCaptureDevices()
+{
+    const int previous = m_devIndex->currentIndex() >= 0
+        ? m_devIndex->currentData().toInt() : ConfigManager::instance().opencvCaptureIndex();
+    m_devIndex->clear();
+
+    for (const auto& device : MFCapture::EnumerateDevices())
+        m_devIndex->addItem(QString::fromUtf8(device.name.c_str()), device.index);
+
+    if (m_devIndex->count() == 0)
+        m_devIndex->addItem(QString::fromUtf8(u8"未检测到视频采集设备"), 0);
+    const int found = m_devIndex->findData(previous);
+    m_devIndex->setCurrentIndex(found >= 0 ? found : 0);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Load config values into widgets
 // ────────────────────────────────────────────────────────────────────────────
@@ -402,7 +418,10 @@ void CapturePage::onLoadConfig() {
         QStringLiteral("0x%1").arg(cfg.ethEthertype(), 4, 16, QChar('0')).toUpper());
 
     // ── OpenCV / MF card ──
-    m_devIndex->setValue(cfg.opencvCaptureIndex());
+    refreshCaptureDevices();
+    { const int saved = cfg.opencvCaptureIndex();
+      const int found = m_devIndex->findData(saved);
+      if (found >= 0) m_devIndex->setCurrentIndex(found); }
     m_devWidth->setValue(cfg.opencvCaptureWidth());
     m_devHeight->setValue(cfg.opencvCaptureHeight());
     m_devCrop->setValue(cfg.captureCrop());
@@ -444,13 +463,13 @@ void CapturePage::updateSectionVisibility() {
 
     const bool isOpenCv = (key == QStringLiteral("opencv_capture"));
     const bool isMf     = (key == QStringLiteral("mf_capture"));
-    const bool isAver   = (key == QStringLiteral("avermedia_capture"));
-    m_cardCard->setVisible(isOpenCv || isMf || isAver);
+    m_cardCard->setVisible(isOpenCv || isMf);
 
     // Show/hide sub-rows that are backend-specific.
     m_apiRow->setVisible(isOpenCv);
     m_urlRow->setVisible(isOpenCv);
-    m_decodeRow->setVisible(isMf || isAver);
+    // 圆刚由运行时按真实设备名自动识别，不在界面上作为独立后端出现。
+    m_decodeRow->setVisible(isMf);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -513,8 +532,7 @@ void CapturePage::applyEth() {
 void CapturePage::applyCard() {
     auto& cfg = ConfigManager::instance();
 
-    int idx = m_devIndex->value();
-    if (idx < 0) idx = 0;
+    int idx = m_devIndex->currentIndex() >= 0 ? m_devIndex->currentData().toInt() : 0;
     cfg.setOpencvCaptureIndex(idx);
 
     int w = m_devWidth->value();
@@ -541,10 +559,9 @@ void CapturePage::applyCard() {
     if (method == QStringLiteral("opencv_capture")) {
         cfg.setOpencvCaptureApi(kApiKeys[m_devApi->currentIndex()]);
         cfg.setOpencvCaptureUrl(m_devUrl->text().trimmed());
-    } else {
-        // MF / 圆刚 SDK 共用 GPU 转换开关。
-        cfg.setCaptureMfGpu(m_devDecode->currentIndex() == 0);
     }
+    // MF 以及集成到 OpenCV/MF 列表中的圆刚 SDK 共用 GPU 转换开关。
+    cfg.setCaptureMfGpu(m_devDecode->currentIndex() == 0);
 
     // Square crop drives detection_resolution, matching ImGui logic.
     if (crop > 0 && cfg.detectionResolution() != crop) {

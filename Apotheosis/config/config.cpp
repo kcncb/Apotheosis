@@ -213,25 +213,15 @@ void Config::writeDefaultsInPlace()
     small_target_enabled = false;
     small_target_area_frac = 0.012f;
     small_target_confidence = 0.06f;
-    export_enable_fp8 = false;
-    export_enable_fp16 = true;
     fixed_input_size = false;
 
     use_cuda_graph = true;
     use_double_buffer = true;
-    use_pinned_memory = false;
     gpuMemoryReserveMB = 2048;
     enableGpuExclusiveMode = true;
-    capture_use_cuda = true;
 
     cpuCoreReserveCount = 4;
     systemMemoryReserveMB = 2048;
-
-    overlay_opacity = 240;
-    overlay_ui_scale = 1.0f;
-
-    auth_require_online = true;
-    auth_server_url = "http://110.42.232.243:8787";
 
     depth_inference_enabled = true;
     depth_model_path = "depth_anything_v2.engine";
@@ -304,10 +294,11 @@ bool Config::loadConfig(const std::string& filename)
         capture_method = "opencv_capture";
     if (capture_method == "capture_card_mf")
         capture_method = "mf_capture";
+    if (capture_method == "avermedia_capture")
+        capture_method = "mf_capture";
     if (capture_method != "udp_capture" && capture_method != "tcp_capture"
         && capture_method != "eth_capture"
-        && capture_method != "opencv_capture" && capture_method != "mf_capture"
-        && capture_method != "avermedia_capture")
+        && capture_method != "opencv_capture" && capture_method != "mf_capture")
         capture_method = "udp_capture";
     udp_ip = get_string("", "udp_ip", "0.0.0.0");
     udp_port = get_long("", "udp_port", 1234);
@@ -319,7 +310,8 @@ bool Config::loadConfig(const std::string& filename)
     eth_ethertype = (int)get_long("", "eth_ethertype", 0x88B5);
     if (eth_ethertype < 0x0600 || eth_ethertype > 0xFFFF) eth_ethertype = 0x88B5;
     opencv_capture_index = get_long("", "opencv_capture_index", 0);
-    if (opencv_capture_index < 0) opencv_capture_index = 0;
+    // -1000-N 表示圆刚 SDK 的第 N 个设备；非负值保持系统视频设备索引。
+    if (opencv_capture_index < -1063) opencv_capture_index = 0;
     opencv_capture_api = get_string("", "opencv_capture_api", "DSHOW");
     if (opencv_capture_api != "DSHOW" && opencv_capture_api != "MSMF"
         && opencv_capture_api != "FFMPEG" && opencv_capture_api != "ANY")
@@ -365,27 +357,15 @@ bool Config::loadConfig(const std::string& filename)
     small_target_enabled = get_bool("", "small_target_enabled", false);
     small_target_area_frac = static_cast<float>(get_double("", "small_target_area_frac", 0.012));
     small_target_confidence = static_cast<float>(get_double("", "small_target_confidence", 0.06));
-    export_enable_fp8 = get_bool("", "export_enable_fp8", false);
-    export_enable_fp16 = get_bool("", "export_enable_fp16", true);
     fixed_input_size = get_bool("", "fixed_input_size", false);
 
     use_cuda_graph = get_bool("", "use_cuda_graph", true);
     use_double_buffer = get_bool("", "use_double_buffer", true);
-    use_pinned_memory = get_bool("", "use_pinned_memory", true);
     gpuMemoryReserveMB = get_long("", "gpuMemoryReserveMB", 2048);
     enableGpuExclusiveMode = get_bool("", "enableGpuExclusiveMode", true);
-    capture_use_cuda = get_bool("", "capture_use_cuda", true);
 
     cpuCoreReserveCount = get_long("", "cpuCoreReserveCount", 4);
     systemMemoryReserveMB = get_long("", "systemMemoryReserveMB", 2048);
-
-    // ---------- Overlay ----------
-    overlay_opacity = get_long("", "overlay_opacity", 240);
-    overlay_ui_scale = static_cast<float>(get_double("", "overlay_ui_scale", 1.0));
-
-    // ---------- Authorization ----------
-    auth_require_online = get_bool("", "auth_require_online", true);
-    auth_server_url = "http://110.42.232.243:8787";
 
     // ---------- Depth ----------
     depth_inference_enabled = get_bool("", "depth_inference_enabled", true);
@@ -685,58 +665,46 @@ bool Config::loadConfig(const std::string& filename)
             hk.fovX = get_long(sec, "fovX", hk.fovX);
             hk.fovY = get_long(sec, "fovY", hk.fovY);
 
-            // ART 瞄准参数
-            hk.speed_x         = static_cast<float>(get_double(sec, "speed_x",         hk.speed_x));
-            hk.speed_y         = static_cast<float>(get_double(sec, "speed_y",         hk.speed_y));
-            hk.dead_zone_px    = static_cast<float>(get_double(sec, "dead_zone_px",    hk.dead_zone_px));
-            // 疾风 (Predictive)。旧 ini 里的 predictive_pred_weight_x 自动迁移成 pred_weight。
-            hk.predictive_kp_x        = static_cast<float>(get_double(sec, "predictive_kp_x",        hk.predictive_kp_x));
-            hk.predictive_kp_y        = static_cast<float>(get_double(sec, "predictive_kp_y",        hk.predictive_kp_y));
-            hk.predictive_kd          = static_cast<float>(get_double(sec, "predictive_kd",          hk.predictive_kd));
-            hk.predictive_pred_weight = static_cast<float>(
-                get_double(sec, "predictive_pred_weight",
-                           get_double(sec, "predictive_pred_weight_x", hk.predictive_pred_weight)));
+            // AVA PIDF Mode 1
+            hk.pidf_mapping_version = static_cast<int>(get_long(
+                sec, "pidf_mapping_version", 1));
+            hk.pidf_kp_x = static_cast<float>(get_double(sec, "pidf_kp_x", hk.pidf_kp_x));
+            hk.pidf_kp_y = static_cast<float>(get_double(sec, "pidf_kp_y", hk.pidf_kp_y));
+            hk.pidf_ki_x = static_cast<float>(get_double(sec, "pidf_ki_x", hk.pidf_ki_x));
+            hk.pidf_ki_y = static_cast<float>(get_double(sec, "pidf_ki_y", hk.pidf_ki_y));
+            hk.pidf_kd_x = static_cast<float>(get_double(sec, "pidf_kd_x", hk.pidf_kd_x));
+            hk.pidf_kd_y = static_cast<float>(get_double(sec, "pidf_kd_y", hk.pidf_kd_y));
+            hk.pidf_kf_x = static_cast<float>(get_double(sec, "pidf_kf_x", hk.pidf_kf_x));
+            hk.pidf_kf_y = static_cast<float>(get_double(sec, "pidf_kf_y", hk.pidf_kf_y));
+            hk.pidf_lr_x = static_cast<float>(get_double(sec, "pidf_lr_x", hk.pidf_lr_x));
+            hk.pidf_lr_y = static_cast<float>(get_double(sec, "pidf_lr_y", hk.pidf_lr_y));
+            hk.pidf_deadzone_x = static_cast<int>(get_long(sec, "pidf_deadzone_x", hk.pidf_deadzone_x));
+            hk.pidf_deadzone_y = static_cast<int>(get_long(sec, "pidf_deadzone_y", hk.pidf_deadzone_y));
+            hk.pidf_limit_x = static_cast<int>(get_long(sec, "pidf_limit_x", hk.pidf_limit_x));
+            hk.pidf_limit_y = static_cast<int>(get_long(sec, "pidf_limit_y", hk.pidf_limit_y));
 
-            // 天枢 (Classic)
-            hk.classic_aim_mode = static_cast<int>(get_long(sec, "classic_aim_mode", hk.classic_aim_mode));
-            hk.classic_simple_start_speed  = static_cast<float>(get_double(sec, "classic_simple_start_speed",  hk.classic_simple_start_speed));
-            hk.classic_simple_end_speed    = static_cast<float>(get_double(sec, "classic_simple_end_speed",    hk.classic_simple_end_speed));
-            hk.classic_simple_transition_ms= static_cast<int>(get_long(sec, "classic_simple_transition_ms",    hk.classic_simple_transition_ms));
-            hk.classic_simple_ki           = static_cast<float>(get_double(sec, "classic_simple_ki",           hk.classic_simple_ki));
-            hk.classic_simple_kd           = static_cast<float>(get_double(sec, "classic_simple_kd",           hk.classic_simple_kd));
-            hk.classic_adv_kpmin_x   = static_cast<float>(get_double(sec, "classic_adv_kpmin_x",   hk.classic_adv_kpmin_x));
-            hk.classic_adv_kpmax_x   = static_cast<float>(get_double(sec, "classic_adv_kpmax_x",   hk.classic_adv_kpmax_x));
-            hk.classic_adv_ki_x      = static_cast<float>(get_double(sec, "classic_adv_ki_x",      hk.classic_adv_ki_x));
-            hk.classic_adv_kd_x      = static_cast<float>(get_double(sec, "classic_adv_kd_x",      hk.classic_adv_kd_x));
-            hk.classic_adv_imax_x    = static_cast<float>(get_double(sec, "classic_adv_imax_x",    hk.classic_adv_imax_x));
-            hk.classic_adv_pfactor_x = static_cast<float>(get_double(sec, "classic_adv_pfactor_x", hk.classic_adv_pfactor_x));
-            hk.classic_adv_time_x    = static_cast<int>(get_long(sec, "classic_adv_time_x",        hk.classic_adv_time_x));
-            hk.classic_adv_time_dynamic_x = get_bool(sec, "classic_adv_time_dynamic_x",            hk.classic_adv_time_dynamic_x);
-            hk.classic_adv_kpmin_y   = static_cast<float>(get_double(sec, "classic_adv_kpmin_y",   hk.classic_adv_kpmin_y));
-            hk.classic_adv_kpmax_y   = static_cast<float>(get_double(sec, "classic_adv_kpmax_y",   hk.classic_adv_kpmax_y));
-            hk.classic_adv_ki_y      = static_cast<float>(get_double(sec, "classic_adv_ki_y",      hk.classic_adv_ki_y));
-            hk.classic_adv_kd_y      = static_cast<float>(get_double(sec, "classic_adv_kd_y",      hk.classic_adv_kd_y));
-            hk.classic_adv_imax_y    = static_cast<float>(get_double(sec, "classic_adv_imax_y",    hk.classic_adv_imax_y));
-            hk.classic_adv_pfactor_y = static_cast<float>(get_double(sec, "classic_adv_pfactor_y", hk.classic_adv_pfactor_y));
-            hk.classic_adv_time_y    = static_cast<int>(get_long(sec, "classic_adv_time_y",        hk.classic_adv_time_y));
-            hk.classic_adv_time_dynamic_y = get_bool(sec, "classic_adv_time_dynamic_y",            hk.classic_adv_time_dynamic_y);
-            hk.classic_prediction_mode       = static_cast<int>(get_long(sec, "classic_prediction_mode",       hk.classic_prediction_mode));
-            hk.classic_velocity_lead_frames  = static_cast<float>(get_double(sec, "classic_velocity_lead_frames",  hk.classic_velocity_lead_frames));
-            hk.classic_independent_y         = get_bool(sec, "classic_independent_y",                              hk.classic_independent_y);
-            hk.classic_kalman_q_pos      = static_cast<float>(get_double(sec, "classic_kalman_q_pos",      hk.classic_kalman_q_pos));
-            hk.classic_kalman_q_vel      = static_cast<float>(get_double(sec, "classic_kalman_q_vel",      hk.classic_kalman_q_vel));
-            hk.classic_kalman_r_obs      = static_cast<float>(get_double(sec, "classic_kalman_r_obs",      hk.classic_kalman_r_obs));
-            hk.classic_kalman_lookahead  = static_cast<float>(get_double(sec, "classic_kalman_lookahead",  hk.classic_kalman_lookahead));
-            hk.mover_kind = static_cast<int>(get_long(sec, "mover_kind", hk.mover_kind));
-            hk.yaoguang_pull_speed_x = static_cast<float>(get_double(sec, "yaoguang_pull_speed_x", hk.yaoguang_pull_speed_x));
-            hk.yaoguang_pull_speed_y = static_cast<float>(get_double(sec, "yaoguang_pull_speed_y", hk.yaoguang_pull_speed_y));
-            hk.yaoguang_tracking = static_cast<float>(get_double(sec, "yaoguang_tracking", hk.yaoguang_tracking));
-            hk.yaoguang_prediction_ms = static_cast<float>(get_double(sec, "yaoguang_prediction_ms", hk.yaoguang_prediction_ms));
-            hk.yaoguang_stability = static_cast<float>(get_double(sec, "yaoguang_stability", hk.yaoguang_stability));
+            // 旧版界面把四行错误接成 Kp/Ki/Kd/Kf，并隐藏 LR。按用户
+            // 看到的行值迁移为 AVA 的 Kp/Kd/Kf/LR，避免运行机沿用旧
+            // config.ini 后仍然出现“预测调大只回到框中心”。
+            if (hk.pidf_mapping_version < 2)
+            {
+                const float old_ki_x = hk.pidf_ki_x;
+                const float old_ki_y = hk.pidf_ki_y;
+                const float old_kd_x = hk.pidf_kd_x;
+                const float old_kd_y = hk.pidf_kd_y;
+                const float old_kf_x = hk.pidf_kf_x;
+                const float old_kf_y = hk.pidf_kf_y;
+                hk.pidf_ki_x = 0.0f;
+                hk.pidf_ki_y = 0.0f;
+                hk.pidf_kd_x = old_ki_x; // 旧“过冲控制”
+                hk.pidf_kd_y = old_ki_y;
+                hk.pidf_kf_x = old_kd_x; // 旧“锁定强度”
+                hk.pidf_kf_y = old_kd_y;
+                hk.pidf_lr_x = old_kf_x; // 旧“预测速度”
+                hk.pidf_lr_y = old_kf_y;
+                hk.pidf_mapping_version = 2;
+            }
 
-            // 死区 (shared)
-            hk.deadzone_enabled  = get_bool(sec, "deadzone_enabled",  hk.deadzone_enabled);
-            hk.deadzone_percent  = static_cast<float>(get_double(sec, "deadzone_percent",  hk.deadzone_percent));
             hk.lost_target_cache_frames = static_cast<int>(get_long(
                 sec, "lost_target_cache_frames", hk.lost_target_cache_frames));
 
@@ -750,7 +718,6 @@ bool Config::loadConfig(const std::string& filename)
             hk.trigger_duration_jitter_ms = static_cast<int>(get_long(sec, "trigger_duration_jitter_ms", hk.trigger_duration_jitter_ms));
             hk.trigger_interval_jitter_ms = static_cast<int>(get_long(sec, "trigger_interval_jitter_ms", hk.trigger_interval_jitter_ms));
             hk.trigger_switch_cooldown_ms = static_cast<int>(get_long(sec, "trigger_switch_cooldown_ms", hk.trigger_switch_cooldown_ms));
-            hk.y_strength_percent         = static_cast<int>(get_long(sec, "y_strength_percent",         hk.y_strength_percent));
 
             // 目标选择 — 优先级列表
             {
@@ -801,6 +768,8 @@ bool Config::loadConfig(const std::string& filename)
 
             // 瞄准轨迹曲线
             hk.aim_path_mode        = get_long(sec, "aim_path_mode", hk.aim_path_mode);
+            hk.aim_path_influence   = static_cast<int>(get_long(
+                sec, "aim_path_influence", hk.aim_path_influence));
             hk.aim_path_bezier_cx1  = static_cast<float>(get_double(sec, "aim_path_bezier_cx1", hk.aim_path_bezier_cx1));
             hk.aim_path_bezier_cy1  = static_cast<float>(get_double(sec, "aim_path_bezier_cy1", hk.aim_path_bezier_cy1));
             hk.aim_path_bezier_cx2  = static_cast<float>(get_double(sec, "aim_path_bezier_cx2", hk.aim_path_bezier_cx2));
@@ -893,55 +862,20 @@ bool Config::loadConfig(const std::string& filename)
     }
 
     auto clamp_aim_fields = [](HotkeyProfile& hk) {
-        hk.speed_x        = std::clamp(hk.speed_x,        0.0f, 2.0f);
-        hk.speed_y        = std::clamp(hk.speed_y,        0.0f, 2.0f);
-        hk.dead_zone_px   = std::clamp(hk.dead_zone_px,   0.0f, 20.0f);
+        // AVA 的 PIDF 浮点编辑器沿用 QDoubleSpinBox 默认范围 0..99.99；
+        // 不再把 Kp/Kd/Kf 截到 10、把 LR 截到 1。
+        hk.pidf_kp_x = std::clamp(hk.pidf_kp_x, 0.0f, 99.99f); hk.pidf_kp_y = std::clamp(hk.pidf_kp_y, 0.0f, 99.99f);
+        hk.pidf_ki_x = 0.0f; hk.pidf_ki_y = 0.0f;
+        hk.pidf_kd_x = std::clamp(hk.pidf_kd_x, 0.0f, 99.99f); hk.pidf_kd_y = std::clamp(hk.pidf_kd_y, 0.0f, 99.99f);
+        hk.pidf_kf_x = std::clamp(hk.pidf_kf_x, 0.0f, 99.99f); hk.pidf_kf_y = std::clamp(hk.pidf_kf_y, 0.0f, 99.99f);
+        hk.pidf_lr_x = std::clamp(hk.pidf_lr_x, 0.0f, 99.99f); hk.pidf_lr_y = std::clamp(hk.pidf_lr_y, 0.0f, 99.99f);
+        hk.pidf_deadzone_x = std::clamp(hk.pidf_deadzone_x, 0, 1000); hk.pidf_deadzone_y = std::clamp(hk.pidf_deadzone_y, 0, 1000);
+        hk.pidf_limit_x = std::clamp(hk.pidf_limit_x, 0, 1000); hk.pidf_limit_y = std::clamp(hk.pidf_limit_y, 0, 1000);
 
-        // 疾风 clamp
-        hk.predictive_kp_x        = std::clamp(hk.predictive_kp_x,        0.0f, 10.0f);
-        hk.predictive_kp_y        = std::clamp(hk.predictive_kp_y,        0.0f, 10.0f);
-        hk.predictive_kd          = std::clamp(hk.predictive_kd,          0.0f, 5.0f);
-        hk.predictive_pred_weight = std::clamp(hk.predictive_pred_weight, 0.0f, 3.0f);
-
-        // 天枢 clamp
-        hk.classic_aim_mode = std::clamp(hk.classic_aim_mode, 0, 1);
-        hk.classic_simple_start_speed  = std::clamp(hk.classic_simple_start_speed,  0.0f, 5.0f);
-        hk.classic_simple_end_speed    = std::clamp(hk.classic_simple_end_speed,    0.0f, 5.0f);
-        hk.classic_simple_transition_ms= std::clamp(hk.classic_simple_transition_ms, 0, 10000);
-        hk.classic_simple_ki           = std::clamp(hk.classic_simple_ki,           0.0f, 1.0f);
-        hk.classic_simple_kd           = std::clamp(hk.classic_simple_kd,           0.0f, 2.0f);
-        hk.classic_adv_kpmin_x   = std::clamp(hk.classic_adv_kpmin_x,   0.0f, 5.0f);
-        hk.classic_adv_kpmax_x   = std::clamp(hk.classic_adv_kpmax_x,   0.0f, 5.0f);
-        hk.classic_adv_ki_x      = std::clamp(hk.classic_adv_ki_x,      0.0f, 1.0f);
-        hk.classic_adv_kd_x      = std::clamp(hk.classic_adv_kd_x,      0.0f, 2.0f);
-        hk.classic_adv_imax_x    = std::clamp(hk.classic_adv_imax_x,    0.0f, 100.0f);
-        hk.classic_adv_pfactor_x = std::clamp(hk.classic_adv_pfactor_x, 0.1f, 5.0f);
-        hk.classic_adv_time_x    = std::clamp(hk.classic_adv_time_x,    0, 10000);
-        hk.classic_adv_kpmin_y   = std::clamp(hk.classic_adv_kpmin_y,   0.0f, 5.0f);
-        hk.classic_adv_kpmax_y   = std::clamp(hk.classic_adv_kpmax_y,   0.0f, 5.0f);
-        hk.classic_adv_ki_y      = std::clamp(hk.classic_adv_ki_y,      0.0f, 1.0f);
-        hk.classic_adv_kd_y      = std::clamp(hk.classic_adv_kd_y,      0.0f, 2.0f);
-        hk.classic_adv_imax_y    = std::clamp(hk.classic_adv_imax_y,    0.0f, 100.0f);
-        hk.classic_adv_pfactor_y = std::clamp(hk.classic_adv_pfactor_y, 0.1f, 5.0f);
-        hk.classic_adv_time_y    = std::clamp(hk.classic_adv_time_y,    0, 10000);
-        hk.classic_prediction_mode       = std::clamp(hk.classic_prediction_mode,       0, 2);
-        hk.classic_velocity_lead_frames  = std::clamp(hk.classic_velocity_lead_frames,  0.0f, 10.0f);
-        hk.classic_kalman_q_pos      = std::clamp(hk.classic_kalman_q_pos,      0.001f, 100.0f);
-        hk.classic_kalman_q_vel      = std::clamp(hk.classic_kalman_q_vel,      0.001f, 100.0f);
-        hk.classic_kalman_r_obs      = std::clamp(hk.classic_kalman_r_obs,      0.001f, 100.0f);
-        hk.classic_kalman_lookahead  = std::clamp(hk.classic_kalman_lookahead,  0.0f, 100.0f);
-        hk.mover_kind = std::clamp(hk.mover_kind, 0, 1);
-        hk.yaoguang_pull_speed_x = std::clamp(hk.yaoguang_pull_speed_x, 0.0f, 100.0f);
-        hk.yaoguang_pull_speed_y = std::clamp(hk.yaoguang_pull_speed_y, 0.0f, 100.0f);
-        hk.yaoguang_tracking = std::clamp(hk.yaoguang_tracking, 0.0f, 100.0f);
-        hk.yaoguang_prediction_ms = std::clamp(hk.yaoguang_prediction_ms, 0.0f, 100.0f);
-        hk.yaoguang_stability = std::clamp(hk.yaoguang_stability, 0.0f, 100.0f);
-
-        // 死区 clamp
-        hk.deadzone_percent = std::clamp(hk.deadzone_percent, 0.0f, 100.0f);
         hk.lost_target_cache_frames = std::clamp(hk.lost_target_cache_frames, 0, 240);
 
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 2);
+        hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
         hk.aim_path_bezier_cx1 = std::clamp(hk.aim_path_bezier_cx1, 0.0f, 1.0f);
         hk.aim_path_bezier_cx2 = std::clamp(hk.aim_path_bezier_cx2, 0.0f, 1.0f);
         hk.aim_path_bezier_cy1 = std::clamp(hk.aim_path_bezier_cy1, -1.0f, 1.0f);
@@ -961,7 +895,6 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_duration_jitter_ms = std::clamp(hk.trigger_duration_jitter_ms, 0, 500);
         hk.trigger_interval_jitter_ms = std::clamp(hk.trigger_interval_jitter_ms, 0, 500);
         hk.trigger_switch_cooldown_ms = std::clamp(hk.trigger_switch_cooldown_ms, 0, 5000);
-        hk.y_strength_percent         = std::clamp(hk.y_strength_percent,         1, 500);
 
         // 目标选择 clamp
         for (auto& ac : hk.aim_classes)
@@ -1076,27 +1009,15 @@ bool Config::saveConfig(const std::string& filename)
         << std::setprecision(2)
         << "small_target_confidence = " << small_target_confidence << "\n"
         << std::setprecision(0)
-        << "export_enable_fp8 = " << to_bool_str(export_enable_fp8) << "\n"
-        << "export_enable_fp16 = " << to_bool_str(export_enable_fp16) << "\n"
         << "fixed_input_size = " << to_bool_str(fixed_input_size) << "\n\n";
 
     file << "# CUDA / system\n"
         << "use_cuda_graph = " << to_bool_str(use_cuda_graph) << "\n"
         << "use_double_buffer = " << to_bool_str(use_double_buffer) << "\n"
-        << "use_pinned_memory = " << to_bool_str(use_pinned_memory) << "\n"
         << "gpuMemoryReserveMB = " << gpuMemoryReserveMB << "\n"
         << "enableGpuExclusiveMode = " << to_bool_str(enableGpuExclusiveMode) << "\n"
-        << "capture_use_cuda = " << to_bool_str(capture_use_cuda) << "\n"
         << "cpuCoreReserveCount = " << cpuCoreReserveCount << "\n"
         << "systemMemoryReserveMB = " << systemMemoryReserveMB << "\n\n";
-
-    file << "# Overlay\n"
-        << "overlay_opacity = " << overlay_opacity << "\n"
-        << std::fixed << std::setprecision(2)
-        << "overlay_ui_scale = " << overlay_ui_scale << "\n\n";
-
-    file << "# Authorization\n"
-        << "auth_require_online = " << to_bool_str(auth_require_online) << "\n\n";
 
     file << "# Depth\n"
         << "depth_inference_enabled = " << to_bool_str(depth_inference_enabled) << "\n"
@@ -1196,59 +1117,15 @@ bool Config::saveConfig(const std::string& filename)
         file << "keys = " << joinStrings(hk.keys) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
+        file << "pidf_mapping_version = 2\n";
         file << std::fixed << std::setprecision(4)
-             << "speed_x = "         << hk.speed_x         << "\n"
-             << "speed_y = "         << hk.speed_y         << "\n"
-             << "dead_zone_px = "    << hk.dead_zone_px    << "\n"
-             << "predictive_kp_x = "        << hk.predictive_kp_x        << "\n"
-             << "predictive_kp_y = "        << hk.predictive_kp_y        << "\n"
-             << "predictive_kd = "          << hk.predictive_kd          << "\n"
-             << "predictive_pred_weight = " << hk.predictive_pred_weight << "\n"
-             << "classic_aim_mode = " << hk.classic_aim_mode << "\n"
-             << std::setprecision(4)
-             << "classic_simple_start_speed = "  << hk.classic_simple_start_speed  << "\n"
-             << "classic_simple_end_speed = "    << hk.classic_simple_end_speed    << "\n"
-             << std::setprecision(0)
-             << "classic_simple_transition_ms = "<< hk.classic_simple_transition_ms << "\n"
-             << std::setprecision(4)
-             << "classic_simple_ki = "           << hk.classic_simple_ki           << "\n"
-             << "classic_simple_kd = "           << hk.classic_simple_kd           << "\n"
-             << "classic_adv_kpmin_x = "   << hk.classic_adv_kpmin_x   << "\n"
-             << "classic_adv_kpmax_x = "   << hk.classic_adv_kpmax_x   << "\n"
-             << "classic_adv_ki_x = "      << hk.classic_adv_ki_x      << "\n"
-             << "classic_adv_kd_x = "      << hk.classic_adv_kd_x      << "\n"
-             << "classic_adv_imax_x = "    << hk.classic_adv_imax_x    << "\n"
-             << "classic_adv_pfactor_x = " << hk.classic_adv_pfactor_x << "\n"
-             << std::setprecision(0)
-             << "classic_adv_time_x = "    << hk.classic_adv_time_x    << "\n"
-             << "classic_adv_time_dynamic_x = " << to_bool_str(hk.classic_adv_time_dynamic_x) << "\n"
-             << std::setprecision(4)
-             << "classic_adv_kpmin_y = "   << hk.classic_adv_kpmin_y   << "\n"
-             << "classic_adv_kpmax_y = "   << hk.classic_adv_kpmax_y   << "\n"
-             << "classic_adv_ki_y = "      << hk.classic_adv_ki_y      << "\n"
-             << "classic_adv_kd_y = "      << hk.classic_adv_kd_y      << "\n"
-             << "classic_adv_imax_y = "    << hk.classic_adv_imax_y    << "\n"
-             << "classic_adv_pfactor_y = " << hk.classic_adv_pfactor_y << "\n"
-             << std::setprecision(0)
-             << "classic_adv_time_y = "    << hk.classic_adv_time_y    << "\n"
-             << "classic_adv_time_dynamic_y = " << to_bool_str(hk.classic_adv_time_dynamic_y) << "\n"
-             << "classic_prediction_mode = "       << hk.classic_prediction_mode       << "\n"
-             << std::setprecision(4)
-             << "classic_velocity_lead_frames = "  << hk.classic_velocity_lead_frames  << "\n"
-             << "classic_independent_y = "         << to_bool_str(hk.classic_independent_y)         << "\n"
-             << "classic_kalman_q_pos = "      << hk.classic_kalman_q_pos      << "\n"
-             << "classic_kalman_q_vel = "      << hk.classic_kalman_q_vel      << "\n"
-             << "classic_kalman_r_obs = "      << hk.classic_kalman_r_obs      << "\n"
-             << "classic_kalman_lookahead = "  << hk.classic_kalman_lookahead  << "\n"
-             << "mover_kind = " << hk.mover_kind << "\n"
-             << "yaoguang_pull_speed_x = " << hk.yaoguang_pull_speed_x << "\n"
-             << "yaoguang_pull_speed_y = " << hk.yaoguang_pull_speed_y << "\n"
-             << "yaoguang_tracking = " << hk.yaoguang_tracking << "\n"
-             << "yaoguang_prediction_ms = " << hk.yaoguang_prediction_ms << "\n"
-             << "yaoguang_stability = " << hk.yaoguang_stability << "\n"
-             << "deadzone_enabled = "  << to_bool_str(hk.deadzone_enabled)  << "\n"
-             << std::setprecision(4)
-             << "deadzone_percent = "  << hk.deadzone_percent  << "\n"
+             << "pidf_kp_x = " << hk.pidf_kp_x << "\n" << "pidf_kp_y = " << hk.pidf_kp_y << "\n"
+             << "pidf_ki_x = " << hk.pidf_ki_x << "\n" << "pidf_ki_y = " << hk.pidf_ki_y << "\n"
+             << "pidf_kd_x = " << hk.pidf_kd_x << "\n" << "pidf_kd_y = " << hk.pidf_kd_y << "\n"
+             << "pidf_kf_x = " << hk.pidf_kf_x << "\n" << "pidf_kf_y = " << hk.pidf_kf_y << "\n"
+             << "pidf_lr_x = " << hk.pidf_lr_x << "\n" << "pidf_lr_y = " << hk.pidf_lr_y << "\n"
+             << "pidf_deadzone_x = " << hk.pidf_deadzone_x << "\n" << "pidf_deadzone_y = " << hk.pidf_deadzone_y << "\n"
+             << "pidf_limit_x = " << hk.pidf_limit_x << "\n" << "pidf_limit_y = " << hk.pidf_limit_y << "\n"
              << std::setprecision(0)
              << "lost_target_cache_frames = " << hk.lost_target_cache_frames << "\n"
              << "trigger_enabled = "       << to_bool_str(hk.trigger_enabled)       << "\n"
@@ -1260,7 +1137,6 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_duration_jitter_ms = " << hk.trigger_duration_jitter_ms << "\n"
              << "trigger_interval_jitter_ms = " << hk.trigger_interval_jitter_ms << "\n"
              << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
-             << "y_strength_percent = "         << hk.y_strength_percent         << "\n"
              << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << std::setprecision(0)
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
@@ -1271,6 +1147,7 @@ bool Config::saveConfig(const std::string& filename)
              << std::fixed << std::setprecision(3)
              << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
              << "aim_path_mode = " << hk.aim_path_mode << "\n"
+             << "aim_path_influence = " << hk.aim_path_influence << "\n"
              << std::fixed << std::setprecision(4)
              << "aim_path_bezier_cx1 = " << hk.aim_path_bezier_cx1 << "\n"
              << "aim_path_bezier_cy1 = " << hk.aim_path_bezier_cy1 << "\n"
@@ -1408,5 +1285,3 @@ void Config::ensure_flashlight_class()
     st.bucket     = ClassBucket::Aim; // default routable; user may rebucket later
     class_filters.push_back(std::move(st));
 }
-
-

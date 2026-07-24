@@ -17,7 +17,7 @@ private:
     void loadConfig();
 
     ToggleSwitch* m_showPreview{};
-    QSpinBox*     m_sensitivity{};        // 灵敏度
+    QSpinBox*     m_sensitivity{};        // 检测倾向
     QSlider*      m_sensitivitySlider{};
     QSpinBox*     m_reject{};             // 抗误锁
     QSlider*      m_rejectSlider{};

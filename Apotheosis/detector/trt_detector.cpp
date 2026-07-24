@@ -923,8 +923,8 @@ bool TrtDetector::initialize(const std::string& model_path)
 
     // FP16-only policy: the preprocess kernel writes __half directly into the
     // engine input binding. Reject engines whose input tensor is not FP16 to
-    // avoid a silent truncation/extension mismatch. Rebuild the engine with
-    // export_enable_fp16=true (the default) to fix.
+    // avoid a silent truncation/extension mismatch. Delete the incompatible
+    // cache so the fixed FP16-I/O builder policy can rebuild it.
     {
         nvinfer1::DataType inDt = engine->getTensorDataType(inputName.c_str());
         if (inDt != nvinfer1::DataType::kHALF)
@@ -1658,11 +1658,13 @@ void TrtDetector::inferenceThread()
                             {
                                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
                                 detectionBuffer.boxes.clear();
+                                detectionBuffer.precise_boxes.clear();
                                 detectionBuffer.classes.clear();
                                 detectionBuffer.confidences.clear();
                                 for (const auto& det : detections)
                                 {
                                     detectionBuffer.boxes.push_back(det.box);
+                                    detectionBuffer.precise_boxes.push_back(det.preciseBox);
                                     detectionBuffer.classes.push_back(det.classId);
                                     detectionBuffer.confidences.push_back(det.confidence);
                                 }
@@ -1819,12 +1821,14 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
     {
         std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
         detectionBuffer.boxes.clear();
+        detectionBuffer.precise_boxes.clear();
         detectionBuffer.classes.clear();
         detectionBuffer.confidences.clear();
 
         for (const auto& det : detections)
         {
             detectionBuffer.boxes.push_back(det.box);
+            detectionBuffer.precise_boxes.push_back(det.preciseBox);
             detectionBuffer.classes.push_back(det.classId);
             detectionBuffer.confidences.push_back(det.confidence);
         }

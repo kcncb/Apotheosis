@@ -10,6 +10,9 @@ struct Detection
     cv::Rect box;
     float confidence;
     int classId;
+    // 保留模型解码得到的浮点框供 AVA selector/tracker 使用。旧的整数框
+    // 继续提供给 overlay、NMS 和其它既有消费者，避免在显示链中扩散改动。
+    cv::Rect2f preciseBox;
 };
 
 void NMS(

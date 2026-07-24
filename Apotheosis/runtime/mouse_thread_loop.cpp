@@ -12,6 +12,7 @@
 
 #include "AimbotTarget.h"
 #include "active_hotkey.h"
+#include "aim_path.h"
 #include "boss_aim.h"
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
@@ -97,6 +98,54 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     return out;
 }
 
+std::pair<double, double> resolve_fov_radii(const HotkeyProfile& profile,
+                                            const PivotResolved& pivot,
+                                            const boss::AimEngine& engine)
+{
+    const double base_rx = std::max(1, profile.fovX) * 0.5;
+    const double base_ry = std::max(1, profile.fovY) * 0.5;
+    const double strength = std::clamp(static_cast<double>(profile.dynamic_fov_strength), 0.0, 1.0);
+    if (!profile.dynamic_fov_enabled || strength <= 0.0 || engine.lockedTrackId() < 0)
+        return { base_rx, base_ry };
+
+    const auto it = std::find_if(engine.tracks().begin(), engine.tracks().end(),
+        [&engine](const boss::Track& track) { return track.id == engine.lockedTrackId(); });
+    if (it == engine.tracks().end() || it->bbox.width <= 0.0f || it->bbox.height <= 0.0f)
+        return { base_rx, base_ry };
+
+    const double left = it->bbox.x;
+    const double right = it->bbox.x + it->bbox.width;
+    const double top = it->bbox.y;
+    const double bottom = it->bbox.y + it->bbox.height;
+    const double center_x = (left + right) * 0.5;
+    const double center_y = (top + bottom) * 0.5;
+
+    // A distant lock keeps the base region so the controller has room to
+    // converge. As the lock approaches the pivot, contract towards an ellipse
+    // that still fully contains the locked box. Strength controls both how
+    // tight the target ellipse is and how much of that contraction is applied.
+    const double normalized_distance = std::clamp(std::hypot(
+        (center_x - pivot.x) / std::max(1.0, base_rx),
+        (center_y - pivot.y) / std::max(1.0, base_ry)), 0.0, 1.0);
+    const double contraction = strength * (1.0 - normalized_distance);
+    const double margin = 2.0 - strength;
+    const double min_radius_fraction = 0.50 - 0.40 * strength;
+
+    const double tight_rx = std::clamp(std::max(
+        base_rx * min_radius_fraction,
+        std::max(std::abs(left - pivot.x), std::abs(right - pivot.x)) * margin),
+        1.0, base_rx);
+    const double tight_ry = std::clamp(std::max(
+        base_ry * min_radius_fraction,
+        std::max(std::abs(top - pivot.y), std::abs(bottom - pivot.y)) * margin),
+        1.0, base_ry);
+
+    return {
+        base_rx + (tight_rx - base_rx) * contraction,
+        base_ry + (tight_ry - base_ry) * contraction
+    };
+}
+
 enum class TriggerPhase { Idle, Delay, Pressed, Cooldown, SwitchCooldown };
 
 struct TriggerState
@@ -160,10 +209,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
 {
     int lastVersion = -1;
     std::vector<cv::Rect> boxes;
+    std::vector<cv::Rect2f> precise_boxes;
     std::vector<int> classes;
     std::vector<float> confidences;
 
     boss::AimEngine engine;
+    boss::AimPathDriver aim_path_driver;
 
     int last_hotkey_index_seen = -2;
     int last_resolution_seen = -1;
@@ -196,10 +247,21 @@ void mouseThreadFunction(MouseThread& mouseThread)
             if (detectionBuffer.version > lastVersion)
             {
                 boxes = detectionBuffer.boxes;
+                precise_boxes = detectionBuffer.precise_boxes;
+                if (precise_boxes.size() != boxes.size()) {
+                    precise_boxes.clear();
+                    precise_boxes.reserve(boxes.size());
+                    for (const auto& box : boxes) {
+                        precise_boxes.emplace_back(
+                            static_cast<float>(box.x), static_cast<float>(box.y),
+                            static_cast<float>(box.width), static_cast<float>(box.height));
+                    }
+                }
                 classes = detectionBuffer.classes;
                 confidences = detectionBuffer.confidences;
                 const size_t aligned = std::min({ boxes.size(), classes.size(), confidences.size() });
                 boxes.resize(aligned);
+                precise_boxes.resize(aligned);
                 classes.resize(aligned);
                 confidences.resize(aligned);
                 lastVersion = detectionBuffer.version;
@@ -217,8 +279,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         g_mouse_queue_latency_ms.store(static_cast<float>(movement_feedback.latency_ms));
         g_mouse_queue_backlog.store(static_cast<int>(movement_feedback.backlog));
         g_mouse_send_failures.store(movement_feedback.failed);
-        if (movement_feedback.dx != 0 || movement_feedback.dy != 0)
-            engine.applyMove(movement_feedback.dx, movement_feedback.dy);
         const auto config_snapshot = runtime_config::read();
 
         // Glass filter — drop boxes whose edge ring is dominated by glass-
@@ -289,6 +349,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     {
                         const size_t i = *it;
                         boxes.erase(boxes.begin() + i);
+                        precise_boxes.erase(precise_boxes.begin() + i);
                         classes.erase(classes.begin() + i);
                         confidences.erase(confidences.begin() + i);
                     }
@@ -306,74 +367,30 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
         }
 
-        // Flashlight halo injection. The detector + depth-gate + temporal tracker
-        // run on the capture thread and publish RANKED candidates; here we apply
-        // the final accept rule that needs the model boxes: a halo is aimable when
-        // it is COLOCATED with a real model detection (someone the model already
-        // sees → trust it; the daytime case) OR it cleared the depth + time gates
-        // (an orphan light in the dark → the discriminators vouch for it). The
-        // best accepted halo is spliced in under the fixed `shoudiantong` class
-        // (kFlashlightClassId) so the tracker / FOV / smart-trigger treat it like
-        // a real model detection. Whether it is actually aimed still depends on
-        // the user routing `shoudiantong` into a target slot.
+        // 寻光与 YOLO 发布严格同频：每个新推理结果只处理一次当前检测画面。
+        // 若光核与模型框关联，只发布预览圆圈，原模型框原样进入瞄准管线，因而
+        // 类别优先级、锁点偏移和置信度规则完全不被寻光篡改。只有没有关联框、
+        // 且连续三次推理都通过严格判别的光核，才注入 shoudiantong 独立目标。
         if (hasNewDetection)
         {
-            constexpr float kColocateOverlapFrac = 0.10f; // halo∩box / halo-area
-            constexpr float kColocateBoost       = 0.25f; // confidence bump when colocated
-
-            const auto fs = flashlight_runtime::read();
-            const auto now = std::chrono::steady_clock::now();
-            const bool fresh =
-                fs.valid && fs.ts.time_since_epoch().count() != 0 &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - fs.ts).count() < flashlight_runtime::kFreshnessMs;
-            if (fresh && !fs.spots.empty())
+            cv::Mat flashlight_frame;
             {
-                int   best_idx  = -1;
-                float best_conf = 0.0f;
-                for (size_t si = 0; si < fs.spots.size(); ++si)
+                std::lock_guard<std::mutex> lk(frameMutex);
+                flashlight_frame = latestFrame;
+            }
+            flashlight_runtime::process_inference_frame(flashlight_frame, boxes);
+            const auto fs = flashlight_runtime::read();
+            if (fs.valid && !fs.spots.empty())
+            {
+                const auto& sp = fs.spots.front();
+                if (sp.independent_aimable && sp.box.area() > 0)
                 {
-                    const auto& sp = fs.spots[si];
-                    if (sp.box.area() <= 0)
-                        continue;
-
-                    // Colocation: does any non-flashlight model box overlap the
-                    // halo enough? (boxes/classes here are the model detections —
-                    // the flashlight class is not injected yet this frame.)
-                    bool colocated = false;
-                    for (size_t bi = 0; bi < boxes.size(); ++bi)
-                    {
-                        if (bi < classes.size() && classes[bi] == kFlashlightClassId)
-                            continue;
-                        const cv::Rect inter = sp.box & boxes[bi];
-                        if (inter.area() > 0 &&
-                            static_cast<float>(inter.area()) /
-                                    static_cast<float>(sp.box.area()) >= kColocateOverlapFrac)
-                        {
-                            colocated = true;
-                            break;
-                        }
-                    }
-
-                    const bool accept = colocated || (sp.passed_depth && sp.confirmed);
-                    if (!accept)
-                        continue;
-
-                    const float conf = std::clamp(
-                        sp.confidence + (colocated ? kColocateBoost : 0.0f), 0.0f, 1.0f);
-                    if (best_idx < 0 || conf > best_conf)
-                    {
-                        best_idx  = static_cast<int>(si);
-                        best_conf = conf;
-                    }
-                }
-
-                if (best_idx >= 0)
-                {
-                    boxes.push_back(fs.spots[static_cast<size_t>(best_idx)].box);
+                    boxes.push_back(sp.box);
+                    precise_boxes.emplace_back(
+                        static_cast<float>(sp.box.x), static_cast<float>(sp.box.y),
+                        static_cast<float>(sp.box.width), static_cast<float>(sp.box.height));
                     classes.push_back(kFlashlightClassId);
-                    confidences.push_back(best_conf);
-                    hasNewDetection = true;
+                    confidences.push_back(sp.confidence);
                 }
             }
         }
@@ -417,6 +434,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 ev_last_track_id = -1;
                 ev_fire_pressed = false;
                 engine.reset();
+                aim_path_driver.reset();
                 if (trigger.phase == TriggerPhase::Pressed)
                     mouseThread.releaseLeftButton();
                 trigger.reset();
@@ -435,10 +453,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 mouseThread.releaseLeftButton();
             trigger.reset();
             mouseThread.clearQueuedMoves();
+            aim_path_driver.reset();
             if (hasNewDetection)
             {
                 boss::EngineInput in;
-                in.boxes = &boxes;
+                in.boxes = &precise_boxes;
                 in.classes = &classes;
                 in.confidences = &confidences;
                 in.crosshair_x = config_resolution * 0.5;
@@ -484,15 +503,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
         const auto pivot = resolve_crosshair_pivot(profile_ptr, config_resolution);
 
-        // FOV ellipse radii: half of the user's fovX / fovY. The engine drops
-        // detections outside this ellipse before tracker association.
-        const double fov_rx = std::max(1, profile_ptr->fovX) * 0.5;
-        const double fov_ry = std::max(1, profile_ptr->fovY) * 0.5;
-        g_dynamic_fov_radius_x_px.store(static_cast<float>(fov_rx));
-        g_dynamic_fov_radius_y_px.store(static_cast<float>(fov_ry));
+        // The dynamic gate is based on the previous tick's locked track, so it
+        // can constrain the candidate set before tracker association this tick.
+        const auto [fov_rx, fov_ry] = resolve_fov_radii(*profile_ptr, pivot, engine);
+        g_dynamic_fov_radius_x_px.store(profile_ptr->dynamic_fov_enabled
+            ? static_cast<float>(fov_rx) : 0.0f);
+        g_dynamic_fov_radius_y_px.store(profile_ptr->dynamic_fov_enabled
+            ? static_cast<float>(fov_ry) : 0.0f);
 
         boss::EngineInput in;
-        in.boxes = &boxes;
+        in.boxes = &precise_boxes;
         in.classes = &classes;
         in.confidences = &confidences;
         // 目标槽位 = 该热键的 aim_classes 列表 (顺序即优先级)。
@@ -515,8 +535,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
             s.min_conf = (ac.min_conf > 0.0f) ? ac.min_conf : global_conf;
             in.target_slots.push_back(s);
         }
-        in.deadzone_enabled = profile_ptr->deadzone_enabled;
-        in.deadzone_percent = profile_ptr->deadzone_percent;
         in.lost_target_cache_frames = profile_ptr->lost_target_cache_frames;
         in.crosshair_x = pivot.x;
         in.crosshair_y = pivot.y;
@@ -524,66 +542,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.fov_radius_y = fov_ry;
         in.image_size   = static_cast<double>(config_resolution);
 
-        in.mover_kind = static_cast<mover::Kind>(std::clamp(profile_ptr->mover_kind, 0, 1));
-        in.yaoguang_params.pull_speed_x = profile_ptr->yaoguang_pull_speed_x;
-        in.yaoguang_params.pull_speed_y = profile_ptr->yaoguang_pull_speed_y;
-        in.yaoguang_params.tracking = profile_ptr->yaoguang_tracking;
-        in.yaoguang_params.prediction_ms = profile_ptr->yaoguang_prediction_ms;
-        in.yaoguang_params.stability = profile_ptr->yaoguang_stability;
+        in.pidf_params.kp_x = profile_ptr->pidf_kp_x; in.pidf_params.kp_y = profile_ptr->pidf_kp_y;
+        in.pidf_params.ki_x = profile_ptr->pidf_ki_x; in.pidf_params.ki_y = profile_ptr->pidf_ki_y;
+        in.pidf_params.kd_x = profile_ptr->pidf_kd_x; in.pidf_params.kd_y = profile_ptr->pidf_kd_y;
+        in.pidf_params.kf_x = profile_ptr->pidf_kf_x; in.pidf_params.kf_y = profile_ptr->pidf_kf_y;
+        in.pidf_params.lr_x = profile_ptr->pidf_lr_x; in.pidf_params.lr_y = profile_ptr->pidf_lr_y;
+        in.pidf_params.deadzone_x = profile_ptr->pidf_deadzone_x; in.pidf_params.deadzone_y = profile_ptr->pidf_deadzone_y;
+        in.pidf_params.movement_limit_x = profile_ptr->pidf_limit_x; in.pidf_params.movement_limit_y = profile_ptr->pidf_limit_y;
 
-        // 天枢参数
-        {
-            auto& cp = in.classic_params;
-            cp.aim_mode              = profile_ptr->classic_aim_mode;
-            cp.simple_start_speed    = static_cast<double>(profile_ptr->classic_simple_start_speed);
-            cp.simple_end_speed      = static_cast<double>(profile_ptr->classic_simple_end_speed);
-            cp.simple_transition_ms  = profile_ptr->classic_simple_transition_ms;
-            cp.simple_ki             = static_cast<double>(profile_ptr->classic_simple_ki);
-            cp.simple_kd             = static_cast<double>(profile_ptr->classic_simple_kd);
-            cp.adv_kpmin_x   = static_cast<double>(profile_ptr->classic_adv_kpmin_x);
-            cp.adv_kpmax_x   = static_cast<double>(profile_ptr->classic_adv_kpmax_x);
-            cp.adv_ki_x      = static_cast<double>(profile_ptr->classic_adv_ki_x);
-            cp.adv_kd_x      = static_cast<double>(profile_ptr->classic_adv_kd_x);
-            cp.adv_imax_x    = static_cast<double>(profile_ptr->classic_adv_imax_x);
-            cp.adv_pfactor_x = static_cast<double>(profile_ptr->classic_adv_pfactor_x);
-            cp.adv_time_x    = profile_ptr->classic_adv_time_x;
-            cp.adv_time_dynamic_x = profile_ptr->classic_adv_time_dynamic_x;
-            cp.adv_kpmin_y   = static_cast<double>(profile_ptr->classic_adv_kpmin_y);
-            cp.adv_kpmax_y   = static_cast<double>(profile_ptr->classic_adv_kpmax_y);
-            cp.adv_ki_y      = static_cast<double>(profile_ptr->classic_adv_ki_y);
-            cp.adv_kd_y      = static_cast<double>(profile_ptr->classic_adv_kd_y);
-            cp.adv_imax_y    = static_cast<double>(profile_ptr->classic_adv_imax_y);
-            cp.adv_pfactor_y = static_cast<double>(profile_ptr->classic_adv_pfactor_y);
-            cp.adv_time_y    = profile_ptr->classic_adv_time_y;
-            cp.adv_time_dynamic_y = profile_ptr->classic_adv_time_dynamic_y;
-            cp.prediction_mode       = profile_ptr->classic_prediction_mode;
-            cp.velocity_lead_frames  = static_cast<double>(profile_ptr->classic_velocity_lead_frames);
-            cp.independent_y         = profile_ptr->classic_independent_y;
-            cp.kalman_q_pos      = static_cast<double>(profile_ptr->classic_kalman_q_pos);
-            cp.kalman_q_vel      = static_cast<double>(profile_ptr->classic_kalman_q_vel);
-            cp.kalman_r_obs      = static_cast<double>(profile_ptr->classic_kalman_r_obs);
-            cp.kalman_lookahead  = static_cast<double>(profile_ptr->classic_kalman_lookahead);
-        }
-
-        // Trajectory shaper: forward the user's chosen mode + parameters.
-        // Bezier / Custom build on the same speed_x/y/dead_zone knobs but
-        // route through AimPathDriver instead of ART's direct drive.
-        in.path.mode = static_cast<boss::AimPathDriver::Mode>(
-            std::clamp(profile_ptr->aim_path_mode, 0, 2));
-        in.path.speed_x      = static_cast<double>(profile_ptr->speed_x);
-        in.path.speed_y      = static_cast<double>(profile_ptr->speed_y);
-        in.path.dead_zone_px = static_cast<double>(profile_ptr->dead_zone_px);
-        in.path.cx1 = static_cast<double>(profile_ptr->aim_path_bezier_cx1);
-        in.path.cy1 = static_cast<double>(profile_ptr->aim_path_bezier_cy1);
-        in.path.cx2 = static_cast<double>(profile_ptr->aim_path_bezier_cx2);
-        in.path.cy2 = static_cast<double>(profile_ptr->aim_path_bezier_cy2);
-        // HotkeyProfile 持有不可变共享资产，每帧只复制 shared_ptr。
-        in.path.custom_samples = profile_ptr->aim_path_custom_samples;
-        in.path.neural_enabled = profile_ptr->aim_path_neural_enabled;
-        in.path.neural_weights = profile_ptr->aim_path_neural_weights;
-
-        // 使用检测器发布相邻推理结果的真实间隔，而不是鼠标线程被唤醒并
-        // 消费结果的时间；后者会混入线程调度和鼠标队列抖动。
+        // AVA 负责 selector/tracker、aimpoint 和 PIDF；用户自定义
+        // AimPath 作为可选的后置轨迹整形，不参与 AVA 的目标预测状态。
         const auto now = std::chrono::steady_clock::now();
         double dt = (detection_interval_ms > 0.0)
             ? std::clamp(detection_interval_ms * 0.001, 1.0 / 1000.0, 0.1)
@@ -604,21 +572,34 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 event_orch::publish(event_orch::EventType::TargetSwitched);
             ev_last_track_id = out.current_track_id;
 
-            // Y 力度百分比:1..500,应用于所有 mover 的最终 dy(X 不动)。
-            // 100 = 原样;<100 削弱垂直分量 → 弹道更"飘"(近人手感)。
             int drive_dx = out.dx;
             int drive_dy = out.dy;
-            if (profile_ptr->y_strength_percent != 100)
-            {
-                const double sy = static_cast<double>(profile_ptr->y_strength_percent) / 100.0;
-                drive_dy = static_cast<int>(std::lround(static_cast<double>(out.dy) * sy));
-            }
+            boss::AimPathDriver::Params path;
+            path.mode = static_cast<boss::AimPathDriver::Mode>(
+                std::clamp(profile_ptr->aim_path_mode, 0, 2));
+            path.strength = std::clamp(
+                static_cast<double>(profile_ptr->aim_path_influence) / 100.0,
+                0.0, 1.0);
+            path.cx1 = static_cast<double>(profile_ptr->aim_path_bezier_cx1);
+            path.cy1 = static_cast<double>(profile_ptr->aim_path_bezier_cy1);
+            path.cx2 = static_cast<double>(profile_ptr->aim_path_bezier_cx2);
+            path.cy2 = static_cast<double>(profile_ptr->aim_path_bezier_cy2);
+            path.custom_samples = profile_ptr->aim_path_custom_samples;
+            path.neural_enabled = profile_ptr->aim_path_neural_enabled;
+            path.neural_weights = profile_ptr->aim_path_neural_weights;
+            aim_path_driver.configure(path);
+            const auto shaped = aim_path_driver.step(
+                static_cast<double>(out.anchor.x),
+                static_cast<double>(out.anchor.y),
+                pivot.x, pivot.y, dt, out.current_track_id,
+                drive_dx, drive_dy);
+            drive_dx = shaped.move_x;
+            drive_dy = shaped.move_y;
             if (out.motion_suppressed)
                 mouseThread.clearQueuedMoves();
-            if (!out.coasting)
-            {
-                mouseThread.sendRawMove(drive_dx, drive_dy);
-            }
+            // CVM 在短暂丢检期间继续使用 tracker 的预测框驱动 PIDF；
+            // coasting 只禁止开火，不再丢弃预测移动或重置控制器历史。
+            mouseThread.sendRawMove(drive_dx, drive_dy);
 
             if (out.coasting)
             {
@@ -752,6 +733,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
         else
         {
+            aim_path_driver.reset();
             if (trigger.phase == TriggerPhase::Pressed)
                 mouseThread.releaseLeftButton();
             trigger.reset();

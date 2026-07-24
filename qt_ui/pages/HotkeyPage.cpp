@@ -19,6 +19,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -37,6 +38,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <mutex>
@@ -195,7 +197,6 @@ void HotkeyPage::buildRightPanel(QWidget* parent)
 
     buildKeyBindCard();
     buildFovCard();
-    buildDeadzoneCard();
     buildTriggerCard();
     buildAimClassCard();
     buildCrosshairCard();
@@ -294,11 +295,10 @@ void HotkeyPage::buildFovCard()
     dynLay->setContentsMargins(0, 0, 0, 0);
     dynLay->setSpacing(8);
     QSlider* marginSl = nullptr;
-    dynLay->addWidget(FormKit::sliderRowD(QStringLiteral("\xe5\x86\x85\xe8\xbe\xb9\xe8\xb7\x9d\xe7\xb3\xbb\xe6\x95\xb0"),
-                                          1.0, 2.0, 1.10, 0.01, 2, marginSl, m_dynamicFovMargin));
-    QSlider* minRadSl = nullptr;
-    dynLay->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\x9c\x80\xe5\xb0\x8f\xe5\x8d\x8a\xe5\xbe\x84\xe7\xb3\xbb\xe6\x95\xb0"),
-                                          0.05, 1.0, 0.20, 0.01, 2, minRadSl, m_dynamicFovMinRadius));
+    dynLay->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"收缩强度"),
+                                          0.0, 1.0, 0.60, 0.01, 2, marginSl, m_dynamicFovMargin));
+    m_dynamicFovMargin->setToolTip(QString::fromUtf8(
+        u8"0 = 始终使用基础 FOV；1 = 靠近已锁目标时最大程度收缩，降低旁侧目标抢锁。"));
     m_dynamicFovContainer->setVisible(false);
     cl->addWidget(m_dynamicFovContainer);
     connect(m_dynamicFov, &ToggleSwitch::toggled,
@@ -309,49 +309,6 @@ void HotkeyPage::buildFovCard()
     connect(m_fovYSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &HotkeyPage::saveUiToCurrentProfile);
     connect(m_dynamicFov, &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
     connect(m_dynamicFovMargin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &HotkeyPage::saveUiToCurrentProfile);
-
-    m_rightLayout->addWidget(card);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Card: 死区 (shared deadzone)
-// ═══════════════════════════════════════════════════════════════════════════
-
-void HotkeyPage::buildDeadzoneCard()
-{
-    auto* card = new CardWidget(
-        QStringLiteral("\xe6\xad\xbb\xe5\x8c\xba"),        // 死区
-        QStringLiteral("target"));
-    auto* cl = card->contentLayout();
-
-    cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("\xe5\x90\xaf\xe7\x94\xa8"),         // 启用
-        false, m_deadzoneEnabled));
-
-    QSlider* dzSl = nullptr;
-    QSpinBox* dzSp = nullptr;
-    cl->addWidget(FormKit::sliderRow(
-        QStringLiteral("\xe6\xad\xbb\xe5\x8c\xba\xe6\xaf\x94\xe4\xbe\x8b (%)"),  // 死区比例 (%)
-        0, 100, 0, dzSl, dzSp));
-    m_deadzonePercent = dzSl;
-
-    m_lostTargetCacheFrames = new QSpinBox;
-    m_lostTargetCacheFrames->setRange(0, 240);
-    m_lostTargetCacheFrames->setValue(5);
-    m_lostTargetCacheFrames->setSuffix(QString::fromUtf8(u8" 帧"));
-    m_lostTargetCacheFrames->setMinimumHeight(30);
-    m_lostTargetCacheFrames->setToolTip(QString::fromUtf8(
-        u8"检测暂时丢失时保留同一目标的帧数。缓存期间停止移动和开火，"
-        u8"目标重现后以零导数重新接管；0 = 当帧释放。"));
-    cl->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"丢失目标缓存"), m_lostTargetCacheFrames));
-
-    connect(m_deadzoneEnabled, &ToggleSwitch::toggled,
-            this, [this] { saveUiToCurrentProfile(); });
-    connect(dzSp, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
-    connect(m_lostTargetCacheFrames, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
 
     m_rightLayout->addWidget(card);
 }
@@ -457,6 +414,18 @@ void HotkeyPage::buildAimClassCard()
     hint->setWordWrap(true);
     hint->setProperty("class", "hint");
     cl->addWidget(hint);
+
+    m_lostTargetCacheFrames = new QSpinBox;
+    m_lostTargetCacheFrames->setRange(0, 240);
+    m_lostTargetCacheFrames->setValue(5);
+    m_lostTargetCacheFrames->setSuffix(QString::fromUtf8(u8" 帧"));
+    m_lostTargetCacheFrames->setMinimumHeight(30);
+    m_lostTargetCacheFrames->setToolTip(QString::fromUtf8(
+        u8"检测暂时丢失时保留同一目标的帧数；0 = 当帧释放。"));
+    cl->addWidget(FormKit::fieldRow(
+        QString::fromUtf8(u8"丢失目标缓存"), m_lostTargetCacheFrames));
+    connect(m_lostTargetCacheFrames, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &HotkeyPage::saveUiToCurrentProfile);
 
     // 优先级列表: 普通 QVBoxLayout 承载自定义行卡片。不再用 QListWidget +
     // setItemWidget + InternalMove —— 那套会压扁行 / 横向溢出 / 拖拽后留空行。
@@ -846,278 +815,86 @@ void HotkeyPage::buildCrosshairCard()
 void HotkeyPage::buildBossAimCard()
 {
     auto* card = new CardWidget(
-        QStringLiteral("\xe5\x90\xb8\xe9\x99\x84\xe9\x94\x81\xe6\xad\xbb\xe7\x9e\x84\xe5\x87\x86"),
-        QStringLiteral("adjustments"));
-    auto* cl = card->contentLayout();
+        QString::fromUtf8(u8"移动锁死瞄准"), QStringLiteral("adjustments"));
+    auto* layout = card->contentLayout();
 
-    m_moverParamStack = new AdaptiveStack;
-    m_moverKindCombo = new QComboBox;
-    m_moverKindCombo->addItem(QString::fromUtf8(u8"天枢"));
-    m_moverKindCombo->addItem(QString::fromUtf8(u8"摇光"));
-    cl->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"控制算法"), m_moverKindCombo));
+    auto makeDouble = [](double minimum, double maximum, double value,
+                         double step, int decimals) {
+        auto* spin = new QDoubleSpinBox;
+        spin->setRange(minimum, maximum);
+        spin->setValue(value);
+        spin->setSingleStep(step);
+        spin->setDecimals(decimals);
+        spin->setAlignment(Qt::AlignRight);
+        return spin;
+    };
+    auto makeInt = [](int minimum, int maximum, int value) {
+        auto* spin = new QSpinBox;
+        spin->setRange(minimum, maximum);
+        spin->setValue(value);
+        spin->setAlignment(Qt::AlignRight);
+        return spin;
+    };
 
-    // ── Page 0: 天枢 (Classic) — 经典全参 PID ──
+    auto* grid = new QGridLayout;
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setHorizontalSpacing(12);
+    grid->setVerticalSpacing(6);
+    grid->setColumnStretch(0, 1);
+    grid->setColumnStretch(1, 1);
+
+    const double defaults[10] = {1, 1, 0, 0, .01, .01, 0, 0, 0, 0};
+    for (int i = 0; i < 10; ++i)
     {
-        auto* page = new QWidget;
-        auto* pl = new QVBoxLayout(page);
-        pl->setContentsMargins(0, 0, 0, 0);
-        pl->setSpacing(6);
-
-        // 瞄准模式选择
-        m_clsAimModeCombo = new QComboBox;
-        m_clsAimModeCombo->addItem(QStringLiteral("\xe7\xae\x80\xe5\x8d\x95"));  // 简单
-        m_clsAimModeCombo->addItem(QStringLiteral("\xe9\xab\x98\xe7\xba\xa7"));  // 高级
-        pl->addWidget(FormKit::fieldRow(
-            QStringLiteral("\xe8\xb0\x83\xe6\x8e\xa7\xe6\xa8\xa1\xe5\xbc\x8f"), m_clsAimModeCombo));  // 调控模式
-
-        m_clsAimModeStack = new AdaptiveStack;
-
-        // ── 简单模式 ──
-        {
-            auto* sp = new QWidget;
-            auto* sl = new QVBoxLayout(sp);
-            sl->setContentsMargins(0, 0, 0, 0);
-            sl->setSpacing(6);
-            QSlider* s = nullptr;
-            sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe8\xb5\xb7\xe5\xa7\x8b\xe9\x80\x9f\xe5\xba\xa6"),  // 起始速度
-                0.0, 5.0, 0.3, 0.01, 2, s, m_clsStartSpeed));
-            sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe7\xbb\x88\xe6\xad\xa2\xe9\x80\x9f\xe5\xba\xa6"),  // 终止速度
-                0.0, 5.0, 0.8, 0.01, 2, s, m_clsEndSpeed));
-            {   QSlider* sl_ = nullptr;
-                sl->addWidget(FormKit::sliderRow(
-                    QStringLiteral("\xe6\xb8\x90\xe5\x8f\x98\xe6\x97\xb6\xe9\x95\xbf(ms)"),  // 渐变时长(ms)
-                    0, 10000, 0, sl_, m_clsTransitionMs));
-            }
-            sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86"),      // 积分
-                0.0, 1.0, 0.0, 0.001, 3, s, m_clsSimpleKi));
-            sl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe5\xbe\xae\xe5\x88\x86"),      // 微分
-                0.0, 2.0, 0.0, 0.01, 2, s, m_clsSimpleKd));
-            m_clsAimModeStack->addWidget(sp);
-        }
-
-        // ── 高级模式 ──
-        {
-            auto* ap = new QWidget;
-            auto* al = new QVBoxLayout(ap);
-            al->setContentsMargins(0, 0, 0, 0);
-            al->setSpacing(4);
-            QSlider* s = nullptr;
-
-            al->addWidget(new QLabel(QStringLiteral("── X \xe8\xbd\xb4 ──")));  // ── X 轴 ──
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xb0\x8f X"),
-                0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinX));   // 比例最小 X
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xa4\xa7 X"),
-                0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxX));   // 比例最大 X
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86 X"),
-                0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiX));     // 积分 X
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe5\xbe\xae\xe5\x88\x86 X"),
-                0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdX));      // 微分 X
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86\xe4\xb8\x8a\xe9\x99\x90 X"),
-                0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxX));   // 积分上限 X
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9b\xb2\xe7\x8e\x87 X"),
-                0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorX)); // 比例曲率 X
-            {   QSlider* sl_ = nullptr;
-                al->addWidget(FormKit::sliderRow(
-                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe6\xb8\x90\xe5\x8f\x98 X(ms)"),
-                    0, 10000, 0, sl_, m_clsTimeX));  // 时间渐变 X(ms)
-            }
-            m_clsTimeDynX = new ToggleSwitch;
-            al->addWidget(FormKit::fieldRow(
-                QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe5\x8a\xa8\xe6\x80\x81 X"), m_clsTimeDynX));  // 时间动态 X
-
-            al->addWidget(new QLabel(QStringLiteral("── Y \xe8\xbd\xb4 ──")));  // ── Y 轴 ──
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xb0\x8f Y"),
-                0.0, 5.0, 0.3, 0.01, 2, s, m_clsKpMinY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9c\x80\xe5\xa4\xa7 Y"),
-                0.0, 5.0, 0.8, 0.01, 2, s, m_clsKpMaxY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86 Y"),
-                0.0, 1.0, 0.0, 0.001, 3, s, m_clsKiY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe5\xbe\xae\xe5\x88\x86 Y"),
-                0.0, 2.0, 0.0, 0.01, 2, s, m_clsKdY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe7\xa7\xaf\xe5\x88\x86\xe4\xb8\x8a\xe9\x99\x90 Y"),
-                0.0, 100.0, 0.0, 0.1, 1, s, m_clsImaxY));
-            al->addWidget(FormKit::sliderRowD(QStringLiteral("\xe6\xaf\x94\xe4\xbe\x8b\xe6\x9b\xb2\xe7\x8e\x87 Y"),
-                0.1, 5.0, 1.0, 0.01, 2, s, m_clsPfactorY));
-            {   QSlider* sl_ = nullptr;
-                al->addWidget(FormKit::sliderRow(
-                    QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe6\xb8\x90\xe5\x8f\x98 Y(ms)"),
-                    0, 10000, 0, sl_, m_clsTimeY));  // 时间渐变 Y(ms)
-            }
-            m_clsTimeDynY = new ToggleSwitch;
-            al->addWidget(FormKit::fieldRow(
-                QStringLiteral("\xe6\x97\xb6\xe9\x97\xb4\xe5\x8a\xa8\xe6\x80\x81 Y"), m_clsTimeDynY));
-
-            m_clsAimModeStack->addWidget(ap);
-        }
-        pl->addWidget(m_clsAimModeStack);
-
-        // 预测
-        m_clsPredModeCombo = new QComboBox;
-        m_clsPredModeCombo->addItem(QStringLiteral("\xe6\x97\xa0"));                                // 无
-        m_clsPredModeCombo->addItem(QStringLiteral("\xe6\x8c\x87\xe6\x95\xb0\xe5\xb9\xb3\xe6\xbb\x91"));  // 指数平滑 (EMA)
-        m_clsPredModeCombo->addItem(QStringLiteral("\xe5\x8d\xa1\xe5\xb0\x94\xe6\x9b\xbc"));            // 卡尔曼
-        pl->addWidget(FormKit::fieldRow(
-            QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe6\xa8\xa1\xe5\xbc\x8f"), m_clsPredModeCombo));  // 预测模式
-
-        QSlider* s = nullptr;
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe5\xb8\xa7\xe6\x95\xb0"),  // 预测帧数
-            0.0, 10.0, 1.0, 0.1, 1, s, m_clsVelLead));
-        m_clsIndependentY = new ToggleSwitch;
-        pl->addWidget(FormKit::fieldRow(
-            QStringLiteral("Y \xe8\xbd\xb4\xe7\x8b\xac\xe7\xab\x8b"), m_clsIndependentY));  // Y 轴独立
-
-        // Kalman 参数容器(仅预测模式=2时显示)
-        m_clsKalmanContainer = new QWidget;
-        {
-            auto* kl = new QVBoxLayout(m_clsKalmanContainer);
-            kl->setContentsMargins(0, 0, 0, 0);
-            kl->setSpacing(6);
-            kl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe4\xbd\x8d\xe7\xbd\xae\xe5\x99\xaa\xe5\xa3\xb0"),  // 位置噪声
-                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQPos));
-            kl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe9\x80\x9f\xe5\xba\xa6\xe5\x99\xaa\xe5\xa3\xb0"),  // 速度噪声
-                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanQVel));
-            kl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe8\xa7\x82\xe6\xb5\x8b\xe5\x99\xaa\xe5\xa3\xb0"),  // 观测噪声
-                0.001, 100.0, 1.0, 0.01, 2, s, m_clsKalmanRObs));
-            kl->addWidget(FormKit::sliderRowD(
-                QStringLiteral("\xe9\xa2\x84\xe6\xb5\x8b\xe6\x97\xb6\xe9\x95\xbf(ms)"),  // 预测时长(ms)
-                0.0, 100.0, 2.0, 0.1, 1, s, m_clsKalmanLookahead));
-        }
-        pl->addWidget(m_clsKalmanContainer);
-
-        // 死区
-        m_clsDeadzoneEnabled = new ToggleSwitch;
-        pl->addWidget(FormKit::fieldRow(
-            QStringLiteral("\xe6\xad\xbb\xe5\x8c\xba"), m_clsDeadzoneEnabled));  // 死区
-        pl->addWidget(FormKit::sliderRowD(
-            QStringLiteral("\xe6\xad\xbb\xe5\x8c\xba %"),  // 死区 %
-            0.0, 100.0, 0.0, 0.1, 1, s, m_clsDeadzonePercent));
-
-        m_moverParamStack->addWidget(page);
+        const int decimals = (i == 0 || i == 1 || i == 6 || i == 7) ? 2 : 3;
+        // AVA 没有给这些 QDoubleSpinBox 额外设置 range，沿用 Qt 的
+        // 原生默认范围 0..99.99。此前把 LR 人为限制到 1.0 会截断
+        // AVA 界面本来允许写入的预测速度。
+        m_pidfGain[i] = makeDouble(0.0, 99.99,
+                                   defaults[i], 0.001, decimals);
     }
+    for (int i = 0; i < 4; ++i)
+        m_pidfInteger[i] = makeInt(0, 1000, 0);
 
-    // ── Page 1: 摇光 — 连续 dt 自适应 PID + 预测 ──
-    {
-        auto* page = new QWidget;
-        auto* pl = new QVBoxLayout(page);
-        pl->setContentsMargins(0, 0, 0, 0);
-        pl->setSpacing(6);
-        QSlider* s = nullptr;
-        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"拉枪速度 X"),
-            0.0, 100.0, 60.0, 1.0, 0, s, m_ygPullSpeedX));
-        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"拉枪速度 Y"),
-            0.0, 100.0, 60.0, 1.0, 0, s, m_ygPullSpeedY));
-        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"跟踪强度"),
-            0.0, 100.0, 65.0, 1.0, 0, s, m_ygTracking));
-        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"预测时长 (ms)"),
-            0.0, 100.0, 25.0, 1.0, 0, s, m_ygPredictionMs));
-        pl->addWidget(FormKit::sliderRowD(QString::fromUtf8(u8"稳定性"),
-            0.0, 100.0, 55.0, 1.0, 0, s, m_ygStability));
-        auto* note = new QLabel(QString::fromUtf8(
-            u8"预测时长用于摇光的目标运动预测；扳机继续使用原有目标锚点。"));
-        note->setWordWrap(true);
-        pl->addWidget(note);
-        m_moverParamStack->addWidget(page);
-    }
+    const QString lockTip = QString::fromUtf8(
+        u8"AVA 的 Kf：决定速度前馈/提前量强度；为 0 时预测速度不会改变输出。");
+    const QString predictionTip = QString::fromUtf8(
+        u8"AVA 的 LR：控制 Kf 前馈状态的学习速度，不是独立提前量；需配合非零锁定强度。");
+    m_pidfGain[6]->setToolTip(lockTip);
+    m_pidfGain[7]->setToolTip(lockTip);
+    m_pidfGain[8]->setToolTip(predictionTip);
+    m_pidfGain[9]->setToolTip(predictionTip);
 
-    cl->addWidget(m_moverParamStack);
+    // AVA 的 Ki 不在界面中出现，并在配置加载时固定为 0。
+    m_pidfGain[2]->setParent(card);
+    m_pidfGain[3]->setParent(card);
+    m_pidfGain[2]->hide();
+    m_pidfGain[3]->hide();
 
-    // ── Y 力度百分比(所有 mover 通用,应用于最终 dy)──
-    m_yStrengthPercent = new QSpinBox;
-    m_yStrengthPercent->setRange(1, 500);
-    m_yStrengthPercent->setSuffix(QStringLiteral(" %"));
-    m_yStrengthPercent->setMinimumHeight(30);
-    m_yStrengthPercent->setValue(100);
-    m_yStrengthPercent->setToolTip(QStringLiteral(
-        "Y \xe8\xbd\xb4\xe5\x8a\x9b\xe5\xba\xa6\xef\xbc\x9a\n"
-        "100 = \xe5\x8e\x9f\xe6\xa0\xb7\xef\xbc\x9b\n"
-        "< 100 = \xe5\x89\x8a\xe5\xbc\xb1\xe5\x9e\x82\xe7\x9b\xb4\xe5\x88\x86\xe9\x87\x8f\xef\xbc\x8c\xe5\xbc\xb9\xe9\x81\x93\xe6\x9b\xb4\"\xe9\xa3\x98\"\xef\xbc\x88\xe8\xbf\x91\xe4\xba\xba\xe6\x89\x8b\xe6\x84\x9f\xef\xbc\x89\xe3\x80\x82"));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("Y \xe5\x8a\x9b\xe5\xba\xa6"),  // Y 力度
-        m_yStrengthPercent));
-    connect(m_yStrengthPercent, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this] { saveUiToCurrentProfile(); });
+    const std::array<std::pair<const char*, QWidget*>, 12> fields = {{
+        {u8"瞄准速度 X", m_pidfGain[0]}, {u8"瞄准速度 Y", m_pidfGain[1]},
+        {u8"过冲控制 X", m_pidfGain[4]}, {u8"过冲控制 Y", m_pidfGain[5]},
+        {u8"锁定强度 X", m_pidfGain[6]}, {u8"锁定强度 Y", m_pidfGain[7]},
+        {u8"预测速度 X", m_pidfGain[8]}, {u8"预测速度 Y", m_pidfGain[9]},
+        {u8"移动死区 X", m_pidfInteger[0]}, {u8"移动死区 Y", m_pidfInteger[1]},
+        {u8"移动限幅 X", m_pidfInteger[2]}, {u8"移动限幅 Y", m_pidfInteger[3]}
+    }};
+    for (int i = 0; i < static_cast<int>(fields.size()); ++i)
+        grid->addWidget(FormKit::fieldRow(
+            QString::fromUtf8(fields[i].first), fields[i].second), i / 2, i % 2);
+    layout->addLayout(grid);
 
-    auto wireD = [this](QDoubleSpinBox* sp) {
-        connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    for (auto* spin : m_pidfGain)
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
-    };
-    auto wireI = [this](QSpinBox* sp) {
-        connect(sp, QOverload<int>::of(&QSpinBox::valueChanged),
+    for (auto* spin : m_pidfInteger)
+        connect(spin, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
-    };
-    auto wireT = [this](ToggleSwitch* sw) {
-        connect(sw, &ToggleSwitch::toggled,
-                this, &HotkeyPage::saveUiToCurrentProfile);
-    };
-    auto wireC = [this](QComboBox* cb) {
-        connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &HotkeyPage::saveUiToCurrentProfile);
-    };
-    connect(m_moverKindCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-                m_moverParamStack->setCurrentIndex(std::clamp(idx, 0, 1));
-                saveUiToCurrentProfile();
-            });
-    wireD(m_ygPullSpeedX); wireD(m_ygPullSpeedY); wireD(m_ygTracking);
-    wireD(m_ygPredictionMs); wireD(m_ygStability);
-    // 天枢
-    connect(m_clsAimModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-                m_clsAimModeStack->setCurrentIndex(std::clamp(idx, 0, 1));
-                saveUiToCurrentProfile();
-            });
-    wireD(m_clsStartSpeed); wireD(m_clsEndSpeed);
-    wireI(m_clsTransitionMs);
-    wireD(m_clsSimpleKi); wireD(m_clsSimpleKd);
-    wireD(m_clsKpMinX); wireD(m_clsKpMaxX);
-    wireD(m_clsKiX); wireD(m_clsKdX);
-    wireD(m_clsImaxX); wireD(m_clsPfactorX);
-    wireI(m_clsTimeX); wireT(m_clsTimeDynX);
-    wireD(m_clsKpMinY); wireD(m_clsKpMaxY);
-    wireD(m_clsKiY); wireD(m_clsKdY);
-    wireD(m_clsImaxY); wireD(m_clsPfactorY);
-    wireI(m_clsTimeY); wireT(m_clsTimeDynY);
-    connect(m_clsPredModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-                m_clsKalmanContainer->setVisible(idx == 2);
-                // 显隐改变了天枢页高度, 兜底通知外层自适应 stack 重新取尺寸。
-                m_moverParamStack->updateGeometry();
-                saveUiToCurrentProfile();
-            });
-    wireD(m_clsVelLead); wireT(m_clsIndependentY);
-    wireD(m_clsKalmanQPos); wireD(m_clsKalmanQVel);
-    wireD(m_clsKalmanRObs); wireD(m_clsKalmanLookahead);
-    // 天枢页内只是共享死区的镜像，双向同步到唯一数据源，避免保存时
-    // 被通用死区卡覆盖而看似“控件无效”。
-    connect(m_clsDeadzoneEnabled, &ToggleSwitch::toggled,
-            this, [this](bool on) {
-                if (m_deadzoneEnabled) m_deadzoneEnabled->setChecked(on);
-            });
-    connect(m_clsDeadzonePercent, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [this](double value) {
-                if (m_deadzonePercent)
-                    m_deadzonePercent->setValue(static_cast<int>(std::lround(value)));
-            });
-    connect(m_deadzoneEnabled, &ToggleSwitch::toggled,
-            m_clsDeadzoneEnabled, &ToggleSwitch::setChecked);
-    connect(m_deadzonePercent, &QSlider::valueChanged,
-            this, [this](int value) { m_clsDeadzonePercent->setValue(value); });
+
     m_rightLayout->addWidget(card);
 }
 
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Card: 瞄准轨迹 (aim path)
-// ═══════════════════════════════════════════════════════════════════════════
-
+// Card: 瞄准轨迹（保持现有实现，不改变 AVA 控制链）
 void HotkeyPage::buildAimPathCard()
 {
     auto* card = new CardWidget(
@@ -1150,6 +927,15 @@ void HotkeyPage::buildAimPathCard()
     modeRow->addWidget(m_aimPathModeCustom);
     modeRow->addStretch();
     cl->addLayout(modeRow);
+
+    m_aimPathInfluence = new QSpinBox;
+    m_aimPathInfluence->setRange(0, 100);
+    m_aimPathInfluence->setValue(25);
+    m_aimPathInfluence->setSuffix(QStringLiteral("%"));
+    m_aimPathInfluence->setToolTip(QString::fromUtf8(
+        u8"曲线只按该比例影响 PIDF 原始方向；不会强制鼠标完全沿曲线行走。"));
+    cl->addWidget(FormKit::fieldRow(
+        QString::fromUtf8(u8"曲线影响"), m_aimPathInfluence));
 
     // ── Editor stack (only one visible per mode) ──
     m_aimPathEditorStack = new QStackedWidget;
@@ -1186,6 +972,8 @@ void HotkeyPage::buildAimPathCard()
         saveUiToCurrentProfile();
     };
     connect(m_aimPathModeGroup, &QButtonGroup::idClicked, this, onModeChanged);
+    connect(m_aimPathInfluence, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int) { saveUiToCurrentProfile(); });
 
     connect(m_aimPathBezier, &BezierEditor::curveChanged,
             this, [this](float, float, float, float) {
@@ -1381,52 +1169,13 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_flashlightDetect->setChecked(hp.flashlight_detect_enabled);
     m_glassFilter->setChecked(hp.glass_filter_enabled);
 
-    m_moverKindCombo->setCurrentIndex(std::clamp(hp.mover_kind, 0, 1));
-    m_moverParamStack->setCurrentIndex(std::clamp(hp.mover_kind, 0, 1));
-    m_ygPullSpeedX->setValue(hp.yaoguang_pull_speed_x);
-    m_ygPullSpeedY->setValue(hp.yaoguang_pull_speed_y);
-    m_ygTracking->setValue(hp.yaoguang_tracking);
-    m_ygPredictionMs->setValue(hp.yaoguang_prediction_ms);
-    m_ygStability->setValue(hp.yaoguang_stability);
+    const float pg[10] = {hp.pidf_kp_x,hp.pidf_kp_y,0.0f,0.0f,hp.pidf_kd_x,
+                          hp.pidf_kd_y,hp.pidf_kf_x,hp.pidf_kf_y,hp.pidf_lr_x,hp.pidf_lr_y};
+    for (int i=0;i<10;++i) m_pidfGain[i]->setValue(pg[i]);
+    const int pi[4] = {hp.pidf_deadzone_x,hp.pidf_deadzone_y,
+                       hp.pidf_limit_x,hp.pidf_limit_y};
+    for (int i=0;i<4;++i) m_pidfInteger[i]->setValue(pi[i]);
 
-    // 天枢
-    m_clsAimModeCombo->setCurrentIndex(std::clamp(hp.classic_aim_mode, 0, 1));
-    m_clsAimModeStack->setCurrentIndex(std::clamp(hp.classic_aim_mode, 0, 1));
-    m_clsStartSpeed->setValue(static_cast<double>(hp.classic_simple_start_speed));
-    m_clsEndSpeed->setValue(static_cast<double>(hp.classic_simple_end_speed));
-    m_clsTransitionMs->setValue(hp.classic_simple_transition_ms);
-    m_clsSimpleKi->setValue(static_cast<double>(hp.classic_simple_ki));
-    m_clsSimpleKd->setValue(static_cast<double>(hp.classic_simple_kd));
-    m_clsKpMinX->setValue(static_cast<double>(hp.classic_adv_kpmin_x));
-    m_clsKpMaxX->setValue(static_cast<double>(hp.classic_adv_kpmax_x));
-    m_clsKiX->setValue(static_cast<double>(hp.classic_adv_ki_x));
-    m_clsKdX->setValue(static_cast<double>(hp.classic_adv_kd_x));
-    m_clsImaxX->setValue(static_cast<double>(hp.classic_adv_imax_x));
-    m_clsPfactorX->setValue(static_cast<double>(hp.classic_adv_pfactor_x));
-    m_clsTimeX->setValue(hp.classic_adv_time_x);
-    m_clsTimeDynX->setChecked(hp.classic_adv_time_dynamic_x);
-    m_clsKpMinY->setValue(static_cast<double>(hp.classic_adv_kpmin_y));
-    m_clsKpMaxY->setValue(static_cast<double>(hp.classic_adv_kpmax_y));
-    m_clsKiY->setValue(static_cast<double>(hp.classic_adv_ki_y));
-    m_clsKdY->setValue(static_cast<double>(hp.classic_adv_kd_y));
-    m_clsImaxY->setValue(static_cast<double>(hp.classic_adv_imax_y));
-    m_clsPfactorY->setValue(static_cast<double>(hp.classic_adv_pfactor_y));
-    m_clsTimeY->setValue(hp.classic_adv_time_y);
-    m_clsTimeDynY->setChecked(hp.classic_adv_time_dynamic_y);
-    m_clsPredModeCombo->setCurrentIndex(std::clamp(hp.classic_prediction_mode, 0, 2));
-    m_clsVelLead->setValue(static_cast<double>(hp.classic_velocity_lead_frames));
-    m_clsIndependentY->setChecked(hp.classic_independent_y);
-    m_clsKalmanQPos->setValue(static_cast<double>(hp.classic_kalman_q_pos));
-    m_clsKalmanQVel->setValue(static_cast<double>(hp.classic_kalman_q_vel));
-    m_clsKalmanRObs->setValue(static_cast<double>(hp.classic_kalman_r_obs));
-    m_clsKalmanLookahead->setValue(static_cast<double>(hp.classic_kalman_lookahead));
-    m_clsKalmanContainer->setVisible(hp.classic_prediction_mode == 2);
-    m_clsDeadzoneEnabled->setChecked(hp.deadzone_enabled);
-    m_clsDeadzonePercent->setValue(static_cast<double>(hp.deadzone_percent));
-
-    // ── Deadzone ──
-    m_deadzoneEnabled->setChecked(hp.deadzone_enabled);
-    m_deadzonePercent->setValue(static_cast<int>(hp.deadzone_percent));
     m_lostTargetCacheFrames->setValue(hp.lost_target_cache_frames);
 
     // ── Trigger ──
@@ -1439,20 +1188,21 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_triggerDurationJitter->setValue(hp.trigger_duration_jitter_ms);
     m_triggerIntervalJitter->setValue(hp.trigger_interval_jitter_ms);
     m_triggerSwitchCooldown->setValue(hp.trigger_switch_cooldown_ms);
-    m_yStrengthPercent->setValue(hp.y_strength_percent);
 
-    // ── Target selection: aim_classes 列表 ──
     // 通过 rebuildAimClassList() 重建 (需要读 config)。loadProfileToUi 已经
     // 持有 configMutex, 而 rebuildAimClassList 会重新拿一次同一把递归锁,
     // 这里直接调没问题。
     rebuildAimClassList();
 
-    // ── Aim trajectory ──
+
+    // 用户 AimPath 配置。
+    if (m_aimPathModeGroup)
     {
         int mode = std::clamp(hp.aim_path_mode, 0, 2);
         if (auto* btn = m_aimPathModeGroup->button(mode))
             btn->setChecked(true);
         m_aimPathEditorStack->setCurrentIndex(mode);
+        m_aimPathInfluence->setValue(hp.aim_path_influence);
         m_aimPathBezier->setCurve(
             hp.aim_path_bezier_cx1, hp.aim_path_bezier_cy1,
             hp.aim_path_bezier_cx2, hp.aim_path_bezier_cy2);
@@ -1508,48 +1258,14 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.laser_detect_enabled      = m_laserDetect->isChecked();
     hp.flashlight_detect_enabled = m_flashlightDetect->isChecked();
     hp.glass_filter_enabled      = m_glassFilter->isChecked();
-    hp.mover_kind = std::clamp(m_moverKindCombo->currentIndex(), 0, 1);
-    hp.yaoguang_pull_speed_x = static_cast<float>(m_ygPullSpeedX->value());
-    hp.yaoguang_pull_speed_y = static_cast<float>(m_ygPullSpeedY->value());
-    hp.yaoguang_tracking = static_cast<float>(m_ygTracking->value());
-    hp.yaoguang_prediction_ms = static_cast<float>(m_ygPredictionMs->value());
-    hp.yaoguang_stability = static_cast<float>(m_ygStability->value());
-    // 天枢
-    hp.classic_aim_mode = std::clamp(m_clsAimModeCombo->currentIndex(), 0, 1);
-    hp.classic_simple_start_speed  = static_cast<float>(m_clsStartSpeed->value());
-    hp.classic_simple_end_speed    = static_cast<float>(m_clsEndSpeed->value());
-    hp.classic_simple_transition_ms= m_clsTransitionMs->value();
-    hp.classic_simple_ki           = static_cast<float>(m_clsSimpleKi->value());
-    hp.classic_simple_kd           = static_cast<float>(m_clsSimpleKd->value());
-    hp.classic_adv_kpmin_x   = static_cast<float>(m_clsKpMinX->value());
-    hp.classic_adv_kpmax_x   = static_cast<float>(m_clsKpMaxX->value());
-    hp.classic_adv_ki_x      = static_cast<float>(m_clsKiX->value());
-    hp.classic_adv_kd_x      = static_cast<float>(m_clsKdX->value());
-    hp.classic_adv_imax_x    = static_cast<float>(m_clsImaxX->value());
-    hp.classic_adv_pfactor_x = static_cast<float>(m_clsPfactorX->value());
-    hp.classic_adv_time_x    = m_clsTimeX->value();
-    hp.classic_adv_time_dynamic_x = m_clsTimeDynX->isChecked();
-    hp.classic_adv_kpmin_y   = static_cast<float>(m_clsKpMinY->value());
-    hp.classic_adv_kpmax_y   = static_cast<float>(m_clsKpMaxY->value());
-    hp.classic_adv_ki_y      = static_cast<float>(m_clsKiY->value());
-    hp.classic_adv_kd_y      = static_cast<float>(m_clsKdY->value());
-    hp.classic_adv_imax_y    = static_cast<float>(m_clsImaxY->value());
-    hp.classic_adv_pfactor_y = static_cast<float>(m_clsPfactorY->value());
-    hp.classic_adv_time_y    = m_clsTimeY->value();
-    hp.classic_adv_time_dynamic_y = m_clsTimeDynY->isChecked();
-    hp.classic_prediction_mode       = std::clamp(m_clsPredModeCombo->currentIndex(), 0, 2);
-    hp.classic_velocity_lead_frames  = static_cast<float>(m_clsVelLead->value());
-    hp.classic_independent_y         = m_clsIndependentY->isChecked();
-    hp.classic_kalman_q_pos      = static_cast<float>(m_clsKalmanQPos->value());
-    hp.classic_kalman_q_vel      = static_cast<float>(m_clsKalmanQVel->value());
-    hp.classic_kalman_r_obs      = static_cast<float>(m_clsKalmanRObs->value());
-    hp.classic_kalman_lookahead  = static_cast<float>(m_clsKalmanLookahead->value());
-    hp.deadzone_enabled  = m_clsDeadzoneEnabled->isChecked();
-    hp.deadzone_percent  = static_cast<float>(m_clsDeadzonePercent->value());
+    hp.pidf_kp_x=m_pidfGain[0]->value(); hp.pidf_kp_y=m_pidfGain[1]->value();
+    hp.pidf_ki_x=0.0f; hp.pidf_ki_y=0.0f;
+    hp.pidf_kd_x=m_pidfGain[4]->value(); hp.pidf_kd_y=m_pidfGain[5]->value();
+    hp.pidf_kf_x=m_pidfGain[6]->value(); hp.pidf_kf_y=m_pidfGain[7]->value();
+    hp.pidf_lr_x=m_pidfGain[8]->value(); hp.pidf_lr_y=m_pidfGain[9]->value();
+    hp.pidf_deadzone_x=m_pidfInteger[0]->value(); hp.pidf_deadzone_y=m_pidfInteger[1]->value();
+    hp.pidf_limit_x=m_pidfInteger[2]->value(); hp.pidf_limit_y=m_pidfInteger[3]->value();
 
-    // ── Deadzone ──
-    hp.deadzone_enabled = m_deadzoneEnabled->isChecked();
-    hp.deadzone_percent = static_cast<float>(m_deadzonePercent->value());
     hp.lost_target_cache_frames = m_lostTargetCacheFrames->value();
 
     // ── Trigger ──
@@ -1562,16 +1278,17 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.trigger_duration_jitter_ms = m_triggerDurationJitter->value();
     hp.trigger_interval_jitter_ms = m_triggerIntervalJitter->value();
     hp.trigger_switch_cooldown_ms = m_triggerSwitchCooldown->value();
-    hp.y_strength_percent         = m_yStrengthPercent->value();
 
     // 目标选择: 每条目的 class_id / y_offset / min_conf 由行内滑条回调直接写入
     // config.hotkeys[ri].aim_classes, 顺序由 ▲▼ 的 moveAimClass 维护
     // (见 rebuildAimClassList / moveAimClass), 此处无需再写。
 
-    // ── Aim trajectory ──
+    // 用户 AimPath 配置。
+    if (m_aimPathModeGroup)
     {
         const int mode_id = m_aimPathModeGroup->checkedId();
         hp.aim_path_mode = (mode_id < 0) ? 0 : std::clamp(mode_id, 0, 2);
+        hp.aim_path_influence = m_aimPathInfluence->value();
         hp.aim_path_bezier_cx1 = m_aimPathBezier->cx1();
         hp.aim_path_bezier_cy1 = m_aimPathBezier->cy1();
         hp.aim_path_bezier_cx2 = m_aimPathBezier->cx2();

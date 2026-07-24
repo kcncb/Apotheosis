@@ -77,7 +77,7 @@ void SideNav::setItems(const QString& groupTitle, const QStringList& labels,
         btn->setCheckable(true);
         btn->setCursor(Qt::PointingHandCursor);
         if (i < iconNames.size())
-            btn->setIcon(iconFromGlyph(iconNames[i], 16, QStringLiteral("#9AA0AA")));
+            btn->setIcon(iconFromGlyph(iconNames[i], 16, QStringLiteral("#929BAA")));
         btn->setIconSize(QSize(16, 16));
         m_group->addButton(btn, i);
         m_itemsLayout->addWidget(btn);
@@ -103,7 +103,7 @@ void SideNav::recolorIcons() {
         const int id = m_group->id(b);
         if (id < 0 || id >= m_icons.size())
             continue;
-        const QString color = b->isChecked() ? QStringLiteral("#5E6AD2") : QStringLiteral("#9AA0AA");
+        const QString color = b->isChecked() ? QStringLiteral("#5865D8") : QStringLiteral("#929BAA");
         b->setIcon(iconFromGlyph(m_icons[id], 16, color));
     }
 }

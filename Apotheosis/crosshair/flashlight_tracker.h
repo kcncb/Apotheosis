@@ -12,6 +12,7 @@ namespace crosshair
 // Per-spot temporal verdict for the current frame (one per input spot).
 struct FlashlightTrackVerdict
 {
+    int  track_id  = -1;
     bool confirmed = false; // track has persisted >= confirm_frames consecutively
     bool onset     = false; // track first appeared this frame (light just turned on)
     int  age       = 0;     // consecutive frames the track has been seen
@@ -27,7 +28,7 @@ struct FlashlightTrackVerdict
 };
 
 // Tiny nearest-neighbour tracker for flashlight spots. STATEFUL, single-thread
-// (capture thread only). Each frame it associates the detector's spots to live
+// (YOLO result consumer only). Each inference frame associates detector spots to live
 // tracks within `max_jump_px`, ages matched tracks, starts new tracks for
 // unmatched spots (age 1 = onset), and forgets tracks unseen for `drop_after`
 // ticks. A spot that scintillates (water / glass glint winking in and out)
@@ -47,6 +48,7 @@ public:
 private:
     struct Track
     {
+        int         id        = -1;
         cv::Point2f center{};            // last raw detection centre (assoc anchor)
         float       radius    = 0.0f;
         cv::Point2f smoothed_center{};   // EMA-filtered centre (output to downstream)
@@ -56,6 +58,7 @@ private:
         bool        seen_this = false;
     };
     std::vector<Track> tracks_;
+    int next_id_ = 1;
 };
 
 } // namespace crosshair

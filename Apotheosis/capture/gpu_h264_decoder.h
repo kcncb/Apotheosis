@@ -91,6 +91,7 @@ private:
     std::array<GpuImage, OUTPUT_POOL_SIZE> output_pool_{};
     std::array<cudaEvent_t, OUTPUT_POOL_SIZE> output_events_{};
     size_t output_pool_index_{ 0 };
+    bool conversion_error_reported_{ false };
 };
 
 } // namespace capture

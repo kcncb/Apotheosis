@@ -10,7 +10,6 @@
 #include "Apotheosis.h"
 #include "config.h"
 #include "runtime/config_snapshot.h"
-#include "flashlight_runtime.h"
 #include "laser_detector.h"
 #include "runtime/active_hotkey.h"
 
@@ -112,12 +111,6 @@ void publish(const PivotSnapshot& snap)
 
 void process_frame(const cv::Mat& bgrFrame)
 {
-    // Flashlight halo is a SEPARATE pipeline (virtual target injection, not
-    // crosshair-pivot publication). Drive it from the same capture hook so
-    // we don't pay for a second per-frame ROI grab — the work itself is
-    // independent and lives in its own snapshot.
-    flashlight_runtime::process_frame(bgrFrame);
-
     if (bgrFrame.empty() || bgrFrame.type() != CV_8UC3)
     {
         publish(PivotSnapshot{});

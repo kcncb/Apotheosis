@@ -8,9 +8,12 @@
 #include "widgets/ToggleSwitch.h"
 
 #include <QLabel>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <mutex>
@@ -38,18 +41,14 @@ FlashlightPage::FlashlightPage(QWidget* parent)
     // Intro card
     // ====================================================================
     auto* introCard = new CardWidget(
-        QStringLiteral("寻光 - 说明"),
+        QString::fromUtf8(u8"寻光 - 说明"),
         QStringLiteral("info"));
-    auto* intro = new QLabel(tr(
-        "在整个画面里找「亮 + 圆 + 径向衰减」的光斑(手电筒/闪光筒眩光),命中后固定作为"
-        "「shoudiantong」类别注入瞄准管线 —— 在「瞄准热键」页把 shoudiantong 加进该热键的"
-        "瞄准类别并排好优先级,即可像普通目标一样被瞄。\n\n"
-        "户外抗误锁:单帧只看外观分不清手电和太阳/天空/反光(它们也是亮圆渐变),所以加了"
-        "三道判别 —— 深度门(杀太阳/天空/远处泛光,需在「深度」页开启深度推理)、时间门"
-        "(杀水面/玻璃的闪烁反光)、与模型框联动(白天模型已看见人时直接采信)。三道的强度"
-        "由「抗误锁」一个旋钮统一控制。\n\n"
-        "调参只有三个旋钮:灵敏度 / 抗误锁 / 光斑大小,其余全部内部自动。\n"
-        "每个热键单独开关在「瞄准热键」页的「启用寻光检测」。"));
+    auto* intro = new QLabel(QString::fromUtf8(
+        u8"寻找手电筒过曝白核及其径向光晕。检测与 YOLO 推理同频：没有人物框时必须连续三次"
+        "确认才会作为「shoudiantong」独立目标；任一推理帧丢失就立即撤销。\n\n"
+        "白核与人物框关联时不会生成额外光斑目标，瞄准仍完全遵守人物类别、优先级和锁点设置。"
+        "只有模型看不见人物时才瞄光核。默认策略偏向少误锁，边界案例可能被放弃。\n\n"
+        "每个热键的开关位于「瞄准热键」页。"));
     intro->setWordWrap(true);
     introCard->contentLayout()->addWidget(intro);
     layout->addWidget(introCard);
@@ -58,12 +57,11 @@ FlashlightPage::FlashlightPage(QWidget* parent)
     // Routing hint card — the halo is filed under a fixed class
     // ====================================================================
     auto* classCard = new CardWidget(
-        QStringLiteral("瞄准类别"),
+        QString::fromUtf8(u8"瞄准类别"),
         QStringLiteral("target"));
-    auto* classHint = new QLabel(tr(
-        "光斑固定作为「shoudiantong」类别注入,这里无需选类。\n"
-        "到「瞄准热键」页 → 选中热键 → 在瞄准类别里添加 shoudiantong,"
-        "拖到合适位置定优先级(和模型类完全一样)。不添加 = 检测照跑、但不会瞄它。"));
+    auto* classHint = new QLabel(QString::fromUtf8(
+        u8"独立光斑仍使用「shoudiantong」类别。到「瞄准热键」页把它加入瞄准类别并排序；"
+        "不添加时只检测和预览，不会独立瞄光。有人物框时始终使用原人物类别。"));
     classHint->setWordWrap(true);
     classHint->setStyleSheet(QStringLiteral("color: #888;"));
     classCard->contentLayout()->addWidget(classHint);
@@ -73,13 +71,13 @@ FlashlightPage::FlashlightPage(QWidget* parent)
     // Detection params card — three macro knobs only
     // ====================================================================
     auto* paramCard = new CardWidget(
-        QStringLiteral("检测参数"),
+        QString::fromUtf8(u8"检测参数"),
         QStringLiteral("zap"));
 
     paramCard->contentLayout()->addWidget(
-        FormKit::toggleRow(QStringLiteral("显示预览(用于调试)"),
+        FormKit::toggleRow(QString::fromUtf8(u8"显示识别圆圈"),
                            cfg.flashlightShowPreview(), m_showPreview));
-    m_showPreview->setToolTip(tr("在检测预览窗口画圈 + 中心十字 + 置信度标签(绿=接受,红=拒绝)。"));
+    m_showPreview->setToolTip(QString::fromUtf8(u8"只在最终识别成功的白核外画一个圆圈。"));
     connect(m_showPreview, &ToggleSwitch::toggled,
             this, [](bool v) {
                 ConfigManager::instance().setFlashlightShowPreview(v);
@@ -87,16 +85,13 @@ FlashlightPage::FlashlightPage(QWidget* parent)
                 config.flashlight_show_preview = v;
             });
 
-    // 灵敏度 — 外观轴
+    // 主参数：普通用户只需调整这一项。
     paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("灵敏度"),
+        FormKit::sliderRow(QString::fromUtf8(u8"检测倾向"),
                            0, 100, cfg.flashlightSensitivity(),
                            m_sensitivitySlider, m_sensitivity));
-    m_sensitivitySlider->setToolTip(tr(
-        "锁得勤 ↔ 锁得稳(外观轴)。\n"
-        "越高:更亮/更不圆/对比更低的光也收,锁得快但更易误锁;\n"
-        "越低:只收又亮又圆、明显贴在暗背景上的光,稳但可能漏。\n"
-        "内部自动驱动 亮度阈值 / 圆度 / 局部对比度 / 接受门槛。"));
+    m_sensitivitySlider->setToolTip(QString::fromUtf8(
+        u8"左侧更稳健：宁可漏掉边界光斑也减少误锁；右侧更灵敏：更容易发现弱小白核。"));
     m_sensitivity->setToolTip(m_sensitivitySlider->toolTip());
     connect(m_sensitivity, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
@@ -105,17 +100,57 @@ FlashlightPage::FlashlightPage(QWidget* parent)
                 config.flashlight_sensitivity = v;
             });
 
+    auto* presetRow = new QWidget;
+    auto* presetLayout = new QHBoxLayout(presetRow);
+    presetLayout->setContentsMargins(0, 0, 0, 0);
+    presetLayout->setSpacing(8);
+    auto* stableButton = new QPushButton(QString::fromUtf8(u8"稳健"));
+    auto* balancedButton = new QPushButton(QString::fromUtf8(u8"均衡"));
+    auto* sensitiveButton = new QPushButton(QString::fromUtf8(u8"灵敏"));
+    presetLayout->addWidget(stableButton);
+    presetLayout->addWidget(balancedButton);
+    presetLayout->addWidget(sensitiveButton);
+    presetLayout->addStretch();
+    paramCard->contentLayout()->addWidget(presetRow);
+
+    auto applyPreset = [this](int tendency, int reject, int size) {
+        m_sensitivity->setValue(tendency);
+        m_reject->setValue(reject);
+        m_spotSize->setValue(size);
+    };
+    connect(stableButton, &QPushButton::clicked, this,
+            [applyPreset]() { applyPreset(30, 80, 45); });
+    connect(balancedButton, &QPushButton::clicked, this,
+            [applyPreset]() { applyPreset(50, 70, 55); });
+    connect(sensitiveButton, &QPushButton::clicked, this,
+            [applyPreset]() { applyPreset(75, 55, 65); });
+
+    auto* advancedButton = new QToolButton;
+    advancedButton->setText(QString::fromUtf8(u8"高级设置"));
+    advancedButton->setCheckable(true);
+    advancedButton->setChecked(false);
+    advancedButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    advancedButton->setArrowType(Qt::RightArrow);
+    paramCard->contentLayout()->addWidget(advancedButton);
+
+    auto* advancedBody = new QWidget;
+    auto* advancedLayout = new QVBoxLayout(advancedBody);
+    advancedLayout->setContentsMargins(0, 0, 0, 0);
+    advancedLayout->setSpacing(8);
+    advancedBody->setVisible(false);
+    connect(advancedButton, &QToolButton::toggled, advancedBody,
+            [advancedButton, advancedBody](bool open) {
+                advancedButton->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+                advancedBody->setVisible(open);
+            });
+
     // 抗误锁 — 行为/环境轴
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("抗误锁强度"),
+    advancedLayout->addWidget(
+        FormKit::sliderRow(QString::fromUtf8(u8"抗误锁强度"),
                            0, 100, cfg.flashlightRejectStrength(),
                            m_rejectSlider, m_reject));
-    m_rejectSlider->setToolTip(tr(
-        "信外观 ↔ 信判别。户外乱锁就往上调。\n"
-        "0 ≈ 旧行为(纯看外观);往上依次叠加:\n"
-        "  深度门(杀太阳/天空/远处泛光,需「深度」页开启深度推理)\n"
-        "  时间门(必须连续几帧稳定成轨迹,杀水面/玻璃闪烁反光)\n"
-        "  与模型框联动(有人形框=快速采信;孤儿光斑须过深度+时间门)。"));
+    m_rejectSlider->setToolTip(QString::fromUtf8(
+        u8"越高越依赖深度和严格外观判别。建议保持预设值；独立光斑始终需要连续三次确认。"));
     m_reject->setToolTip(m_rejectSlider->toolTip());
     connect(m_reject, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
@@ -125,13 +160,12 @@ FlashlightPage::FlashlightPage(QWidget* parent)
             });
 
     // 光斑大小 — 半径档(按分辨率自动)
-    paramCard->contentLayout()->addWidget(
-        FormKit::sliderRow(QStringLiteral("光斑大小"),
+    advancedLayout->addWidget(
+        FormKit::sliderRow(QString::fromUtf8(u8"最大核心大小"),
                            0, 100, cfg.flashlightSpotSize(),
                            m_spotSizeSlider, m_spotSize));
-    m_spotSizeSlider->setToolTip(tr(
-        "可接受的光斑半径档,按检测分辨率自动换算(不用再填像素)。\n"
-        "越小:只收较小的光斑(远处/小光点);越大:贴脸的大片眩光也算。"));
+    m_spotSizeSlider->setToolTip(QString::fromUtf8(
+        u8"限制可接受白核的最大尺寸，按检测分辨率自动换算。过大容易把白色区域当成手电。"));
     m_spotSize->setToolTip(m_spotSizeSlider->toolTip());
     connect(m_spotSize, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) {
@@ -139,6 +173,10 @@ FlashlightPage::FlashlightPage(QWidget* parent)
                 std::lock_guard<std::recursive_mutex> lk(configMutex);
                 config.flashlight_spot_size = v;
             });
+
+    advancedLayout->addWidget(new QLabel(QString::fromUtf8(
+        u8"确认次数固定为连续 3 个 YOLO 推理帧；丢失一帧立即撤销。")));
+    paramCard->contentLayout()->addWidget(advancedBody);
 
     layout->addWidget(paramCard);
     layout->addStretch();

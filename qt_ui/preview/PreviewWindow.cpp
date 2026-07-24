@@ -1,7 +1,6 @@
 #include "preview/PreviewWindow.h"
 
 #include "pages/OverviewPage.h"
-#include "pages/LinksPage.h"
 #include "widgets/IconFont.h"
 #include "widgets/SideNav.h"
 #include "widgets/TopNavBar.h"
@@ -36,16 +35,14 @@ const QVector<GroupDef>& groups() {
           QStringLiteral("cpu"), QStringLiteral("stack-2")}},
         {QStringLiteral("控制"),
          {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"),
-          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本")},
+          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本"), QStringLiteral("事件编排")},
          {QStringLiteral("keyboard"), QStringLiteral("color-swatch"), QStringLiteral("world"),
-          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2")}},
+          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("history")}},
         {QStringLiteral("监控"),
          {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"),
           QStringLiteral("调试")},
          {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
           QStringLiteral("bug")}},
-        // 「找母狗」:无二级导航,落地页是一排快速跳转按钮(LinksPage)。
-        {QStringLiteral("找母狗"), {}, {}},
     };
     return kGroups;
 }
@@ -113,12 +110,8 @@ void PreviewWindow::buildPages() {
         r.subs = g.subs;
         r.icons = g.icons;
         if (g.subs.isEmpty()) {
-            if (g.name == QStringLiteral("找母狗")) {
-                m_stack->addWidget(new LinksPage);
-            } else {
-                m_overview = new OverviewPage;
-                m_stack->addWidget(m_overview);
-            }
+            m_overview = new OverviewPage;
+            m_stack->addWidget(m_overview);
             ++index;
         } else {
             for (int s = 0; s < g.subs.size(); ++s) {

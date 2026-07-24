@@ -1,6 +1,10 @@
 #include "MainWindow.h"
 
 #include <QHBoxLayout>
+#include <QGraphicsOpacityEffect>
+#include <QLabel>
+#include <QPropertyAnimation>
+#include <QShortcut>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -37,7 +41,6 @@
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
 #include "pages/EventPage.h"
-#include "pages/LinksPage.h"
 #include "capture/auto_capture.h"
 
 namespace {
@@ -51,27 +54,25 @@ struct GroupDef {
 // 单一导航数据源:一级分组(顶栏)+ 二级子页(侧边栏)+ 子页图标。
 const QVector<GroupDef>& navGroups() {
     static const QVector<GroupDef> kGroups = {
-        {QStringLiteral("概览"), {}, {}},
-        {QStringLiteral("会话"),
-         {QStringLiteral("推理启动"), QStringLiteral("模型工具")},
+        {QString::fromUtf8(u8"概览"), {}, {}},
+        {QString::fromUtf8(u8"会话"),
+         {QString::fromUtf8(u8"推理启动"), QString::fromUtf8(u8"模型工具")},
          {QStringLiteral("player-play"), QStringLiteral("settings")}},
-        {QStringLiteral("配置"),
-         {QStringLiteral("画面采集"), QStringLiteral("目标"), QStringLiteral("硬件"),
-          QStringLiteral("AI 模型"), QStringLiteral("深度模型")},
+        {QString::fromUtf8(u8"配置"),
+         {QString::fromUtf8(u8"画面采集"), QString::fromUtf8(u8"目标"), QString::fromUtf8(u8"硬件"),
+          QString::fromUtf8(u8"AI 模型"), QString::fromUtf8(u8"深度模型")},
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu"), QStringLiteral("stack-2")}},
-        {QStringLiteral("控制"),
-         {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("寻光"),
-          QStringLiteral("玻璃过滤"), QStringLiteral("宏脚本"), QStringLiteral("事件编排")},
+        {QString::fromUtf8(u8"控制"),
+         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"准星找色"), QString::fromUtf8(u8"寻光"),
+           QString::fromUtf8(u8"玻璃过滤"), QString::fromUtf8(u8"宏脚本"), QString::fromUtf8(u8"事件编排")},
          {QStringLiteral("keyboard"), QStringLiteral("color-swatch"), QStringLiteral("world"),
-          QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("activity")}},
-        {QStringLiteral("监控"),
-         {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"),
-          QStringLiteral("调试")},
+           QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("history")}},
+        {QString::fromUtf8(u8"监控"),
+         {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
+          QString::fromUtf8(u8"调试")},
          {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
           QStringLiteral("bug")}},
-        // 「找母狗」:无二级导航,落地页是一排快速跳转按钮(LinksPage)。
-        {QStringLiteral("找母狗"), {}, {}},
     };
     return kGroups;
 }
@@ -101,7 +102,31 @@ MainWindow::MainWindow(QWidget* parent)
     body->setContentsMargins(0, 0, 0, 0);
     body->setSpacing(0);
     body->addWidget(m_sideNav);
-    body->addWidget(m_pageStack, 1);
+
+    auto* pageShell = new QWidget(central);
+    pageShell->setObjectName("pageShell");
+    pageShell->setAttribute(Qt::WA_StyledBackground, true);
+    auto* pageShellLayout = new QVBoxLayout(pageShell);
+    pageShellLayout->setContentsMargins(0, 0, 0, 0);
+    pageShellLayout->setSpacing(0);
+
+    auto* contextHeader = new QWidget(pageShell);
+    contextHeader->setObjectName("contextHeader");
+    contextHeader->setAttribute(Qt::WA_StyledBackground, true);
+    contextHeader->setFixedHeight(62);
+    auto* contextLayout = new QVBoxLayout(contextHeader);
+    contextLayout->setContentsMargins(20, 10, 20, 9);
+    contextLayout->setSpacing(1);
+    m_contextTitle = new QLabel(contextHeader);
+    m_contextTitle->setObjectName("contextTitle");
+    m_contextPath = new QLabel(contextHeader);
+    m_contextPath->setObjectName("contextPath");
+    contextLayout->addWidget(m_contextTitle);
+    contextLayout->addWidget(m_contextPath);
+
+    pageShellLayout->addWidget(contextHeader);
+    pageShellLayout->addWidget(m_pageStack, 1);
+    body->addWidget(pageShell, 1);
 
     layout->addWidget(m_topNav);
     layout->addLayout(body, 1);
@@ -114,11 +139,10 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_topNav, &TopNavBar::primaryChanged, this, &MainWindow::onPrimaryChanged);
     connect(m_sideNav, &SideNav::currentChanged, this, &MainWindow::onSecondaryChanged);
-    connect(m_topNav, &TopNavBar::saveClicked, this, [] {
-        ConfigBridge::instance().syncToRuntime();
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        config.saveConfig();
-    });
+    connect(m_topNav, &TopNavBar::saveClicked, this, &MainWindow::onSaveRequested);
+
+    auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
+    connect(saveShortcut, &QShortcut::activated, this, &MainWindow::onSaveRequested);
 
     m_topNav->setCurrentPrimary(0);
     onPrimaryChanged(0);
@@ -147,17 +171,12 @@ void MainWindow::setupPages() {
 
         if (g.subs.isEmpty()) {
             // 无二级导航的一级分组:整组只有一个落地页。
-            QWidget* landing = nullptr;
-            if (g.name == QStringLiteral("找母狗")) {
-                landing = new LinksPage();
-            } else {
-                // 概览 仪表盘。
-                m_overviewPage = new OverviewPage();
-                connect(m_overviewPage, &OverviewPage::startStopRequested,
-                        this, &MainWindow::onHeroToggleInference);
-                landing = m_overviewPage;
-            }
-            m_pageStack->addWidget(landing);
+            m_overviewPage = new OverviewPage();
+            connect(m_overviewPage, &OverviewPage::startStopRequested,
+                    this, &MainWindow::onHeroToggleInference);
+            connect(m_overviewPage, &OverviewPage::previewRequested,
+                    this, [] { ConfigManager::instance().setShowWindow(true); });
+            m_pageStack->addWidget(m_overviewPage);
             range.count = 1;
             ++pageIndex;
         } else {
@@ -200,7 +219,8 @@ void MainWindow::onPrimaryChanged(int index) {
         m_sideNav->setItems(r.name, r.subs, r.icons);
         m_sideNav->show();
     }
-    m_pageStack->setCurrentIndex(r.first);
+    updateContextHeader(index, 0);
+    switchPage(r.first);
 }
 
 void MainWindow::onSecondaryChanged(int index) {
@@ -210,7 +230,83 @@ void MainWindow::onSecondaryChanged(int index) {
     if (index < 0 || index >= m_tabPages[primaryIndex].count)
         return;
 
-    m_pageStack->setCurrentIndex(m_tabPages[primaryIndex].first + index);
+    updateContextHeader(primaryIndex, index);
+    switchPage(m_tabPages[primaryIndex].first + index);
+}
+
+void MainWindow::switchPage(int index) {
+    if (index < 0 || index >= m_pageStack->count())
+        return;
+    if (m_pageStack->currentIndex() == index)
+        return;
+
+    if (m_pageAnimation) {
+        m_pageAnimation->stop();
+        m_pageAnimation->deleteLater();
+        m_pageAnimation = nullptr;
+    }
+
+    if (auto* previous = m_pageStack->currentWidget())
+        previous->setGraphicsEffect(nullptr);
+
+    m_pageStack->setCurrentIndex(index);
+    QWidget* page = m_pageStack->currentWidget();
+    const bool reduceMotion = qEnvironmentVariableIntValue("APOTHEOSIS_REDUCE_MOTION") != 0;
+    if (!page || !isVisible() || reduceMotion)
+        return;
+
+    // 仅在切页的短时间内启用透明度特效，结束后立即移除，避免持续合成开销。
+    auto* effect = new QGraphicsOpacityEffect(page);
+    effect->setOpacity(0.72);
+    page->setGraphicsEffect(effect);
+
+    auto* animation = new QPropertyAnimation(effect, "opacity", this);
+    m_pageAnimation = animation;
+    animation->setDuration(155);
+    animation->setStartValue(0.72);
+    animation->setEndValue(1.0);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(animation, &QPropertyAnimation::finished, this, [this, page, animation] {
+        if (m_pageAnimation != animation)
+            return;
+        m_pageAnimation = nullptr;
+        page->setGraphicsEffect(nullptr);
+        animation->deleteLater();
+    });
+    animation->start();
+}
+
+void MainWindow::updateContextHeader(int primary, int secondary) {
+    if (primary < 0 || primary >= m_tabPages.size())
+        return;
+
+    const PageRange& range = m_tabPages[primary];
+    const QString pageName = range.subs.isEmpty() ? range.name : range.subs.value(secondary, range.name);
+    m_contextTitle->setText(pageName);
+
+    static const QStringList descriptions = {
+        QString::fromUtf8(u8"运行状态与关键性能一览"),
+        QString::fromUtf8(u8"推理会话与模型运行管理"),
+        QString::fromUtf8(u8"采集、模型与硬件参数"),
+        QString::fromUtf8(u8"瞄准逻辑与自动化控制"),
+        QString::fromUtf8(u8"运行数据、日志与诊断"),
+    };
+    const QString description = descriptions.value(primary);
+    if (range.subs.isEmpty()) {
+        m_contextPath->setText(description);
+    } else {
+        m_contextPath->setText(QString::fromUtf8(u8"%1  /  %2 · %3")
+                                   .arg(range.name, pageName, description));
+    }
+}
+
+void MainWindow::onSaveRequested() {
+    ConfigBridge::instance().syncToRuntime();
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        config.saveConfig();
+    }
+    m_topNav->showSaveFeedback();
 }
 
 void MainWindow::onHeroToggleInference() {
@@ -234,23 +330,23 @@ void MainWindow::onHeroToggleInference() {
 }
 
 QWidget* MainWindow::createPage(const QString& name) {
-    if (name == QStringLiteral("推理启动"))   return new SessionPage();
-    if (name == QStringLiteral("模型工具"))   return new ModelToolsPage();
-    if (name == QStringLiteral("画面采集"))   return new CapturePage();
-    if (name == QStringLiteral("目标"))       { m_targetPage = new TargetPage(); return m_targetPage; }
-    if (name == QStringLiteral("硬件"))       return new HardwarePage();
-    if (name == QStringLiteral("AI 模型"))    return new AiModelPage();
-    if (name == QStringLiteral("深度模型"))   return new DepthPage();
-    if (name == QStringLiteral("瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
-    if (name == QStringLiteral("准星找色"))   return new CrosshairPage();
-    if (name == QStringLiteral("寻光"))       return new FlashlightPage();
-    if (name == QStringLiteral("玻璃过滤"))   return new GlassFilterPage();
-    if (name == QStringLiteral("宏脚本"))     return new MacroPage();
-    if (name == QStringLiteral("事件编排"))   return new EventPage();
-    if (name == QStringLiteral("性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
-    if (name == QStringLiteral("日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
-    if (name == QStringLiteral("自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }
-    if (name == QStringLiteral("调试"))       { m_debugPage = new DebugPage(); return m_debugPage; }
+    if (name == QString::fromUtf8(u8"推理启动"))   return new SessionPage();
+    if (name == QString::fromUtf8(u8"模型工具"))   return new ModelToolsPage();
+    if (name == QString::fromUtf8(u8"画面采集"))   return new CapturePage();
+    if (name == QString::fromUtf8(u8"目标"))       { m_targetPage = new TargetPage(); return m_targetPage; }
+    if (name == QString::fromUtf8(u8"硬件"))       return new HardwarePage();
+    if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
+    if (name == QString::fromUtf8(u8"深度模型"))   return new DepthPage();
+    if (name == QString::fromUtf8(u8"瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
+    if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
+    if (name == QString::fromUtf8(u8"寻光"))       return new FlashlightPage();
+    if (name == QString::fromUtf8(u8"玻璃过滤"))   return new GlassFilterPage();
+    if (name == QString::fromUtf8(u8"宏脚本"))     return new MacroPage();
+    if (name == QString::fromUtf8(u8"事件编排"))   return new EventPage();
+    if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
+    if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
+    if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }
+    if (name == QString::fromUtf8(u8"调试"))       { m_debugPage = new DebugPage(); return m_debugPage; }
     return new QWidget();
 }
 
@@ -297,7 +393,7 @@ void MainWindow::pollMonitorTelemetry() {
 
     m_statusBar->setInferenceStatus(running);
     m_statusBar->setFps(fps);
-    m_topNav->setSessionStatus(running, running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
+    m_topNav->setSessionStatus(running, running ? QString::fromUtf8(u8"运行中") : QString::fromUtf8(u8"已停止"));
 
     // ── 概览 dashboard ──────────────────────────────────────────────────
     if (m_overviewPage) {
@@ -319,7 +415,7 @@ void MainWindow::pollMonitorTelemetry() {
         }
         m_overviewPage->setSessionState(
             running,
-            model.isEmpty() ? QStringLiteral("(未选择模型)") : model,
+            model.isEmpty() ? QString::fromUtf8(u8"(未选择模型)") : model,
             backendDisp, uptime);
     }
 
@@ -358,11 +454,11 @@ void MainWindow::pollMonitorTelemetry() {
         const float ry = g_dynamic_fov_radius_y_px.load();
         if (rx > 0.0f && ry > 0.0f) {
             m_debugPage->setFovReadout(
-                QStringLiteral("X = %1 px,  Y = %2 px  (有效半径)")
+                QString::fromUtf8(u8"X = %1 px,  Y = %2 px  (有效半径)")
                     .arg(rx, 0, 'f', 1).arg(ry, 0, 'f', 1));
         } else {
             m_debugPage->setFovReadout(
-                QStringLiteral("未启用 / 无锁定目标。在「瞄准热键」面板的「动态 FOV」子段中开启。"));
+                QString::fromUtf8(u8"未启用 / 无锁定目标。在「瞄准热键」面板的「动态 FOV」子段中开启。"));
         }
     }
 }

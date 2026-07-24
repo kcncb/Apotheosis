@@ -5,6 +5,8 @@
 
 class QButtonGroup;
 class QHBoxLayout;
+class QPushButton;
+class QTimer;
 class StatusPill;
 
 // 应用外壳顶部栏:品牌 + 主导航(下划线指示)+ 全局操作(状态 / 保存 / 头像)。
@@ -18,6 +20,7 @@ public:
     void setCurrentPrimary(int index);
     int currentPrimary() const;
     void setSessionStatus(bool running, const QString& text);
+    void showSaveFeedback();
 
 signals:
     void primaryChanged(int index);
@@ -27,4 +30,6 @@ private:
     QButtonGroup* m_group{};
     QHBoxLayout* m_navRow{};
     StatusPill* m_status{};
+    QPushButton* m_saveButton{};
+    QTimer* m_saveFeedbackTimer{};
 };

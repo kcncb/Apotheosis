@@ -1,6 +1,7 @@
 #include "pages/LogPage.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
+#include "app_log.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -70,12 +71,17 @@ LogPage::LogPage(QWidget* parent)
 }
 
 void LogPage::appendLog(const QString& line) {
-    m_logText->append(line);
+    m_allLines.push_back(line);
+    if (!acceptsLine(line))
+        return;
+    m_logText->append(line.toHtmlEscaped());
     auto* bar = m_logText->verticalScrollBar();
     bar->setValue(bar->maximum());
 }
 
 void LogPage::clearLog() {
+    AppLog::Clear();
+    m_allLines.clear();
     m_logText->clear();
 }
 
@@ -95,5 +101,37 @@ void LogPage::exportLog() {
 }
 
 void LogPage::onLevelChanged(int) {
-    // Filtering is applied by the caller; this slot is a hook for future use
+    rebuildView();
+}
+
+bool LogPage::acceptsLine(const QString& line) const {
+    const int selected = m_levelCombo->currentIndex();
+    if (selected <= 0)
+        return true;
+    const QString lower = line.toLower();
+    const bool isError = lower.contains(QStringLiteral("[错误]"))
+        || lower.contains(QStringLiteral("error"))
+        || lower.contains(QStringLiteral("failed"))
+        || lower.contains(QStringLiteral("失败"));
+    const bool isWarning = !isError && (
+        lower.contains(QStringLiteral("warning"))
+        || lower.contains(QStringLiteral("warn"))
+        || lower.contains(QStringLiteral("警告"))
+        || lower.contains(QStringLiteral("fallback"))
+        || lower.contains(QStringLiteral("unavailable")));
+    if (selected == 1) return !isError && !isWarning;
+    if (selected == 2) return isWarning;
+    return isError;
+}
+
+void LogPage::rebuildView() {
+    QStringList visible;
+    visible.reserve(m_allLines.size());
+    for (const auto& line : m_allLines) {
+        if (acceptsLine(line))
+            visible.push_back(line);
+    }
+    m_logText->setPlainText(visible.join(QLatin1Char('\n')));
+    auto* bar = m_logText->verticalScrollBar();
+    bar->setValue(bar->maximum());
 }

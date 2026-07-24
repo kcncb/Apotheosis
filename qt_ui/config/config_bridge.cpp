@@ -108,8 +108,6 @@ void ConfigBridge::syncToRuntime() {
     config.confidence_threshold = cm.confidenceThreshold();
     config.nms_threshold        = cm.nmsThreshold();
     config.max_detections       = cm.maxDetections();
-    config.export_enable_fp8    = cm.exportEnableFp8();
-    config.export_enable_fp16   = cm.exportEnableFp16();
     config.small_target_enabled    = cm.smallTargetEnabled();
     config.small_target_confidence = cm.smallTargetConfidence();
     config.small_target_area_frac  = cm.smallTargetAreaFrac();
@@ -123,8 +121,6 @@ void ConfigBridge::syncToRuntime() {
     config.depth_norm_clip_high_pct = cm.depthNormClipHighPct();
 
     // --- Overlay ---
-    config.overlay_opacity  = cm.overlayOpacity();
-    config.overlay_ui_scale = cm.overlayUiScale();
 
     // --- Macro ---
     config.macro_enabled = cm.macroEnabled();
@@ -217,6 +213,7 @@ void ConfigBridge::syncToRuntime() {
     config.show_fps   = cm.showFps();
     config.verbose    = cm.verbose();
     config.screenshot_delay = cm.screenshotDelay();
+    config.screenshot_button = { cm.screenshotButton().toStdString() };
     config.show_window      = cm.showWindow();
     config.replay_record_enabled = cm.replayRecordEnabled();
     config.replay_seconds        = cm.replaySeconds();
@@ -304,8 +301,6 @@ void ConfigBridge::syncFromRuntime()
     cm.setConfidenceThreshold(config.confidence_threshold);
     cm.setNmsThreshold(config.nms_threshold);
     cm.setMaxDetections(config.max_detections);
-    cm.setExportEnableFp8(config.export_enable_fp8);
-    cm.setExportEnableFp16(config.export_enable_fp16);
     cm.setSmallTargetEnabled(config.small_target_enabled);
     cm.setSmallTargetConfidence(config.small_target_confidence);
     cm.setSmallTargetAreaFrac(config.small_target_area_frac);
@@ -319,8 +314,6 @@ void ConfigBridge::syncFromRuntime()
     cm.setDepthNormClipHighPct(config.depth_norm_clip_high_pct);
 
     // --- Overlay ---
-    cm.setOverlayOpacity(config.overlay_opacity);
-    cm.setOverlayUiScale(config.overlay_ui_scale);
 
     // --- Macro ---
     cm.setMacroEnabled(config.macro_enabled);
@@ -410,6 +403,9 @@ void ConfigBridge::syncFromRuntime()
     cm.setShowFps(config.show_fps);
     cm.setVerbose(config.verbose);
     cm.setScreenshotDelay(config.screenshot_delay);
+    cm.setScreenshotButton(config.screenshot_button.empty()
+        ? QStringLiteral("None")
+        : QString::fromStdString(config.screenshot_button.front()));
     cm.setShowWindow(config.show_window);
     cm.setReplayRecordEnabled(config.replay_record_enabled);
     cm.setReplaySeconds(config.replay_seconds);
@@ -431,11 +427,6 @@ void ConfigBridge::syncFromRuntime()
             hd.keys.push_back(qstr(k));
         hd.fovX = hp.fovX;
         hd.fovY = hp.fovY;
-        hd.speedX        = hp.speed_x;
-        hd.speedY        = hp.speed_y;
-        hd.deadZonePx    = hp.dead_zone_px;
-        hd.deadzoneEnabled     = hp.deadzone_enabled;
-        hd.deadzonePercent     = hp.deadzone_percent;
         hd.lostTargetCacheFrames = hp.lost_target_cache_frames;
         hd.triggerEnabled      = hp.trigger_enabled;
         hd.triggerFireDelay    = hp.trigger_fire_delay;
@@ -446,7 +437,6 @@ void ConfigBridge::syncFromRuntime()
         hd.triggerDurationJitterMs = hp.trigger_duration_jitter_ms;
         hd.triggerIntervalJitterMs = hp.trigger_interval_jitter_ms;
         hd.triggerSwitchCooldownMs = hp.trigger_switch_cooldown_ms;
-        hd.yStrengthPercent        = hp.y_strength_percent;
         {
             QString joined;
             for (size_t ai = 0; ai < hp.aim_classes.size(); ++ai) {

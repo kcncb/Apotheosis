@@ -107,10 +107,6 @@ public:
     void setNmsThreshold(float v);
     int maxDetections() const;
     void setMaxDetections(int v);
-    bool exportEnableFp8() const;
-    void setExportEnableFp8(bool v);
-    bool exportEnableFp16() const;
-    void setExportEnableFp16(bool v);
     bool smallTargetEnabled() const;
     void setSmallTargetEnabled(bool v);
     float smallTargetConfidence() const;
@@ -131,12 +127,6 @@ public:
     void setDepthNormClipLowPct(float v);
     float depthNormClipHighPct() const;
     void setDepthNormClipHighPct(float v);
-
-    // Overlay
-    int overlayOpacity() const;
-    void setOverlayOpacity(int v);
-    float overlayUiScale() const;
-    void setOverlayUiScale(float v);
 
     // Macro
     bool macroEnabled() const;
@@ -227,6 +217,8 @@ public:
     void setVerbose(bool v);
     int screenshotDelay() const;
     void setScreenshotDelay(int v);
+    QString screenshotButton() const;
+    void setScreenshotButton(const QString& v);
     bool showWindow() const;
     void setShowWindow(bool v);
     bool replayRecordEnabled() const;
@@ -248,11 +240,6 @@ public:
         QString group;
         QStringList keys;
         int fovX = 106, fovY = 74;
-        float speedX = 0.6f;
-        float speedY = 0.6f;
-        float deadZonePx = 2.0f;
-        bool deadzoneEnabled = false;
-        float deadzonePercent = 0.0f;
         int lostTargetCacheFrames = 5;
         bool triggerEnabled = false;
         int triggerFireDelay = 0;
@@ -263,7 +250,6 @@ public:
         int triggerDurationJitterMs = 0;
         int triggerIntervalJitterMs = 0;
         int triggerSwitchCooldownMs = 0;
-        int yStrengthPercent        = 100;
         // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
         QString aimClasses;
         bool laserDetectEnabled = false;

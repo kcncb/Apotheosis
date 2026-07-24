@@ -3,6 +3,7 @@
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
+#include "macro/lua_runtime.h"
 
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -10,7 +11,9 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 
 MacroPage::MacroPage(QWidget* parent)
@@ -50,7 +53,13 @@ MacroPage::MacroPage(QWidget* parent)
     // 开启后会加载下方配置的 Lua 脚本，鼠标按键事件会派发到脚本的 OnEvent 回调。
     // 输入会自动通过当前选定的硬件后端发出。
     connect(m_enabledToggle, &ToggleSwitch::toggled,
-            this, [](bool v) { ConfigManager::instance().setMacroEnabled(v); });
+            this, [this](bool v) {
+                ConfigManager::instance().setMacroEnabled(v);
+                macro::runtime_set_enabled(v);
+                if (v && !macro::runtime_is_loaded() && !m_scriptPath->text().trimmed().isEmpty())
+                    onReloadScript();
+                updateStatus();
+            });
 
     // 接收左键事件 toggle
     sc->addWidget(
@@ -63,7 +72,10 @@ MacroPage::MacroPage(QWidget* parent)
     // 等同于脚本里调用 EnablePrimaryMouseButtonEvents(true)。
     // 关闭时左键事件不会派发到 OnEvent。
     connect(m_primaryBtnToggle, &ToggleSwitch::toggled,
-            this, [](bool v) { ConfigManager::instance().setMacroPrimaryButtonEvents(v); });
+            this, [](bool v) {
+                ConfigManager::instance().setMacroPrimaryButtonEvents(v);
+                macro::runtime_set_primary_button_events_enabled(v);
+            });
 
     // Script path row: label + line edit + browse button
     m_scriptPath = new QLineEdit;
@@ -178,6 +190,11 @@ MacroPage::MacroPage(QWidget* parent)
     // Load initial config values
     loadConfig();
     connect(&cfg, &ConfigManager::configLoaded, this, &MacroPage::loadConfig);
+    auto* refreshTimer = new QTimer(this);
+    refreshTimer->setInterval(250);
+    connect(refreshTimer, &QTimer::timeout, this, &MacroPage::updateStatus);
+    refreshTimer->start();
+    updateStatus();
 }
 
 void MacroPage::loadConfig() {
@@ -198,24 +215,67 @@ void MacroPage::onBrowseScript() {
 
     m_scriptPath->setText(path);
     ConfigManager::instance().setMacroScriptPath(path);
+    if (m_enabledToggle->isChecked())
+        onReloadScript();
 }
 
 void MacroPage::onReloadScript() {
-    // Placeholder: the actual reload logic calls into macro::runtime_load_script
-    // which lives in the engine side. The Qt UI just persists the config; the
-    // engine picks up changes via ConfigManager signals.
+    const QString path = m_scriptPath->text().trimmed();
+    if (path.isEmpty()) {
+        m_errorLabel->setText(QString::fromUtf8(u8"请先选择 Lua 脚本。"));
+        m_errorLabel->setVisible(true);
+        return;
+    }
+
+    std::string error;
+    const QByteArray utf8 = path.toUtf8();
+    const bool ok = macro::runtime_load_script(std::string(utf8.constData()), &error);
+    if (!ok) {
+        m_errorLabel->setText(error.empty()
+            ? QString::fromUtf8(u8"脚本加载失败。")
+            : QString::fromUtf8(error.c_str()));
+        m_errorLabel->setVisible(true);
+    }
+    updateStatus();
 }
 
 void MacroPage::onUnloadScript() {
-    // Placeholder: engine-side macro::runtime_unload_script() handles actual
-    // unloading. The Qt UI signals intent through config / future bridge API.
+    macro::runtime_unload_script();
+    updateStatus();
 }
 
 void MacroPage::onClearLog() {
+    macro::runtime_log_clear();
+    m_lastLogSnapshot.clear();
     m_logView->clear();
 }
 
 void MacroPage::updateStatus() {
-    // Placeholder: in a full integration this would query macro::runtime_is_loaded()
-    // and macro::runtime_last_error() to update m_statusLabel and m_errorLabel.
+    const bool loaded = macro::runtime_is_loaded();
+    const bool busy = macro::runtime_busy();
+    m_statusLabel->setText(loaded
+        ? (busy ? QString::fromUtf8(u8"● 运行中 · 正在执行")
+                : QString::fromUtf8(u8"● 已加载"))
+        : QString::fromUtf8(u8"○ 未加载"));
+    m_statusLabel->setStyleSheet(loaded
+        ? QStringLiteral("color: #1D9E75;")
+        : QStringLiteral("color: #d98c5a;"));
+
+    const std::string error = macro::runtime_last_error();
+    m_errorLabel->setText(QString::fromUtf8(error.c_str()));
+    m_errorLabel->setVisible(!error.empty());
+    m_reloadBtn->setEnabled(!busy);
+    m_unloadBtn->setEnabled(loaded && !busy);
+
+    QStringList lines;
+    const auto snapshot = macro::runtime_log_snapshot(300);
+    lines.reserve(static_cast<int>(snapshot.size()));
+    for (const auto& line : snapshot)
+        lines.push_back(QString::fromUtf8(line.c_str()));
+    if (lines != m_lastLogSnapshot) {
+        m_lastLogSnapshot = lines;
+        m_logView->setPlainText(lines.join(QLatin1Char('\n')));
+        if (auto* bar = m_logView->verticalScrollBar())
+            bar->setValue(bar->maximum());
+    }
 }

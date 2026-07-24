@@ -10,25 +10,24 @@ namespace flashlight_runtime
 {
 
 // One candidate flashlight halo, in detection-image pixel space, AFTER the
-// depth-gate + temporal-tracker have run on the capture thread. `confidence`
-// is the adjusted score (appearance ∓ depth/positional/onset/confirmed terms)
-// the spots are sorted by, best first. The mouse loop applies the final
-// accept rule (colocation OR (passed_depth && confirmed)) because that needs
-// the model boxes, which live there.
+// appearance/depth/temporal/model-box gates have run on a YOLO result tick.
+// The snapshot contains at most one stable selected core.
 struct Spot
 {
     cv::Rect    box{};                 // synthesized bbox (centre±radius), clamped
     cv::Point2f center{};              // halo centre (det-img px)
     float       radius       = 0.0f;
     float       confidence   = 0.0f;   // adjusted score, [0,1]
+    int         track_id     = -1;
     bool        passed_depth = true;   // false only when depth-gate hard-rejected it
     bool        confirmed    = false;  // temporal tracker reached confirm_frames
     bool        onset        = false;  // light just turned on this frame
+    bool        associated_with_model = false; // 有框时只瞄模型框，不注入光斑
+    bool        independent_aimable = false;   // 无框且深度+连续三帧均通过
 };
 
-// Latest flashlight detection. `valid` means the most recent capture frame
-// produced at least one publishable spot. Consumers must drop snapshots older
-// than kFreshnessMs. Single-writer (capture thread), multi-reader.
+// Latest flashlight detection. `valid` means the latest YOLO result produced
+// one recognized core. Single-writer (mouse inference consumer), multi-reader.
 struct Snapshot
 {
     bool              valid = false;
@@ -41,12 +40,11 @@ inline constexpr int kFreshnessMs = 150;
 Snapshot read();
 void publish(const Snapshot& snap);
 
-// Capture thread enters this once per published frame. Reads the global config
-// + per-hotkey gate; derives all internal constants from the three macro knobs
-// (crosshair::flashlight_derive_tuning), runs the appearance detector, then the
-// depth-gate and temporal tracker. Publishes ranked candidates with metadata.
-// Cheap when off.
-void process_frame(const cv::Mat& bgrFrame);
+// 每次 YOLO 发布新结果时调用一次。这样确认帧、立即丢失与 YOLO 使用同一时钟，
+// 不再受采集 FPS 或预览线程丢帧影响。modelBoxes 是本轮经过玻璃过滤后的模型框；
+// 若白核位于框内或距框边缘不超过半个框宽，只发布预览结果，不生成独立目标。
+void process_inference_frame(const cv::Mat& bgrFrame,
+                             const std::vector<cv::Rect>& modelBoxes);
 
 } // namespace flashlight_runtime
 

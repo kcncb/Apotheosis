@@ -12,6 +12,9 @@ struct DetectionBuffer
     std::condition_variable cv;
     int version = 0;
     std::vector<cv::Rect> boxes;
+    // 模型解码后的浮点框，专供 AVA selector/tracker 使用。索引与 boxes、
+    // classes、confidences 一一对应。
+    std::vector<cv::Rect2f> precise_boxes;
     std::vector<int> classes;
     std::vector<float> confidences;
 
@@ -57,6 +60,12 @@ struct DetectionBuffer
     {
         std::lock_guard<std::mutex> lock(mutex);
         boxes = newBoxes;
+        precise_boxes.clear();
+        precise_boxes.reserve(newBoxes.size());
+        for (const auto& box : newBoxes)
+            precise_boxes.emplace_back(
+                static_cast<float>(box.x), static_cast<float>(box.y),
+                static_cast<float>(box.width), static_cast<float>(box.height));
         classes = newClasses;
         confidences = newConfidences;
         bumpVersionLocked();

@@ -4,6 +4,7 @@
 
 class QLineEdit;
 class QSpinBox;
+class QDoubleSpinBox;
 class ToggleSwitch;
 
 class DepthPage : public QWidget {
@@ -23,4 +24,6 @@ private:
     QLineEdit* m_modelPath{};
     QSpinBox* m_optInputSize{};
     QSpinBox* m_maskFpsRuntime{};
+    QDoubleSpinBox* m_normLowPct{};
+    QDoubleSpinBox* m_normHighPct{};
 };

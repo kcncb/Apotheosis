@@ -10,13 +10,12 @@ namespace
 {
 // EMA alpha for the smoothed centre. 0.35 = ~1.85-frame time constant.
 //   * Stationary noise (σ≈2 px from contour-shape flicker) is cut to ~0.8 px,
-//     well below the mover's 1.5-px deadzone floor → buzz vanishes.
+//     below one output pixel, so contour buzz is strongly reduced.
 //   * Real motion (camera rotation pushing the halo 50-100 px/frame) is tracked
 //     with ~2-frame lag = 6-8 ms at 250 FPS — the mover's velocity feedforward
 //     swallows that lag at small cost.
 // Per-frame constant, not time-based: at 100-300 FPS jitter Hz, the resulting
 // cutoff (~15-45 Hz) stays in the right ballpark either way.
-constexpr float kPosAlpha    = 0.35f;
 constexpr float kRadiusAlpha = 0.25f;
 
 inline cv::Point2f lerp_pt(const cv::Point2f& a, const cv::Point2f& b, float t)
@@ -61,11 +60,17 @@ std::vector<FlashlightTrackVerdict> FlashlightTracker::update(
             taken[static_cast<size_t>(best)] = 1;
             tr.center          = spots[i];                                // raw assoc anchor
             tr.radius          = (i < radii.size()) ? radii[i] : tr.radius;
-            tr.smoothed_center = lerp_pt(tr.smoothed_center, spots[i], kPosAlpha);
+            const float travel = std::sqrt(bestd2);
+            const float motion = std::clamp(travel / std::max(1.0f, p.max_jump_px), 0.0f, 1.0f);
+            // 静止时强滤波，快速移动时提高跟随率；既压住核心边缘的像素抖动，
+            // 又不会在甩动镜头时拖着锁点走。
+            const float pos_alpha = 0.28f + 0.57f * motion;
+            tr.smoothed_center = lerp_pt(tr.smoothed_center, spots[i], pos_alpha);
             tr.smoothed_radius = tr.smoothed_radius + (new_r - tr.smoothed_radius) * kRadiusAlpha;
             tr.age             = std::min(tr.age + 1, 100000);
             tr.unseen          = 0;
             tr.seen_this       = true;
+            v.track_id         = tr.id;
             v.age              = tr.age;
             v.onset            = false;
             v.confirmed        = (tr.age >= confirm_k);
@@ -75,6 +80,7 @@ std::vector<FlashlightTrackVerdict> FlashlightTracker::update(
         else
         {
             Track tr;
+            tr.id              = next_id_++;
             tr.center          = spots[i];
             tr.radius          = new_r;
             tr.smoothed_center = spots[i];   // seed: first frame = raw
@@ -84,6 +90,7 @@ std::vector<FlashlightTrackVerdict> FlashlightTracker::update(
             tr.seen_this       = true;
             tracks_.push_back(tr);
             taken.push_back(1); // keep `taken` parallel; new track already claimed
+            v.track_id         = tr.id;
             v.age              = 1;
             v.onset            = true;
             v.confirmed        = (1 >= confirm_k); // K==1 → confirmed on first sight
@@ -115,6 +122,7 @@ std::vector<FlashlightTrackVerdict> FlashlightTracker::update(
 void FlashlightTracker::reset()
 {
     tracks_.clear();
+    next_id_ = 1;
 }
 
 } // namespace crosshair

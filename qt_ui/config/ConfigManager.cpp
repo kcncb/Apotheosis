@@ -32,14 +32,8 @@ bool ConfigManager::load(const QString& path) {
         setConfidenceThreshold(0.10f);
         setNmsThreshold(0.50f);
         setMaxDetections(100);
-        setExportEnableFp8(false);
-        setExportEnableFp16(true);
-
         setDepthInferenceEnabled(true);
         setDepthModelPath("depth_anything_v2.engine");
-
-        setOverlayOpacity(240);
-        setOverlayUiScale(1.0f);
 
         setInputMethod("WIN32");
 
@@ -461,24 +455,6 @@ void ConfigManager::setMaxDetections(int v) {
     emit configChanged();
 }
 
-bool ConfigManager::exportEnableFp8() const {
-    return m_settings->value("AI/export_enable_fp8", false).toBool();
-}
-
-void ConfigManager::setExportEnableFp8(bool v) {
-    m_settings->setValue("AI/export_enable_fp8", v);
-    emit configChanged();
-}
-
-bool ConfigManager::exportEnableFp16() const {
-    return m_settings->value("AI/export_enable_fp16", true).toBool();
-}
-
-void ConfigManager::setExportEnableFp16(bool v) {
-    m_settings->setValue("AI/export_enable_fp16", v);
-    emit configChanged();
-}
-
 bool ConfigManager::smallTargetEnabled() const {
     return m_settings->value("AI/small_target_enabled", false).toBool();
 }
@@ -562,26 +538,6 @@ void ConfigManager::setDepthNormClipHighPct(float v) {
     emit configChanged();
 }
 
-// --- Overlay ---
-
-int ConfigManager::overlayOpacity() const {
-    return m_settings->value("Overlay/overlay_opacity", 240).toInt();
-}
-
-void ConfigManager::setOverlayOpacity(int v) {
-    m_settings->setValue("Overlay/overlay_opacity", v);
-    emit configChanged();
-}
-
-float ConfigManager::overlayUiScale() const {
-    return m_settings->value("Overlay/overlay_ui_scale", 1.0).toFloat();
-}
-
-void ConfigManager::setOverlayUiScale(float v) {
-    m_settings->setValue("Overlay/overlay_ui_scale", static_cast<double>(v));
-    emit configChanged();
-}
-
 // --- Debug ---
 
 bool ConfigManager::showFps() const {
@@ -608,6 +564,15 @@ int ConfigManager::screenshotDelay() const {
 
 void ConfigManager::setScreenshotDelay(int v) {
     m_settings->setValue("Debug/screenshot_delay", v);
+    emit configChanged();
+}
+
+QString ConfigManager::screenshotButton() const {
+    return m_settings->value("Debug/screenshot_button", QStringLiteral("None")).toString();
+}
+
+void ConfigManager::setScreenshotButton(const QString& v) {
+    m_settings->setValue("Debug/screenshot_button", v.isEmpty() ? QStringLiteral("None") : v);
     emit configChanged();
 }
 
@@ -1082,11 +1047,6 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "keys", data.keys.join(","));
     m_settings->setValue(prefix + "fovX", data.fovX);
     m_settings->setValue(prefix + "fovY", data.fovY);
-    m_settings->setValue(prefix + "speed_x",         static_cast<double>(data.speedX));
-    m_settings->setValue(prefix + "speed_y",         static_cast<double>(data.speedY));
-    m_settings->setValue(prefix + "dead_zone_px",    static_cast<double>(data.deadZonePx));
-    m_settings->setValue(prefix + "deadzone_enabled",     data.deadzoneEnabled);
-    m_settings->setValue(prefix + "deadzone_percent",    static_cast<double>(data.deadzonePercent));
     m_settings->setValue(prefix + "lost_target_cache_frames", data.lostTargetCacheFrames);
     m_settings->setValue(prefix + "trigger_enabled",     data.triggerEnabled);
     m_settings->setValue(prefix + "trigger_fire_delay",  data.triggerFireDelay);
@@ -1097,7 +1057,6 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "trigger_duration_jitter_ms", data.triggerDurationJitterMs);
     m_settings->setValue(prefix + "trigger_interval_jitter_ms", data.triggerIntervalJitterMs);
     m_settings->setValue(prefix + "trigger_switch_cooldown_ms", data.triggerSwitchCooldownMs);
-    m_settings->setValue(prefix + "y_strength_percent",         data.yStrengthPercent);
     m_settings->setValue(prefix + "aim_classes",         data.aimClasses);
     m_settings->setValue(prefix + "laser_detect_enabled", data.laserDetectEnabled);
     m_settings->setValue(prefix + "crosshair_detect_enabled", data.crosshairDetectEnabled);
@@ -1122,11 +1081,6 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.keys = m_settings->value(prefix + "keys", "RightMouseButton").toString().split(",", Qt::SkipEmptyParts);
     data.fovX = m_settings->value(prefix + "fovX", 106).toInt();
     data.fovY = m_settings->value(prefix + "fovY", 74).toInt();
-    data.speedX        = m_settings->value(prefix + "speed_x",        0.6).toFloat();
-    data.speedY        = m_settings->value(prefix + "speed_y",        0.6).toFloat();
-    data.deadZonePx    = m_settings->value(prefix + "dead_zone_px", 2.0).toFloat();
-    data.deadzoneEnabled     = m_settings->value(prefix + "deadzone_enabled", false).toBool();
-    data.deadzonePercent     = m_settings->value(prefix + "deadzone_percent", 0.0).toFloat();
     data.lostTargetCacheFrames = m_settings->value(prefix + "lost_target_cache_frames", 5).toInt();
     data.triggerEnabled      = m_settings->value(prefix + "trigger_enabled", false).toBool();
     data.triggerFireDelay    = m_settings->value(prefix + "trigger_fire_delay", 0).toInt();
@@ -1137,7 +1091,6 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.triggerDurationJitterMs = m_settings->value(prefix + "trigger_duration_jitter_ms", 0).toInt();
     data.triggerIntervalJitterMs = m_settings->value(prefix + "trigger_interval_jitter_ms", 0).toInt();
     data.triggerSwitchCooldownMs = m_settings->value(prefix + "trigger_switch_cooldown_ms", 0).toInt();
-    data.yStrengthPercent        = m_settings->value(prefix + "y_strength_percent",         100).toInt();
     data.aimClasses      = m_settings->value(prefix + "aim_classes", QString()).toString();
     data.laserDetectEnabled = m_settings->value(prefix + "laser_detect_enabled", false).toBool();
     data.crosshairDetectEnabled = m_settings->value(prefix + "crosshair_detect_enabled", false).toBool();

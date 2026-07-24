@@ -51,7 +51,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\other_tools.h" />
-    <ClInclude Include="include\adaptive_reactive_tracker.h" />
     <ClInclude Include="capture\capture.h" />
     <ClInclude Include="capture\capture_utils.h" />
     <ClInclude Include="capture\udp_capture.h" />

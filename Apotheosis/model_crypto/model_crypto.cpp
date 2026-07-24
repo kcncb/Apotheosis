@@ -303,7 +303,7 @@ PayloadType payload_type_from_extension(const std::string& path)
         return static_cast<char>(std::tolower(c));
     });
     if (ext == ".onnx") return PayloadType::Onnx;
-    if (ext == ".engine") return PayloadType::TensorRtEngine;
+    if (ext == ".engine" || ext == ".trt") return PayloadType::TensorRtEngine;
     return PayloadType::Unknown;
 }
 

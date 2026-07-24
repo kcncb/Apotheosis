@@ -10,9 +10,8 @@ namespace crosshair
 
 // Whole-frame flashlight glare detector. Targets the bright over-exposed halo
 // that an enemy's tactical flashlight burns into the player's view ("寻光" /
-// 手电筒检测). Unlike the colour-based crosshair / laser detectors, this one
-// is HUE-AGNOSTIC: the glare core is near-pure white in any colour space, so
-// we threshold on brightness only.
+// 手电筒检测). 与准星/激光找色不同，它要求“高亮且近白”的过曝核心，再验证
+// 四周是否存在一致的径向衰减，以减少彩色 UI、灯牌和单侧高光误锁。
 //
 // DISTANCE INVARIANCE is the hard part. The in-game glare is a RADIAL gradient
 // (bright core fading outward), and its on-screen size swings wildly with
@@ -29,8 +28,7 @@ namespace crosshair
 // A real halo passes at any range; a flat bright patch (sky/UI) fails the
 // falloff test regardless of size. Detections are then deduped (one glare can
 // fragment into core + halo) and capped to `max_spots` so a noisy frame can
-// never spawn a swarm of candidates. A near-field whole-screen flood (most of
-// the frame over threshold) is reported as a single centre spot.
+// never spawn a swarm of candidates. 无法定位核心的大面积白屏直接拒绝。
 //
 // Scanning the whole frame (not a ROI) is intentional — the flashlight halo
 // can appear anywhere depending on where the enemy is standing. Cost is
@@ -40,10 +38,13 @@ struct FlashlightDetectorSettings
 {
     bool enabled = false;
 
-    // Pixel-brightness gate. The grey-level used is max(B,G,R) (so coloured
-    // flashlight tints still saturate near the upper end). Default 220 keeps
-    // only the over-exposed core of the glare.
+    // Pixel-brightness gate for the over-exposed core.
     int  brightness_threshold = 220;
+
+    // A flashlight core is close to white even when its outer bloom is tinted.
+    // Reject pixels whose max/min channel spread is larger than this. This is
+    // the main defence against coloured HUD icons and emissive signs.
+    int  max_channel_spread = 48;
 
     // Acceptable spot radius range in detection-image pixels. Small = near
     // distant lights; large = up-close flashes. A halo outside this band is
@@ -74,6 +75,11 @@ struct FlashlightDetectorSettings
     //   80+ = strict, only halos against clearly darker backgrounds
     int  min_local_contrast = 30;
 
+    // Fraction of radial spokes that must get darker from core to halo edge.
+    // Unlike a single annulus mean, this rejects a bright patch that happens to
+    // be dark on only one side. 0 disables the gate.
+    float min_radial_consistency = 0.70f;
+
     // Hard cap on how many halos a single frame may report. After the shape /
     // falloff gates, surviving spots are sorted by confidence, deduped (a glare
     // that fragments into core + halo collapses to one), and truncated to this
@@ -84,7 +90,7 @@ struct FlashlightDetectorSettings
 
 // One detected halo. `center` is the centroid (detection-image px); `radius`
 // is the equivalent-area radius; `confidence` ∈ [0,1] mixes circularity and
-// brightness — higher = more flashlight-like. Sorted descending by score.
+// brightness / contrast / radial consistency — higher = more flashlight-like.
 struct FlashlightSpot
 {
     cv::Point2f center{};
@@ -103,6 +109,7 @@ struct FlashlightCandidate
     float       radius      = 0.0f;
     float       circularity = 0.0f;
     float       contrast     = 0.0f; // core_mean − outer_ring_mean (radial falloff)
+    float       radial_consistency = 0.0f;
     bool        accepted    = false;
     const char* reject_reason = "";
 };

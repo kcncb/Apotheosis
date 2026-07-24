@@ -9,6 +9,8 @@
 
 class QStackedWidget;
 class QTimer;
+class QLabel;
+class QPropertyAnimation;
 class StatusBar;
 class TopNavBar;
 class SideNav;
@@ -26,17 +28,23 @@ private slots:
     void onPrimaryChanged(int index);
     void onSecondaryChanged(int index);
     void onHeroToggleInference();
+    void onSaveRequested();
     void pollMonitorTelemetry();
 
 private:
     void setupPages();
     QWidget* createPage(const QString& name);
+    void switchPage(int index);
+    void updateContextHeader(int primary, int secondary);
 
     TopNavBar* m_topNav{};
     SideNav* m_sideNav{};
     QStackedWidget* m_pageStack{};
+    QLabel* m_contextTitle{};
+    QLabel* m_contextPath{};
     StatusBar* m_statusBar{};
     QTimer* m_monitorTimer{};
+    QPropertyAnimation* m_pageAnimation{};
 
     struct PageRange {
         int first{};

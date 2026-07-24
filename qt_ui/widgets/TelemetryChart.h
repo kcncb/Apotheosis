@@ -22,6 +22,6 @@ protected:
 
 private:
     QVector<double> m_data;
-    QColor m_accent{QStringLiteral("#5E6AD2")};
+    QColor m_accent{QStringLiteral("#5865D8")};
     int m_maxPoints = 80;
 };

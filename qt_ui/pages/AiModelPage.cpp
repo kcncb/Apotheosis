@@ -3,6 +3,7 @@
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
+#include "detector/model_inspector.h"
 
 #include <QComboBox>
 #include <QDir>
@@ -96,6 +97,7 @@ AiModelPage::AiModelPage(QWidget* parent)
             QString model = m_modelCombo->currentText();
             cfg.setAiModel(model);
             emit cfg.configChanged();
+            updateModelInfo();
         }
     });
 
@@ -129,7 +131,7 @@ AiModelPage::AiModelPage(QWidget* parent)
     m_backendStatusLabel = new QLabel;
     m_backendStatusLabel->setStyleSheet(QStringLiteral("color: #c0a040; font-size: 11px;"));
     m_backendStatusLabel->setWordWrap(true);
-    m_backendStatusLabel->setVisible(false);
+    m_backendStatusLabel->setVisible(true);
     backendCard->contentLayout()->addWidget(m_backendStatusLabel);
 
     layout->addWidget(backendCard);
@@ -240,35 +242,10 @@ AiModelPage::AiModelPage(QWidget* parent)
         emit cfg.configChanged();
     });
 
-    // ── Card 5: 导出选项 (collapsible) ──
-    auto* exportCard = new CardWidget(QStringLiteral("导出选项"),
-                                      QStringLiteral("file-export"));
-    exportCard->setCollapsible(true);
-
-    auto* fp16Row = FormKit::toggleRow(
-        QStringLiteral("FP16"), cfg.exportEnableFp16(), m_fp16);
-    m_fp16->setToolTip(
-        tr("导出引擎时启用 FP16 半精度。推理速度更快,精度损失极小。"));
-    exportCard->contentLayout()->addWidget(fp16Row);
-
-    auto* fp8Row = FormKit::toggleRow(
-        QStringLiteral("FP8"), cfg.exportEnableFp8(), m_fp8);
-    m_fp8->setToolTip(
-        tr("导出引擎时启用 FP8 量化。速度最快但精度可能下降,仅 Ada+ 架构支持。"));
-    exportCard->contentLayout()->addWidget(fp8Row);
-
-    layout->addWidget(exportCard);
-
-    connect(m_fp16, &ToggleSwitch::toggled, this, [&cfg](bool val) {
-        cfg.setExportEnableFp16(val);
-        emit cfg.configChanged();
-    });
-    connect(m_fp8, &ToggleSwitch::toggled, this, [&cfg](bool val) {
-        cfg.setExportEnableFp8(val);
-        emit cfg.configChanged();
-    });
-
     layout->addStretch();
+
+    updateModelInfo();
+    updateBackendStatus();
 }
 
 void AiModelPage::onBackendChanged(int index) {
@@ -277,6 +254,7 @@ void AiModelPage::onBackendChanged(int index) {
     QString backend = (index == 1) ? QStringLiteral("DML") : QStringLiteral("TRT");
     cfg.setBackend(backend);
     emit cfg.configChanged();
+    updateBackendStatus();
 }
 
 void AiModelPage::onSmallTargetToggled(bool enabled) {
@@ -317,5 +295,43 @@ void AiModelPage::browseModel() {
         auto& cfg = ConfigManager::instance();
         cfg.setAiModel(destName);
         emit cfg.configChanged();
+        updateModelInfo();
     }
+}
+
+void AiModelPage::updateModelInfo() {
+    const QString fileName = m_modelCombo->currentText().trimmed();
+    if (fileName.isEmpty()) {
+        m_fixedInputLabel->setText(QStringLiteral("尚未选择模型"));
+        return;
+    }
+
+    const QString path = QDir(QStringLiteral("models")).filePath(fileName);
+    const QFileInfo info(path);
+    if (!info.exists()) {
+        m_fixedInputLabel->setText(QStringLiteral("模型文件不存在，将在启动时重新检查"));
+        return;
+    }
+
+    if (info.suffix().compare(QStringLiteral("onnx"), Qt::CaseInsensitive) == 0) {
+        const QByteArray utf8Path = QDir::toNativeSeparators(info.absoluteFilePath()).toUtf8();
+        const auto metadata = detector::inspect_onnx_model(std::string(utf8Path.constData()), false);
+        if (metadata.fixed_input_size_known) {
+            m_fixedInputLabel->setText(metadata.fixed_input_size
+                ? QStringLiteral("输入尺寸：固定 · 类别数：%1").arg(metadata.class_count)
+                : QStringLiteral("输入尺寸：动态 · 类别数：%1").arg(metadata.class_count));
+        } else {
+            m_fixedInputLabel->setText(QStringLiteral("输入尺寸：启动推理时自动检测"));
+        }
+        return;
+    }
+
+    m_fixedInputLabel->setText(QStringLiteral("输入尺寸：启动推理时自动检测"));
+}
+
+void AiModelPage::updateBackendStatus() {
+    const bool dml = m_backendCombo->currentIndex() == 1;
+    m_backendStatusLabel->setText(dml
+        ? QStringLiteral("DirectML 使用所选适配器；切换后请重新启动推理会话。")
+        : QStringLiteral("TensorRT 引擎固定使用 FP16 I/O；ONNX 首次启动时自动构建并缓存引擎。"));
 }

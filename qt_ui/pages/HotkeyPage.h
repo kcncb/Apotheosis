@@ -14,6 +14,7 @@ class QSpinBox;
 class QVBoxLayout;
 
 class BezierEditor;
+class AdaptiveStack;
 class CardWidget;
 class FreehandCurveEditor;
 class QButtonGroup;
@@ -54,10 +55,9 @@ private:
     void buildFovCard();
     void buildCrosshairCard();
     void buildBossAimCard();
-    void buildDeadzoneCard();
+    void buildAimPathCard();
     void buildTriggerCard();
     void buildAimClassCard();
-    void buildAimPathCard();
 
     void rebuildGroupCombo();
     void repopulateProfileList();
@@ -92,7 +92,6 @@ private:
     QSpinBox* m_fovYSpin{};
     ToggleSwitch* m_dynamicFov{};
     QDoubleSpinBox* m_dynamicFovMargin{};
-    QDoubleSpinBox* m_dynamicFovMinRadius{};
     QWidget* m_dynamicFovContainer{};
 
     // Card 3: Crosshair / Laser / Flashlight detect + Glass filter
@@ -101,57 +100,9 @@ private:
     ToggleSwitch* m_flashlightDetect{};
     ToggleSwitch* m_glassFilter{};
 
-    // Card 4: Mover (kind dropdown + stacked per-mover params)
-    QStackedWidget* m_moverParamStack{};
-    QComboBox*      m_moverKindCombo{};
-    QDoubleSpinBox* m_ygPullSpeedX{};
-    QDoubleSpinBox* m_ygPullSpeedY{};
-    QDoubleSpinBox* m_ygTracking{};
-    QDoubleSpinBox* m_ygPredictionMs{};
-    QDoubleSpinBox* m_ygStability{};
-    // 天枢 (Classic) — 经典 PID 全参
-    QComboBox*      m_clsAimModeCombo{};
-    QStackedWidget* m_clsAimModeStack{};
-    // 简单模式
-    QDoubleSpinBox* m_clsStartSpeed{};
-    QDoubleSpinBox* m_clsEndSpeed{};
-    QSpinBox*       m_clsTransitionMs{};
-    QDoubleSpinBox* m_clsSimpleKi{};
-    QDoubleSpinBox* m_clsSimpleKd{};
-    // 高级模式 X
-    QDoubleSpinBox* m_clsKpMinX{};
-    QDoubleSpinBox* m_clsKpMaxX{};
-    QDoubleSpinBox* m_clsKiX{};
-    QDoubleSpinBox* m_clsKdX{};
-    QDoubleSpinBox* m_clsImaxX{};
-    QDoubleSpinBox* m_clsPfactorX{};
-    QSpinBox*       m_clsTimeX{};
-    ToggleSwitch*   m_clsTimeDynX{};
-    // 高级模式 Y
-    QDoubleSpinBox* m_clsKpMinY{};
-    QDoubleSpinBox* m_clsKpMaxY{};
-    QDoubleSpinBox* m_clsKiY{};
-    QDoubleSpinBox* m_clsKdY{};
-    QDoubleSpinBox* m_clsImaxY{};
-    QDoubleSpinBox* m_clsPfactorY{};
-    QSpinBox*       m_clsTimeY{};
-    ToggleSwitch*   m_clsTimeDynY{};
-    // 预测
-    QComboBox*      m_clsPredModeCombo{};
-    QDoubleSpinBox* m_clsVelLead{};
-    ToggleSwitch*   m_clsIndependentY{};
-    // Kalman
-    QDoubleSpinBox* m_clsKalmanQPos{};
-    QDoubleSpinBox* m_clsKalmanQVel{};
-    QDoubleSpinBox* m_clsKalmanRObs{};
-    QDoubleSpinBox* m_clsKalmanLookahead{};
-    QWidget*        m_clsKalmanContainer{};
-    // 天枢页内死区(映射到共享 deadzone_enabled/deadzone_percent)
-    ToggleSwitch*   m_clsDeadzoneEnabled{};
-    QDoubleSpinBox* m_clsDeadzonePercent{};
-    // Card: 死区 (shared deadzone)
-    ToggleSwitch*   m_deadzoneEnabled{};
-    QSlider*        m_deadzonePercent{};
+    // AVA PIDF Mode 1：Kp/Ki/Kd/Kf/Lr 各 XY，及移动死区/限幅。
+    std::array<QDoubleSpinBox*, 10> m_pidfGain{};
+    std::array<QSpinBox*, 4> m_pidfInteger{};
     QSpinBox*       m_lostTargetCacheFrames{};
 
     // Card: 扳机 (trigger FSM)
@@ -165,9 +116,6 @@ private:
     QSpinBox*       m_triggerIntervalJitter{};
     QSpinBox*       m_triggerSwitchCooldown{};
 
-    // Y 轴力度百分比(所有 mover 通用,应用于最终 dy)
-    QSpinBox*       m_yStrengthPercent{};
-
     // Card: 目标选择 (优先级排序列表)
     CardWidget*  m_aimClassCard{};
     QWidget*     m_aimClassContainer{};  // 承载行卡片的容器
@@ -180,6 +128,7 @@ private:
     QRadioButton*       m_aimPathModeLinear{};
     QRadioButton*       m_aimPathModeBezier{};
     QRadioButton*       m_aimPathModeCustom{};
+    QSpinBox*           m_aimPathInfluence{};
     QStackedWidget*     m_aimPathEditorStack{};
     BezierEditor*       m_aimPathBezier{};
     FreehandCurveEditor* m_aimPathFreehand{};

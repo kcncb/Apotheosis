@@ -580,10 +580,12 @@ void DirectMLDetector::inferenceThread()
 
                 std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
                 detectionBuffer.boxes.clear();
+                detectionBuffer.precise_boxes.clear();
                 detectionBuffer.classes.clear();
                 detectionBuffer.confidences.clear();
                 for (const auto& d : filteredDetections) {
                     detectionBuffer.boxes.push_back(d.box);
+                    detectionBuffer.precise_boxes.push_back(d.preciseBox);
                     detectionBuffer.classes.push_back(d.classId);
                     detectionBuffer.confidences.push_back(d.confidence);
                 }

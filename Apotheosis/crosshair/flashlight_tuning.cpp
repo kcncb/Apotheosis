@@ -28,43 +28,40 @@ FlashlightTuning flashlight_derive_tuning(int sensitivity,
     // ---- 灵敏度 → 外观门 (brightness / circularity / contrast / accept bar) ----
     // Higher sensitivity = looser gates + lower accept bar = locks more eagerly.
     t.det.enabled              = true;
-    t.det.brightness_threshold = lerpi(238.0f, 200.0f, s);
-    t.det.min_circularity      = lerpf(0.72f, 0.48f, s);
-    t.det.min_local_contrast   = lerpi(48.0f, 18.0f, s);
-    t.det.open_radius          = 1;
+    t.det.brightness_threshold   = lerpi(246.0f, 214.0f, s);
+    t.det.max_channel_spread     = lerpi(24.0f, 58.0f, s);
+    t.det.min_circularity        = lerpf(0.76f, 0.54f, s);
+    t.det.min_local_contrast     = lerpi(58.0f, 28.0f, s);
+    t.det.min_radial_consistency = lerpf(0.82f, 0.66f, s);
+    t.det.open_radius          = 0;
     t.det.max_spots            = 5;   // internal cap; runtime ranks, loop picks one
-    t.accept_conf_floor        = lerpf(0.50f, 0.24f, s);
+    t.accept_conf_floor        = lerpf(0.72f, 0.58f, s);
 
     // ---- 光斑大小 → 半径档 (scaled to detection resolution) ----
-    // Floor raised to 15 px: in real scenes anything smaller is reflective
-    // sparkle / muzzle micro-glare / floor specular — not a flashlight halo —
-    // and was the dominant source of "too small" rejects polluting both the
-    // preview and the candidate pool. Above 15 px ⇒ real circular light. The
-    // resolution-scaled term still wins at 4K+ (0.005·H grows past 15).
-    t.det.min_radius = std::max(15, static_cast<int>(std::lround(H * 0.005f)));
+    // 旧版固定 15px 下限会在 320 检测分辨率直接吃掉远处手电。现在按分辨率
+    // 缩放到 2~4px，并靠白核、径向一致性与三帧确认抑制小反光。
+    t.det.min_radius = std::max(2, static_cast<int>(std::lround(
+        H * lerpf(0.010f, 0.005f, s))));
     t.det.max_radius = std::max(t.det.min_radius + 1,
-                                static_cast<int>(std::lround(H * lerpf(0.12f, 0.50f, z))));
+                                static_cast<int>(std::lround(H * lerpf(0.08f, 0.34f, z))));
 
     // ---- 抗误锁 → 深度门 ----
-    if (r < 0.20f)      t.depth.mode = 0; // off (≈ old appearance-only behaviour)
-    else if (r < 0.60f) t.depth.mode = 1; // soft penalty
-    else                t.depth.mode = 2; // hard sky-reject (open-sky scenes)
-    t.depth.far_level        = lerpi(22.0f, 55.0f, r);
-    t.depth.sky_cluster_frac = 0.12f;
+    if (r < 0.20f)      t.depth.mode = 0;
+    else if (r < 0.50f) t.depth.mode = 1;
+    else                t.depth.mode = 2; // 严格模式：孤立远景光直接拒绝
+    t.depth.far_level        = lerpi(20.0f, 52.0f, r);
     t.depth.soft_penalty     = lerpf(0.10f, 0.40f, r);
     t.depth.top_band_penalty = (r >= 0.20f) ? lerpf(0.05f, 0.30f, r) : 0.0f;
 
     // ---- 抗误锁 → 时间门 ----
-    t.temporal.confirm_frames  = lerpi(1.0f, 3.0f, r);
-    t.temporal.max_jump_px     = std::max(16.0f, H * 0.06f);
-    t.temporal.drop_after      = 6;
-    t.temporal.onset_bonus     = 0.15f;
-    t.temporal.confirmed_bonus = lerpf(0.0f, 0.12f, r);
+    t.temporal.confirm_frames  = 3; // 与用户约定：连续三个 YOLO 推理帧
+    t.temporal.max_jump_px     = std::max(16.0f, H * 0.10f);
+    t.temporal.drop_after      = 0; // 任一推理帧丢失就立即撤销
+    t.temporal.onset_bonus     = 0.0f;
+    t.temporal.confirmed_bonus = 0.06f;
 
     // ---- 抗误锁 → 联动 ----
-    t.coloc.overlap_frac        = 0.10f;
-    t.coloc.boost               = 0.25f;
-    t.coloc.required_for_orphan = (r >= 0.30f);
+    t.coloc.max_box_widths      = 0.50f;
 
     return t;
 }

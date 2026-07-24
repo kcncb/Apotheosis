@@ -3,15 +3,18 @@
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 #include "widgets/ToggleSwitch.h"
+#include "runtime/aim_telemetry.h"
 
+#include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QHBoxLayout>
 #include <QLabel>
-#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QTimer>
 
 // ────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -44,6 +47,21 @@ DebugPage::DebugPage(QWidget* parent)
     auto& cfg = ConfigManager::instance();
     connect(&cfg, &ConfigManager::configLoaded, this, &DebugPage::onLoadConfig);
     onLoadConfig();
+
+    auto* statusTimer = new QTimer(this);
+    statusTimer->setInterval(250);
+    connect(statusTimer, &QTimer::timeout, this, [this] {
+        if (!m_replayStatus) return;
+        const auto count = runtime::ReplayBuffer::instance().size();
+        if (g_replay_playback_active.load()) {
+            m_replayStatus->setText(QStringLiteral("正在回放：第 %1 / %2 帧")
+                .arg(g_replay_playback_frame.load() + 1)
+                .arg(count));
+        } else {
+            m_replayStatus->setText(QStringLiteral("当前缓冲：%1 帧").arg(count));
+        }
+    });
+    statusTimer->start();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -54,14 +72,28 @@ void DebugPage::buildScreenshotCard(QVBoxLayout* layout) {
     auto* card = new CardWidget(QStringLiteral("截图"), QStringLiteral("camera"));
 
     // ── Screenshot key binding ──
-    m_screenshotKey = new QLineEdit;
-    m_screenshotKey->setReadOnly(true);
-    m_screenshotKey->setPlaceholderText(QStringLiteral("点击此处绑定按键"));
+    m_screenshotKey = new QComboBox;
+    m_screenshotKey->addItem(QStringLiteral("未绑定"), QStringLiteral("None"));
+    m_screenshotKey->addItem(QStringLiteral("鼠标左键"), QStringLiteral("LeftMouseButton"));
+    m_screenshotKey->addItem(QStringLiteral("鼠标右键"), QStringLiteral("RightMouseButton"));
+    m_screenshotKey->addItem(QStringLiteral("鼠标中键"), QStringLiteral("MiddleMouseButton"));
+    for (int i = 1; i <= 12; ++i) {
+        const QString key = QStringLiteral("F%1").arg(i);
+        m_screenshotKey->addItem(key, key);
+    }
+    for (QChar ch = QLatin1Char('A'); ch <= QLatin1Char('Z'); ch = QChar(ch.unicode() + 1)) {
+        const QString key(ch);
+        m_screenshotKey->addItem(key, key);
+    }
     m_screenshotKey->setToolTip(tr(
-        "按下任一绑定按键就把当前画面+检测框保存到 screenshots/ 目录。\n"
-        "用 +/- 增删，可以同时绑定多个键。"));
+        "按下绑定按键后，把当前采集画面保存到 screenshots/ 目录。"));
     card->contentLayout()->addWidget(
         FormKit::fieldRow(QStringLiteral("截图键"), m_screenshotKey));
+    connect(m_screenshotKey, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+                ConfigManager::instance().setScreenshotButton(
+                    m_screenshotKey->itemData(index).toString());
+            });
 
     // ── Screenshot delay ──
     card->contentLayout()->addWidget(
@@ -125,6 +157,33 @@ void DebugPage::buildReplayCard(QVBoxLayout* layout) {
             this, [](double v) {
                 ConfigManager::instance().setReplayPlaybackSpeed(static_cast<float>(v));
             });
+
+    auto* playbackRow = new QHBoxLayout;
+    m_playReplay = new QPushButton(QStringLiteral("播放最近轨迹"));
+    m_playReplay->setProperty("class", "primary");
+    m_stopReplay = new QPushButton(QStringLiteral("停止"));
+    m_replayStatus = new QLabel(QStringLiteral("当前缓冲：0 帧"));
+    m_replayStatus->setProperty("class", "secondary");
+    playbackRow->addWidget(m_playReplay);
+    playbackRow->addWidget(m_stopReplay);
+    playbackRow->addWidget(m_replayStatus);
+    playbackRow->addStretch();
+    card->contentLayout()->addLayout(playbackRow);
+
+    connect(m_playReplay, &QPushButton::clicked, this, [this] {
+        const auto count = runtime::ReplayBuffer::instance().size();
+        if (count == 0) {
+            m_replayStatus->setText(QStringLiteral("没有可回放的数据，请先启用录制并进行一次瞄准。"));
+            return;
+        }
+        ConfigManager::instance().setShowWindow(true);
+        g_replay_playback_frame.store(0);
+        g_replay_playback_active.store(true);
+    });
+    connect(m_stopReplay, &QPushButton::clicked, this, [] {
+        g_replay_playback_active.store(false);
+        g_replay_playback_frame.store(0);
+    });
 
     layout->addWidget(card);
 }
@@ -200,6 +259,10 @@ void DebugPage::onLoadConfig() {
     auto& cfg = ConfigManager::instance();
 
     // Screenshot
+    m_screenshotKey->blockSignals(true);
+    const int keyIndex = m_screenshotKey->findData(cfg.screenshotButton());
+    m_screenshotKey->setCurrentIndex(keyIndex >= 0 ? keyIndex : 0);
+    m_screenshotKey->blockSignals(false);
     m_screenshotDelay->setValue(cfg.screenshotDelay());
 
     // Replay

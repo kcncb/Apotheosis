@@ -222,10 +222,13 @@ std::vector<Detection> postProcessYolo(
                 float dy = det[3];
 
                 Detection detection;
-                detection.box.x = toInt(cx * img_scale);
-                detection.box.y = toInt(cy * img_scale);
-                detection.box.width = toInt((dx - cx) * img_scale);
-                detection.box.height = toInt((dy - cy) * img_scale);
+                detection.preciseBox = cv::Rect2f(
+                    cx * img_scale, cy * img_scale,
+                    (dx - cx) * img_scale, (dy - cy) * img_scale);
+                detection.box.x = toInt(detection.preciseBox.x);
+                detection.box.y = toInt(detection.preciseBox.y);
+                detection.box.width = toInt(detection.preciseBox.width);
+                detection.box.height = toInt(detection.preciseBox.height);
                 detection.confidence = confidence;
                 detection.classId = classId;
 
@@ -264,10 +267,13 @@ std::vector<Detection> postProcessYolo(
             const float half_oh = 0.5f * oh;
 
             Detection det;
-            det.box.x = toInt((cx - half_ow) * img_scale);
-            det.box.y = toInt((cy - half_oh) * img_scale);
-            det.box.width = toInt(ow * img_scale);
-            det.box.height = toInt(oh * img_scale);
+            det.preciseBox = cv::Rect2f(
+                (cx - half_ow) * img_scale, (cy - half_oh) * img_scale,
+                ow * img_scale, oh * img_scale);
+            det.box.x = toInt(det.preciseBox.x);
+            det.box.y = toInt(det.preciseBox.y);
+            det.box.width = toInt(det.preciseBox.width);
+            det.box.height = toInt(det.preciseBox.height);
             det.confidence = maxScore;
             det.classId = maxClassId;
 
@@ -307,10 +313,13 @@ std::vector<Detection> postProcessYolo(
             const float half_oh = 0.5f * oh;
 
             Detection det;
-            det.box.x = toInt((cx - half_ow) * img_scale);
-            det.box.y = toInt((cy - half_oh) * img_scale);
-            det.box.width = toInt(ow * img_scale);
-            det.box.height = toInt(oh * img_scale);
+            det.preciseBox = cv::Rect2f(
+                (cx - half_ow) * img_scale, (cy - half_oh) * img_scale,
+                ow * img_scale, oh * img_scale);
+            det.box.x = toInt(det.preciseBox.x);
+            det.box.y = toInt(det.preciseBox.y);
+            det.box.width = toInt(det.preciseBox.width);
+            det.box.height = toInt(det.preciseBox.height);
             det.confidence = maxScore;
             det.classId = maxClassId;
 
@@ -361,12 +370,15 @@ std::vector<Detection> postProcessYoloDML(
                 float dx = det[2];
                 float dy = det[3];
 
-                cv::Rect box;
-                box.x = static_cast<int>(cx);
-                box.y = static_cast<int>(cy);
-                box.width = static_cast<int>(dx - cx);
-                box.height = static_cast<int>(dy - cy);
-                detections.push_back(Detection{ box, confidence, classId });
+                Detection detection;
+                detection.preciseBox = cv::Rect2f(cx, cy, dx - cx, dy - cy);
+                detection.box.x = static_cast<int>(cx);
+                detection.box.y = static_cast<int>(cy);
+                detection.box.width = static_cast<int>(dx - cx);
+                detection.box.height = static_cast<int>(dy - cy);
+                detection.confidence = confidence;
+                detection.classId = classId;
+                detections.push_back(detection);
             }
         }
         applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);
@@ -388,12 +400,15 @@ std::vector<Detection> postProcessYoloDML(
             float oh = det_output.at<float>(3, i);
             const float half_ow = 0.5f * ow;
             const float half_oh = 0.5f * oh;
-            cv::Rect box;
-            box.x = static_cast<int>(cx - half_ow);
-            box.y = static_cast<int>(cy - half_oh);
-            box.width = static_cast<int>(ow);
-            box.height = static_cast<int>(oh);
-            detections.push_back(Detection{ box, static_cast<float>(score), class_id_point.y });
+            Detection detection;
+            detection.preciseBox = cv::Rect2f(cx - half_ow, cy - half_oh, ow, oh);
+            detection.box.x = static_cast<int>(cx - half_ow);
+            detection.box.y = static_cast<int>(cy - half_oh);
+            detection.box.width = static_cast<int>(ow);
+            detection.box.height = static_cast<int>(oh);
+            detection.confidence = static_cast<float>(score);
+            detection.classId = class_id_point.y;
+            detections.push_back(detection);
         }
     }
     applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);

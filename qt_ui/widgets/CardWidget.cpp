@@ -4,10 +4,11 @@
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPropertyAnimation>
 #include <QVBoxLayout>
 
 namespace {
-constexpr char kAccent[] = "#5E6AD2";
+constexpr char kAccent[] = "#5865D8";
 }
 
 CardWidget::CardWidget(const QString& title, QWidget* parent)
@@ -104,7 +105,36 @@ bool CardWidget::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void CardWidget::toggleCollapsed() {
+    if (m_contentAnimation) {
+        m_contentAnimation->stop();
+        m_contentAnimation->deleteLater();
+        m_contentAnimation = nullptr;
+    }
+
     m_collapsed = !m_collapsed;
-    m_contentWidget->setVisible(!m_collapsed);
     m_chevron->setText(m_collapsed ? QStringLiteral("▸") : QStringLiteral("▾"));
+
+    const int expandedHeight = qMax(m_contentWidget->sizeHint().height(), m_contentWidget->height());
+    if (!m_collapsed) {
+        m_contentWidget->setMaximumHeight(0);
+        m_contentWidget->show();
+    }
+
+    auto* animation = new QPropertyAnimation(m_contentWidget, "maximumHeight", this);
+    m_contentAnimation = animation;
+    animation->setDuration(170);
+    animation->setStartValue(m_collapsed ? expandedHeight : 0);
+    animation->setEndValue(m_collapsed ? 0 : expandedHeight);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(animation, &QPropertyAnimation::finished, this, [this, animation] {
+        if (m_contentAnimation != animation)
+            return;
+        m_contentAnimation = nullptr;
+        if (m_collapsed)
+            m_contentWidget->hide();
+        else
+            m_contentWidget->setMaximumHeight(QWIDGETSIZE_MAX);
+        animation->deleteLater();
+    });
+    animation->start();
 }

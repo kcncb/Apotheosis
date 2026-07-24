@@ -27,8 +27,6 @@ set(SRC
     ../widgets/CardWidget.h
     ../pages/OverviewPage.cpp
     ../pages/OverviewPage.h
-    ../pages/LinksPage.cpp
-    ../pages/LinksPage.h
 )
 
 qt_standard_project_setup()
