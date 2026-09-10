@@ -183,7 +183,7 @@ void process_frame(const cv::Mat& bgrFrame)
         // Detection-freshness gate. This runs on the capture thread against the
         // LIVE frame, but detectionBuffer reflects whatever the detector last
         // finished, which lags by the inference time. When inference stalls
-        // (a slow frame, GPU busy with depth), the buffer keeps reporting a
+        // (a slow frame), the buffer keeps reporting a
         // target that has already left the live frame. Emitting a pivot then
         // lets the mouse loop's crosshair-feedback re-push (Path B) keep
         // driving toward that departed target, oscillating around it — the

@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <Windows.h>
 
@@ -383,10 +383,6 @@ std::vector<std::string> getOnnxFiles()
     return GetModelFilesByExt({ ".onnx", ".oliver" });
 }
 
-std::vector<std::string> getAvailableDepthModels()
-{
-    return GetModelFilesByExtInDir("models/depth", { ".engine", ".onnx", ".trt", ".plan" });
-}
 
 std::vector<std::string>::difference_type getModelIndex(const std::vector<std::string>& engine_models)
 {

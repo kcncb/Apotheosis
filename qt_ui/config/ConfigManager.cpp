@@ -32,8 +32,6 @@ bool ConfigManager::load(const QString& path) {
         setConfidenceThreshold(0.10f);
         setNmsThreshold(0.50f);
         setMaxDetections(100);
-        setDepthInferenceEnabled(true);
-        setDepthModelPath("depth_anything_v2.engine");
 
         setInputMethod("MAKCU");
 
@@ -429,61 +427,6 @@ void ConfigManager::setSmallTargetAreaFrac(float v) {
     emit configChanged();
 }
 
-// --- Depth ---
-
-bool ConfigManager::depthInferenceEnabled() const {
-    return m_settings->value("Depth/depth_inference_enabled", true).toBool();
-}
-
-void ConfigManager::setDepthInferenceEnabled(bool v) {
-    m_settings->setValue("Depth/depth_inference_enabled", v);
-    emit configChanged();
-}
-
-QString ConfigManager::depthModelPath() const {
-    return m_settings->value("Depth/depth_model_path", "depth_anything_v2.engine").toString();
-}
-
-void ConfigManager::setDepthModelPath(const QString& v) {
-    m_settings->setValue("Depth/depth_model_path", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthMaskFps() const {
-    return m_settings->value("Depth/depth_mask_fps", 5).toInt();
-}
-
-void ConfigManager::setDepthMaskFps(int v) {
-    m_settings->setValue("Depth/depth_mask_fps", v);
-    emit configChanged();
-}
-
-int ConfigManager::depthOptInputSize() const {
-    return m_settings->value("Depth/depth_opt_input_size", 518).toInt();
-}
-
-void ConfigManager::setDepthOptInputSize(int v) {
-    m_settings->setValue("Depth/depth_opt_input_size", v);
-    emit configChanged();
-}
-
-float ConfigManager::depthNormClipLowPct() const {
-    return m_settings->value("Depth/depth_norm_clip_low_pct", 0.0).toFloat();
-}
-
-void ConfigManager::setDepthNormClipLowPct(float v) {
-    m_settings->setValue("Depth/depth_norm_clip_low_pct", static_cast<double>(v));
-    emit configChanged();
-}
-
-float ConfigManager::depthNormClipHighPct() const {
-    return m_settings->value("Depth/depth_norm_clip_high_pct", 100.0).toFloat();
-}
-
-void ConfigManager::setDepthNormClipHighPct(float v) {
-    m_settings->setValue("Depth/depth_norm_clip_high_pct", static_cast<double>(v));
-    emit configChanged();
-}
 
 // --- Debug ---
 

@@ -26,9 +26,6 @@
     <ClCompile Include="mem\cpu_affinity_manager.cpp" />
     <ClCompile Include="modules\makcu\src\makcu.cpp" />
     <ClCompile Include="modules\makcu\src\serialport.cpp" />
-    <ClCompile Include="depth\depth_anything_trt.cpp" />
-    <ClCompile Include="depth\depth_mask.cpp" />
-    <ClCompile Include="depth\depth_utils.cpp" />
     <ClCompile Include="runtime\active_hotkey.cpp" />
     <ClCompile Include="runtime\cuda_availability.cpp" />
     <ClCompile Include="runtime\inference_session.cpp" />
@@ -69,9 +66,6 @@
     <ClInclude Include="config\config.h" />
     <ClInclude Include="mem\gpu_resource_manager.h" />
     <ClInclude Include="mem\cpu_affinity_manager.h" />
-    <ClInclude Include="depth\depth_anything_trt.h" />
-    <ClInclude Include="depth\depth_mask.h" />
-    <ClInclude Include="depth\depth_utils.h" />
     <ClInclude Include="runtime\active_hotkey.h" />
     <ClInclude Include="runtime\cuda_availability.h" />
     <ClInclude Include="runtime\inference_session.h" />

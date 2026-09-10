@@ -30,7 +30,6 @@
 #include "pages/TargetPage.h"
 #include "pages/HardwarePage.h"
 #include "pages/AiModelPage.h"
-#include "pages/DepthPage.h"
 #include "pages/HotkeyPage.h"
 #include "pages/AutoBackflashPage.h"
 #include "pages/CrosshairPage.h"
@@ -331,7 +330,6 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"目标"))       { m_targetPage = new TargetPage(); return m_targetPage; }
     if (name == QString::fromUtf8(u8"硬件"))       return new HardwarePage();
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
-    if (name == QString::fromUtf8(u8"深度模型"))   return new DepthPage();
     if (name == QString::fromUtf8(u8"瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"自动背闪"))   return new AutoBackflashPage();
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();

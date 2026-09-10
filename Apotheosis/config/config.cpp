@@ -223,12 +223,6 @@ void Config::writeDefaultsInPlace()
     cpuCoreReserveCount = 4;
     systemMemoryReserveMB = 2048;
 
-    depth_inference_enabled = true;
-    depth_model_path = "depth_anything_v2.engine";
-    depth_opt_input_size = 224;
-    depth_norm_clip_low_pct = 0.0f;
-    depth_norm_clip_high_pct = 100.0f;
-    depth_mask_fps = 5;
 
     screenshot_button = splitString("None");
     screenshot_delay = 500;
@@ -366,17 +360,6 @@ bool Config::loadConfig(const std::string& filename)
     cpuCoreReserveCount = get_long("", "cpuCoreReserveCount", 4);
     systemMemoryReserveMB = get_long("", "systemMemoryReserveMB", 2048);
 
-    // ---------- Depth ----------
-    depth_inference_enabled = get_bool("", "depth_inference_enabled", true);
-    depth_model_path = get_string("", "depth_model_path", "depth_anything_v2.engine");
-    depth_opt_input_size = std::clamp(get_long("", "depth_opt_input_size", 224), 160, 640);
-    depth_norm_clip_low_pct = std::clamp(
-        static_cast<float>(get_double("", "depth_norm_clip_low_pct", 0.0)),
-        0.0f, 50.0f);
-    depth_norm_clip_high_pct = std::clamp(
-        static_cast<float>(get_double("", "depth_norm_clip_high_pct", 100.0)),
-        50.0f, 100.0f);
-    depth_mask_fps = std::max(0, get_long("", "depth_mask_fps", 5));
 
     // ---------- Debug ----------
     show_window = get_bool("", "show_window", true);
@@ -900,15 +883,7 @@ bool Config::saveConfig(const std::string& filename)
         << "cpuCoreReserveCount = " << cpuCoreReserveCount << "\n"
         << "systemMemoryReserveMB = " << systemMemoryReserveMB << "\n\n";
 
-    file << "# Depth\n"
-        << "depth_inference_enabled = " << to_bool_str(depth_inference_enabled) << "\n"
-        << "depth_model_path = " << depth_model_path << "\n"
-        << "depth_opt_input_size = " << depth_opt_input_size << "\n"
-        << std::fixed << std::setprecision(3)
-        << "depth_norm_clip_low_pct = " << depth_norm_clip_low_pct << "\n"
-        << "depth_norm_clip_high_pct = " << depth_norm_clip_high_pct << "\n"
-        << std::setprecision(0)
-        << "depth_mask_fps = " << depth_mask_fps << "\n\n"
+    file << "# Replay\n"
         << "replay_record_enabled = " << to_bool_str(replay_record_enabled) << "\n"
         << "replay_seconds = " << replay_seconds << "\n"
         << "replay_playback_speed = " << replay_playback_speed << "\n\n";

@@ -22,7 +22,6 @@
 
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
-#include "depth/depth_mask.h"
 #include "tensorrt/nvinf.h"
 #include "Apotheosis.h"
 #include "keycodes.h"
@@ -142,12 +141,7 @@ struct CaptureThreadConfig
     int screenshot_delay = 0;
     bool show_window = false;
     bool verbose = false;
-    bool depth_inference_enabled = false;
-    std::string depth_model_path;
-    int depth_mask_fps = 0;
-    int depth_opt_input_size = 224;
-    float depth_norm_clip_low_pct = 0.0f;
-    float depth_norm_clip_high_pct = 100.0f;
+
 };
 
 CaptureThreadConfig SnapshotCaptureConfig()
@@ -178,12 +172,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.screenshot_delay = config.screenshot_delay;
     snapshot.show_window = config.show_window;
     snapshot.verbose = config.verbose;
-    snapshot.depth_inference_enabled = config.depth_inference_enabled;
-    snapshot.depth_model_path = config.depth_model_path;
-    snapshot.depth_mask_fps = config.depth_mask_fps;
-    snapshot.depth_opt_input_size = config.depth_opt_input_size;
-    snapshot.depth_norm_clip_low_pct  = config.depth_norm_clip_low_pct;
-    snapshot.depth_norm_clip_high_pct = config.depth_norm_clip_high_pct;
+
     return snapshot;
 }
 
@@ -818,7 +807,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         // 下载到 host——CMP 40HX 是 PCIe Gen1 卡,每帧 ~500KB D2H 加上事件
         // 同步要 1-2ms,直接把 capture 循环周期撑到 5-6ms 上,这就是"采集到
         // 推理"链路目前只有 180fps 的主要原因。这里把"仅 preview 需要"那条
-        // 路径节流到 ~60fps,严格消费者(depth / DML detector / screenshot /
+        // 路径节流到 ~60fps,严格消费者(DML detector / screenshot /
         // 准星检测激活时)仍然每帧下载,保证功能正确。
         //
         // 用 needFirstPreviewDownload 标记首帧必须下载,而不是把时间戳初始化
@@ -940,22 +929,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             cv::Mat screenshotCpu;
             cv::Mat detectionFrame;
 
-            const bool depthNeeded = currentCfg.depth_inference_enabled;
 
-            static bool lastDepthInferenceEnabled = true;
-            if (!depthNeeded)
-            {
-                if (lastDepthInferenceEnabled)
-                {
-                    auto& depthMask = depth_anything::GetDepthMaskGenerator();
-                    depthMask.reset();
-                }
-                lastDepthInferenceEnabled = false;
-            }
-            else
-            {
-                lastDepthInferenceEnabled = true;
-            }
 
             // Prefer the zero-copy GPU path (nvJPEG output). If the backend
             // doesn't produce GPU frames or the per-iteration GPU queue is
@@ -994,7 +968,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
             // 消费者分两档:
             //   strict — 必须主循环里立刻拿到 host 副本: DML detector(GPU 路径
-            //   不支持)、depth 推理/掩码、本帧截图保存。这些路径本来就在主循环
+            //   不支持)、本帧截图保存。这些路径本来就在主循环
             //   后面用 screenshotCpu,挪不到 worker。
             //   async — preview show_window + 准星颜色检测(active hotkey 时)。
             //   这两个不在 detector / 主路径上,完全甩给 HostCopyWorker 去做 D2H。
@@ -1002,8 +976,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             //   crosshair 的 cv 工作量阻塞 240fps 链路。
             const bool detectorNeedsCpu = !g_detector
                 || g_detector->backend() != DetectorBackend::TensorRT;
-            const bool needCpuStrict = depthNeeded
-                || screenshotRequested
+            const bool needCpuStrict = screenshotRequested
                 || detectorNeedsCpu;
             const bool gpuCrosshairActive = crosshair_runtime::gpu_path_active();
             const bool cpuColourActive = crosshair_runtime::cpu_path_active();
@@ -1076,27 +1049,10 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 crosshair_runtime::process_frame(screenshotCpu);
 
             detectionFrame = screenshotCpu;
-            if (depthNeeded)
-            {
-                // Depth inference now produces only the normalized depth map
-                // (consumed by the flashlight feature). No suppression mask,
-                // colormap, or detection-frame rewrite happens here anymore.
-                depth_anything::DepthMaskOptions maskOptions;
-                maskOptions.fps = currentCfg.depth_mask_fps;
-                maskOptions.opt_input_size = currentCfg.depth_opt_input_size;
-                maskOptions.produce_normalized = false;
-                maskOptions.norm_low_pct  = currentCfg.depth_norm_clip_low_pct;
-                maskOptions.norm_high_pct = currentCfg.depth_norm_clip_high_pct;
-
-                auto& depthMask = depth_anything::GetDepthMaskGenerator();
-                depthMask.update(screenshotCpu, maskOptions, currentCfg.depth_model_path, gLogger);
-            }
 
             if (g_detector)
             {
-                // Zero-copy GPU path when nvJPEG produced a GpuMat. Depth no
-                // longer rewrites detectionFrame on the host (suppression was
-                // removed), so nothing forces the CPU detection path anymore.
+                // Zero-copy GPU path when nvJPEG produced a GpuMat.
                 const bool usedCpuDetectionOverride = false;
                 const bool detectorAcceptsGpu =
                     g_detector->backend() == DetectorBackend::TensorRT;
@@ -1121,7 +1077,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             lastSuccessfulFrameTime = std::chrono::steady_clock::now();
             setCaptureAvailable();
 
-            // strict 消费者(DML/depth/screenshot)路径的 host 副本仍然需要更新
+            // strict 消费者(DML/screenshot)路径的 host 副本仍然需要更新
             // latestFrame——preview/crosshair 已由 worker 自己刷,但走 strict 时
             // 主循环本来就要 sync,顺手刷一下让 preview 拿到最新的也合理。
             if (freshCpuFrameThisIter && !screenshotCpu.empty())

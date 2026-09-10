@@ -106,13 +106,6 @@ void ConfigBridge::syncToRuntime() {
     config.small_target_confidence = cm.smallTargetConfidence();
     config.small_target_area_frac  = cm.smallTargetAreaFrac();
 
-    // --- Depth ---
-    config.depth_inference_enabled = cm.depthInferenceEnabled();
-    config.depth_model_path        = qs(cm.depthModelPath());
-    config.depth_mask_fps          = cm.depthMaskFps();
-    config.depth_opt_input_size    = cm.depthOptInputSize();
-    config.depth_norm_clip_low_pct = cm.depthNormClipLowPct();
-    config.depth_norm_clip_high_pct = cm.depthNormClipHighPct();
 
     // --- Overlay ---
 
@@ -235,13 +228,6 @@ void ConfigBridge::syncFromRuntime()
     cm.setSmallTargetConfidence(config.small_target_confidence);
     cm.setSmallTargetAreaFrac(config.small_target_area_frac);
 
-    // --- Depth ---
-    cm.setDepthInferenceEnabled(config.depth_inference_enabled);
-    cm.setDepthModelPath(qstr(config.depth_model_path));
-    cm.setDepthMaskFps(config.depth_mask_fps);
-    cm.setDepthOptInputSize(config.depth_opt_input_size);
-    cm.setDepthNormClipLowPct(config.depth_norm_clip_low_pct);
-    cm.setDepthNormClipHighPct(config.depth_norm_clip_high_pct);
 
     // --- Overlay ---
 

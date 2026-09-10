@@ -8,7 +8,7 @@
 
 // Per-class routing bucket. The detection pipeline applies these in order:
 // Delete  -> dropped right after NMS, never reaches the tracker or the UI.
-// Filter  -> kept in DetectionBuffer (visible to debug UI / depth mask / etc.)
+// Filter  -> kept in DetectionBuffer (visible to debug UI / etc.)
 //            but excluded from the aim candidate pool.
 // Aim     -> eligible aim candidate; per-hotkey priority decides which one wins.
 enum class ClassBucket
@@ -217,18 +217,6 @@ public:
     int cpuCoreReserveCount = 4;
     int systemMemoryReserveMB = 2048;
 
-    // Depth
-    bool depth_inference_enabled = true;
-    std::string depth_model_path = "depth_anything_v2.engine";
-    // TRT OptimizationProfile 的 OPT 档输入边长(方形)。只在导出 .engine 时被用作
-    // kernel autotune 最优尺寸,改完必须删旧 .engine 重新导出才生效。范围 [160, 640]。
-    int depth_opt_input_size = 224;
-    // 深度归一化时裁掉的低/高百分位。0/100 = 纯 MIN-MAX(传统行为);
-    // 把上限调到 95 可以裁掉极近离群值(贴脸的枪/手),避免远景
-    // 被压扁到 depth_norm≈0、和敌人一起被遮罩误伤。范围 [0, 50] / [50, 100]。
-    float depth_norm_clip_low_pct  = 0.0f;
-    float depth_norm_clip_high_pct = 100.0f;
-    int depth_mask_fps = 5;
 
     // Debug
     bool show_window = true;

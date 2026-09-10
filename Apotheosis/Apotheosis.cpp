@@ -35,8 +35,6 @@
 #include "detector/dml_detector.h"
 #include "auth/auth_state.h"
 
-#include "depth/depth_anything_trt.h"
-#include "depth/depth_mask.h"
 #include "tensorrt/nvinf.h"
 
 #include "MainWindow.h"
@@ -315,11 +313,6 @@ int main(int argc, char* argv[])
         {
             std::cout << "[MAIN] Error with models folder" << std::endl;
             return FatalExit("[MAIN] Error with models folder");
-        }
-        if (!CreateDirectory(L"models\\depth", NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
-        {
-            std::cout << "[MAIN] Error with models\\depth folder" << std::endl;
-            return FatalExit("[MAIN] Error with models\\depth folder");
         }
         if (!CreateDirectory(L"models\\engines", NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
         {

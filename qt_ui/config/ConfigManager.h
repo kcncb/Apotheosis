@@ -102,19 +102,6 @@ public:
     float smallTargetAreaFrac() const;
     void setSmallTargetAreaFrac(float v);
 
-    // Depth
-    bool depthInferenceEnabled() const;
-    void setDepthInferenceEnabled(bool v);
-    QString depthModelPath() const;
-    void setDepthModelPath(const QString& v);
-    int depthMaskFps() const;
-    void setDepthMaskFps(int v);
-    int depthOptInputSize() const;
-    void setDepthOptInputSize(int v);
-    float depthNormClipLowPct() const;
-    void setDepthNormClipLowPct(float v);
-    float depthNormClipHighPct() const;
-    void setDepthNormClipHighPct(float v);
 
     // Macro
     bool macroEnabled() const;
