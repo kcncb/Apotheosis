@@ -7,8 +7,8 @@
 void keyboardListener();
 
 // Backend-agnostic "is any of these keys pressed right now" query. Checks
-// Kmbox Net / MAKCU / Arduino state first (when a physical device is
-// connected and enabled) and falls back to Win32 GetAsyncKeyState.
+// Mouse buttons come from MAKCU/MAKCUNEW; keyboard keys fall back to
+// Win32 GetAsyncKeyState because both devices are mouse-only.
 bool isAnyKeyPressed(const std::vector<std::string>& keys);
 
 #endif // KEYBOARD_LISTENER_H

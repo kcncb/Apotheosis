@@ -74,26 +74,14 @@ public:
     // Hardware
     QString inputMethod() const;
     void setInputMethod(const QString& v);
-    int arduinoBaudrate() const;
-    void setArduinoBaudrate(int v);
-    QString arduinoPort() const;
-    void setArduinoPort(const QString& v);
-    bool arduino16BitMouse() const;
-    void setArduino16BitMouse(bool v);
-    bool arduinoEnableKeys() const;
-    void setArduinoEnableKeys(bool v);
-    QString kmboxNetIp() const;
-    void setKmboxNetIp(const QString& v);
-    QString kmboxNetPort() const;
-    void setKmboxNetPort(const QString& v);
-    QString kmboxNetUuid() const;
-    void setKmboxNetUuid(const QString& v);
-    QString kmboxAPidvid() const;
-    void setKmboxAPidvid(const QString& v);
     int makcuBaudrate() const;
     void setMakcuBaudrate(int v);
     QString makcuPort() const;
     void setMakcuPort(const QString& v);
+    int makcuNewBaudrate() const;
+    void setMakcuNewBaudrate(int v);
+    QString makcuNewPort() const;
+    void setMakcuNewPort(const QString& v);
     // AI
     QString backend() const;
     void setBackend(const QString& v);

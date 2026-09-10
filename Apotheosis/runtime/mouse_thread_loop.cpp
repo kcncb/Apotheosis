@@ -23,6 +23,7 @@
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
+#include "runtime/auto_backflash.h"
 #include "runtime/event_orchestrator.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
@@ -78,9 +79,10 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     PivotResolved out;
     out.x = centre;
     out.y = centre;
+    // 扳机只负责开火判定，不能隐式启用准星找色。否则枪口闪光或准星动画
+    // 会在开火时移动 PID 参考点，表现为锁定后抖动。
     if (!profile || !(profile->crosshair_detect_enabled
-                      || profile->laser_detect_enabled
-                      || profile->trigger_enabled))
+                      || profile->laser_detect_enabled))
         return out;
 
     const auto snap = crosshair_runtime::read();
@@ -163,6 +165,18 @@ struct TriggerState
     void reset() { *this = {}; }
 };
 
+void release_trigger_outputs(MouseThread& mouse, TriggerState& state)
+{
+    if (state.phase == TriggerPhase::Pressed)
+        mouse.releaseLeftButton();
+}
+
+void reset_trigger(MouseThread& mouse, TriggerState& state)
+{
+    release_trigger_outputs(mouse, state);
+    state.reset();
+}
+
 // 对基础延迟做 ±jitter 抖动,结果不小于 0。thread_local RNG 避免锁竞争。
 inline int jitter_ms(int base, int jitter)
 {
@@ -222,6 +236,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
     auto last_tick_ts = std::chrono::steady_clock::time_point::min();
 
     TriggerState trigger;
+    auto_backflash::Controller backflash;
 
     // 事件编排状态:跨帧追踪 target 锁定 id 与鼠标 fire 状态。
     int  ev_last_track_id = -1;   // -1 = 无锁定
@@ -435,23 +450,62 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 ev_fire_pressed = false;
                 engine.reset();
                 aim_path_driver.reset();
-                if (trigger.phase == TriggerPhase::Pressed)
-                    mouseThread.releaseLeftButton();
-                trigger.reset();
+                reset_trigger(mouseThread, trigger);
                 mouseThread.clearQueuedMoves();
                 last_tick_ts = std::chrono::steady_clock::time_point::min();
                 publish_boss_debug(engine);
             }
         }
 
+        auto_backflash::Params backflash_params;
+        backflash_params.enabled = config_snapshot->auto_backflash_enabled;
+        backflash_params.classes = config_snapshot->auto_backflash_classes;
+        backflash_params.confirm_frames = config_snapshot->auto_backflash_confirm_frames;
+        backflash_params.turn_amount = config_snapshot->auto_backflash_turn_amount;
+        backflash_params.turn_speed = config_snapshot->auto_backflash_turn_speed;
+        backflash_params.return_delay_ms = config_snapshot->auto_backflash_return_delay_ms;
+        backflash_params.return_speed = config_snapshot->auto_backflash_return_speed;
+        backflash_params.cooldown_ms = config_snapshot->auto_backflash_cooldown_ms;
+
+        const bool backflash_was_active = backflash.active();
+        std::vector<float> backflash_centers_x;
+        backflash_centers_x.reserve(precise_boxes.size());
+        for (const auto& box : precise_boxes)
+            backflash_centers_x.push_back(box.x + box.width * 0.5f);
+        const bool backflash_active = backflash.tick(
+            backflash_params, hasNewDetection, classes, confidences,
+            backflash_centers_x, static_cast<float>(config_resolution) * 0.5f,
+            std::chrono::steady_clock::now(),
+            [&mouseThread](int dx) {
+                return mouseThread.sendPriorityRawMove(dx, 0);
+            });
+
+        if (!backflash_was_active && backflash_active)
+        {
+            // 背闪接管期间不允许瞄准余量、AimPath 或扳机继续输出；否则
+            // 返回量会混入普通锁敌位移，无法回到触发前视角。
+            mouseThread.clearQueuedMoves();
+            engine.reset();
+            aim_path_driver.reset();
+            reset_trigger(mouseThread, trigger);
+            if (ev_last_track_id != -1)
+                event_orch::publish(event_orch::EventType::TargetLost);
+            if (ev_fire_pressed)
+                event_orch::publish(event_orch::EventType::FireReleased);
+            ev_last_track_id = -1;
+            ev_fire_pressed = false;
+            publish_boss_debug(engine);
+        }
+
+        if (backflash_active)
+            continue;
+
         // No active hotkey → idle. Force-release the fire button and clear
         // any queued moves so the cursor stops drifting after the user lifts
         // the trigger.
         if (!profile_ptr)
         {
-            if (trigger.phase == TriggerPhase::Pressed)
-                mouseThread.releaseLeftButton();
-            trigger.reset();
+            reset_trigger(mouseThread, trigger);
             mouseThread.clearQueuedMoves();
             aim_path_driver.reset();
             if (hasNewDetection)
@@ -488,9 +542,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 engine.reset();
                 publish_boss_debug(engine);
                 mouseThread.clearQueuedMoves();
-                if (trigger.phase == TriggerPhase::Pressed)
-                    mouseThread.releaseLeftButton();
-                trigger.reset();
+                reset_trigger(mouseThread, trigger);
                 event_orch::publish(event_orch::EventType::TargetLost);
                 if (ev_fire_pressed)
                     event_orch::publish(event_orch::EventType::FireReleased);
@@ -603,9 +655,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (out.coasting)
             {
-                if (trigger.phase == TriggerPhase::Pressed)
-                    mouseThread.releaseLeftButton();
-                trigger.reset();
+                reset_trigger(mouseThread, trigger);
             }
 
             // ─── 扳机 FSM ───
@@ -620,6 +670,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now.time_since_epoch()).count();
 
+                const auto begin_fire = [&] {
+                    trigger.in_zone_since_ms = -1;
+                    trigger.phase_time_ms = now_ms;
+                    mouseThread.pressLeftButton();
+                    trigger.phase = TriggerPhase::Pressed;
+                    trigger.phase_target_ms = jitter_ms(
+                        profile_ptr->trigger_fire_duration,
+                        profile_ptr->trigger_duration_jitter_ms);
+                };
+
                 // 转火检测:锁定的 target track_id 变化 → 进 SwitchCooldown。
                 // 首次锁定 (last_fire_track_id == -1) 不算转火,直接走 Idle。
                 if (out.current_track_id != trigger.last_fire_track_id &&
@@ -627,8 +687,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     profile_ptr->trigger_switch_cooldown_ms > 0 &&
                     trigger.phase != TriggerPhase::SwitchCooldown)
                 {
-                    if (trigger.phase == TriggerPhase::Pressed)
-                        mouseThread.releaseLeftButton();
+                    release_trigger_outputs(mouseThread, trigger);
                     trigger.phase = TriggerPhase::SwitchCooldown;
                     trigger.phase_time_ms = now_ms;
                     // 转火冷却本身可以带抖动(用 delay_jitter,懒得再加参数)。
@@ -655,13 +714,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                         }
                         if (now_ms - trigger.in_zone_since_ms >= trigger.phase_target_ms)
                         {
-                            mouseThread.pressLeftButton();
-                            trigger.phase = TriggerPhase::Pressed;
-                            trigger.phase_time_ms = now_ms;
-                            trigger.phase_target_ms = jitter_ms(
-                                profile_ptr->trigger_fire_duration,
-                                profile_ptr->trigger_duration_jitter_ms);
-                            trigger.in_zone_since_ms = -1;
+                            begin_fire();
                         }
                         else
                         {
@@ -683,13 +736,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     }
                     if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
                     {
-                        mouseThread.pressLeftButton();
-                        trigger.phase = TriggerPhase::Pressed;
-                        trigger.phase_time_ms = now_ms;
-                        trigger.phase_target_ms = jitter_ms(
-                            profile_ptr->trigger_fire_duration,
-                            profile_ptr->trigger_duration_jitter_ms);
-                        trigger.in_zone_since_ms = -1;
+                        begin_fire();
                     }
                     break;
                 case TriggerPhase::Pressed:
@@ -721,9 +768,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
             else if (!out.coasting)
             {
-                if (trigger.phase == TriggerPhase::Pressed)
-                    mouseThread.releaseLeftButton();
-                trigger.reset();
+                reset_trigger(mouseThread, trigger);
             }
 
             const float err = static_cast<float>(std::hypot(
@@ -734,9 +779,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         else
         {
             aim_path_driver.reset();
-            if (trigger.phase == TriggerPhase::Pressed)
-                mouseThread.releaseLeftButton();
-            trigger.reset();
+            reset_trigger(mouseThread, trigger);
             mouseThread.clearQueuedMoves();
             g_pid_last_err_px.store(0.0f);
 
@@ -807,9 +850,14 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
     }
 
-    // On shutdown make absolutely sure the fire button is released.
-    mouseThread.releaseLeftButton();
+    // 先清掉普通瞄准余量；停止推理或退出程序时也不能把视角留在
+    // 背身位置。紧急返回发出后不能再次 clear，否则 MAKCUNEW 会取消它。
+    reset_trigger(mouseThread, trigger);
     mouseThread.clearQueuedMoves();
+    const int emergency_return = backflash.emergency_return_delta();
+    if (emergency_return != 0)
+        mouseThread.sendPriorityRawMove(emergency_return, 0);
+
     if (ev_last_track_id != -1)
         event_orch::publish(event_orch::EventType::TargetLost);
     if (ev_fire_pressed)

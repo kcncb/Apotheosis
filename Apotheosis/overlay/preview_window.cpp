@@ -484,7 +484,7 @@ void on_mouse(int event, int x, int y, int /*flags*/, void* /*userdata*/)
             if (!g_clean_frame.empty()) g_clean_frame.copyTo(clean);
         }
         int h = 0, s = 0, v = 0;
-        if (crosshair::SampleRegionHSV(clean, x, y, crosshair::kPickHalf, h, s, v))
+        if (crosshair::SampleRegionHSV(clean, x, y, crosshair::PickHalf(), h, s, v))
             crosshair::SubmitPickedColor(h, s, v);
         // If sampling failed (no frame yet) stay armed so the next click retries.
     }
@@ -505,7 +505,7 @@ void draw_pick_overlay(cv::Mat& canvas)
 
     const int cx = g_pick_cursor_x;
     const int cy = g_pick_cursor_y;
-    const int half = crosshair::kPickHalf;
+    const int half = crosshair::PickHalf();
     const int ringR = half + 4;
 
     // Translucent cyan disc so the spot under the cursor is obvious without
@@ -523,7 +523,7 @@ void draw_pick_overlay(cv::Mat& canvas)
     cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 0, 0), 2, cv::LINE_AA);
     cv::circle(canvas, cv::Point(cx, cy), ringR, bgr(0, 220, 255), 1, cv::LINE_AA);
 
-    // Exact sample footprint (5x5).
+    // Exact sample footprint selected by the active picker.
     cv::Rect foot(cx - half, cy - half, 2 * half + 1, 2 * half + 1);
     foot &= cv::Rect(0, 0, canvas.cols, canvas.rows);
     if (foot.area() > 0)

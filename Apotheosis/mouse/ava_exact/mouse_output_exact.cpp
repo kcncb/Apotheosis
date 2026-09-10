@@ -1,9 +1,3 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#pragma comment(lib, "user32.lib")
-
 #include "mouse_output_exact.hpp"
 
 #include <algorithm>
@@ -216,81 +210,6 @@ void AsyncRelativeMouseExact::worker_loop() {
             }
         }
     }
-}
-
-std::uint32_t emit_relative_move_winapi(WinApiRelativeBackend backend,
-                                        std::int32_t dx,
-                                        std::int32_t dy) noexcept {
-    if (backend == WinApiRelativeBackend::mouse_event) {
-        ::mouse_event(MOUSEEVENTF_MOVE,
-                      static_cast<DWORD>(dx),
-                      static_cast<DWORD>(dy),
-                      0,
-                      0);
-        return 0;
-    }
-
-    INPUT input{};
-    input.type = INPUT_MOUSE;
-    input.mi.dx = dx;
-    input.mi.dy = dy;
-    input.mi.mouseData = 0;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE;
-    input.mi.time = 0;
-    input.mi.dwExtraInfo = 0;
-    return ::SendInput(1, &input, sizeof(INPUT));
-}
-
-std::uint32_t emit_mouse_button_winapi(WinApiRelativeBackend backend,
-                                       MouseButtonChannel channel,
-                                       bool pressed) noexcept {
-    DWORD flags{};
-    DWORD mouse_data{};
-    switch (channel) {
-    case MouseButtonChannel::left:
-        flags = pressed ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-        break;
-    case MouseButtonChannel::right:
-        flags = pressed ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-        break;
-    case MouseButtonChannel::middle:
-        flags = pressed ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
-        break;
-    case MouseButtonChannel::x1:
-        flags = pressed ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
-        mouse_data = XBUTTON1;
-        break;
-    case MouseButtonChannel::x2:
-        flags = pressed ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
-        mouse_data = XBUTTON2;
-        break;
-    default:
-        return 0;
-    }
-
-    if (backend == WinApiRelativeBackend::mouse_event) {
-        ::mouse_event(flags, 0, 0, mouse_data, 0);
-        return 0;
-    }
-    INPUT input{};
-    input.type = INPUT_MOUSE;
-    input.mi.mouseData = mouse_data;
-    input.mi.dwFlags = flags;
-    return ::SendInput(1, &input, sizeof(INPUT));
-}
-
-bool emit_virtual_key_winapi(std::uint16_t virtual_key,
-                             bool pressed) noexcept {
-    if (virtual_key == 0)
-        return false;
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = virtual_key;
-    input.ki.wScan = 0;
-    input.ki.dwFlags = pressed ? 0 : KEYEVENTF_KEYUP;
-    input.ki.time = 0;
-    input.ki.dwExtraInfo = 0;
-    return ::SendInput(1, &input, sizeof(INPUT)) == 1;
 }
 
 } // namespace cvm::recovered

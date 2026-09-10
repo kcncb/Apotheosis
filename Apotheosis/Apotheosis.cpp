@@ -26,7 +26,6 @@
 #include "keyboard_listener.h"
 #include "app_log.h"
 #include "preview_window.h"
-#include "ghub.h"
 #include "other_tools.h"
 #include "mem/gpu_resource_manager.h"
 #include "mem/cpu_affinity_manager.h"
@@ -63,11 +62,8 @@ MouseThread* globalMouseThread = nullptr;
 Config config;
 
 
-GhubMouse* gHub = nullptr;
-Arduino* arduinoSerial = nullptr;
-KmboxNetConnection* kmboxNetSerial = nullptr;
-KmboxAConnection* kmboxASerial = nullptr;
 MakcuConnection* makcuSerial = nullptr;
+MakcuNewConnection* makcuNewSerial = nullptr;
 
 std::atomic<bool> detection_resolution_changed(false);
 std::atomic<bool> capture_method_changed(false);
@@ -117,81 +113,19 @@ static std::thread StartThreadGuarded(const char* name, Func func)
 
 void createInputDevices()
 {
-    if (arduinoSerial)
-    {
-        delete arduinoSerial;
-        arduinoSerial = nullptr;
-    }
-
-    if (gHub)
-    {
-        gHub->mouse_close();
-        delete gHub;
-        gHub = nullptr;
-    }
-
-    if (kmboxNetSerial)
-    {
-        delete kmboxNetSerial;
-        kmboxNetSerial = nullptr;
-    }
-
-    if (kmboxASerial)
-    {
-        delete kmboxASerial;
-        kmboxASerial = nullptr;
-    }
-
     if (makcuSerial)
     {
         delete makcuSerial;
         makcuSerial = nullptr;
     }
 
-    if (config.input_method == "ARDUINO")
+    if (makcuNewSerial)
     {
-        std::cout << "[Mouse] Using Arduino method input." << std::endl;
-        arduinoSerial = new Arduino(config.arduino_port, config.arduino_baudrate);
+        delete makcuNewSerial;
+        makcuNewSerial = nullptr;
     }
-    else if (config.input_method == "GHUB")
-    {
-        std::cout << "[Mouse] Using Ghub method input." << std::endl;
-        gHub = new GhubMouse();
-        if (!gHub->mouse_xy(0, 0))
-        {
-            std::cerr << "[Ghub] Error with opening mouse." << std::endl;
-            delete gHub;
-            gHub = nullptr;
-        }
-    }
-    else if (config.input_method == "KMBOX_NET")
-    {
-        std::cout << "[Mouse] Using KMBOX_NET input." << std::endl;
-        kmboxNetSerial = new KmboxNetConnection(config.kmbox_net_ip, config.kmbox_net_port, config.kmbox_net_uuid);
-        if (!kmboxNetSerial->isOpen())
-        {
-            std::cerr << "[KmboxNet] Error connecting." << std::endl;
-            delete kmboxNetSerial;
-            kmboxNetSerial = nullptr;
-        }
-    }
-    else if (config.input_method == "KMBOX_A")
-    {
-        std::cout << "[Mouse] Using KMBOX_A input." << std::endl;
-        if (config.kmbox_a_pidvid.empty())
-        {
-            std::cerr << "[KmboxA] PIDVID is empty." << std::endl;
-            return;
-        }
-        kmboxASerial = new KmboxAConnection(config.kmbox_a_pidvid);
-        if (!kmboxASerial->isOpen())
-        {
-            std::cerr << "[KmboxA] Error connecting." << std::endl;
-            delete kmboxASerial;
-            kmboxASerial = nullptr;
-        }
-    }
-    else if (config.input_method == "MAKCU")
+
+    if (config.input_method == "MAKCU")
     {
         std::cout << "[Mouse] Using MAKCU input." << std::endl;
         makcuSerial = new MakcuConnection(config.makcu_port, config.makcu_baudrate);
@@ -202,21 +136,28 @@ void createInputDevices()
             makcuSerial = nullptr;
         }
     }
-    else
+    else if (config.input_method == "MAKCUNEW")
     {
-        std::cout << "[Mouse] Using default Win32 method input." << std::endl;
+        std::cout << "[Mouse] Using MAKCUNEW input." << std::endl;
+        makcuNewSerial = new MakcuNewConnection(
+            config.makcu_new_port, config.makcu_new_baudrate);
+        if (!makcuNewSerial->isOpen())
+        {
+            std::cerr << "[MakcuNew] Error connecting." << std::endl;
+            delete makcuNewSerial;
+            makcuNewSerial = nullptr;
+        }
     }
+    else
+        std::cerr << "[Mouse] Unsupported input method: " << config.input_method << std::endl;
 }
 
 void assignInputDevices()
 {
     if (globalMouseThread)
     {
-        globalMouseThread->setArduinoConnection(arduinoSerial);
-        globalMouseThread->setGHubMouse(gHub);
-        globalMouseThread->setKmboxAConnection(kmboxASerial);
-        globalMouseThread->setKmboxNetConnection(kmboxNetSerial);
         globalMouseThread->setMakcuConnection(makcuSerial);
+        globalMouseThread->setMakcuNewConnection(makcuNewSerial);
     }
 }
 
@@ -567,24 +508,10 @@ int main(int argc, char* argv[])
         session.stop();
         g_inference_session = nullptr;
 
-        if (arduinoSerial)
-        {
-            delete arduinoSerial;
-            arduinoSerial = nullptr;
-        }
-
-        if (gHub)
-        {
-            gHub->mouse_close();
-            delete gHub;
-            gHub = nullptr;
-        }
-
-        if (kmboxASerial)
-        {
-            delete kmboxASerial;
-            kmboxASerial = nullptr;
-        }
+        delete makcuSerial;
+        makcuSerial = nullptr;
+        delete makcuNewSerial;
+        makcuNewSerial = nullptr;
 
         return result;
     }

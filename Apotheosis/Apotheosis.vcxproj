@@ -44,15 +44,9 @@
       <ObjectFileName>$(IntDir)makcu_lib.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="modules\makcu\src\serialport.cpp" />
-    <ClCompile Include="mouse\ghub.cpp" />
-    <ClCompile Include="mouse\hid.c" />
-    <ClCompile Include="mouse\KmboxAConnection.cpp" />
-    <ClCompile Include="mouse\kmboxA.cpp" />
-    <ClCompile Include="mouse\kmboxNetConnection.cpp" />
-    <ClCompile Include="mouse\kmbox_net\kmboxNet.cpp" />
     <ClCompile Include="mouse\Makcu.cpp" />
+    <ClCompile Include="mouse\MakcuNew.cpp" />
     <ClCompile Include="mouse\mouse.cpp" />
-    <ClCompile Include="mouse\Arduino.cpp" />
     <ClCompile Include="mouse\AimbotTarget.cpp" />
     <ClCompile Include="runtime\active_hotkey.cpp" />
     <ClCompile Include="runtime\cuda_availability.cpp" />
@@ -97,17 +91,9 @@
     <ClInclude Include="mem\gpu_resource_manager.h" />
     <ClInclude Include="modules\makcu\include\makcu.h" />
     <ClInclude Include="modules\makcu\include\serialport.h" />
-    <ClInclude Include="mouse\ghub.h" />
-    <ClInclude Include="mouse\hidapi.h" />
-    <ClInclude Include="mouse\KmboxAConnection.h" />
-    <ClInclude Include="mouse\kmboxA.h" />
-    <ClInclude Include="mouse\kmboxNetConnection.h" />
-    <ClInclude Include="mouse\kmbox_net\HidTable.h" />
-    <ClInclude Include="mouse\kmbox_net\kmboxNet.h" />
-    <ClInclude Include="mouse\kmbox_net\picture.h" />
     <ClInclude Include="mouse\Makcu.h" />
+    <ClInclude Include="mouse\MakcuNew.h" />
     <ClInclude Include="mouse\mouse.h" />
-    <ClInclude Include="mouse\Arduino.h" />
     <ClInclude Include="mouse\AimbotTarget.h" />
     <ClInclude Include="scr\file_picker.h" />
     <ClInclude Include="Apotheosis.h" />

@@ -107,7 +107,6 @@ Precompiled `.exe` builds are provided for both CUDA (NVIDIA only) and DirectML 
 * [CppWinRT](https://github.com/microsoft/cppwinrt)
 * [GLFW](https://www.glfw.org/)
 * [WindMouse](https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/)
-* [KMBOX](https://www.kmbox.top/)
 * [MAKCU](https://makcu.com)
 * [depth-anything-tensorrt](https://github.com/spacewalk01/depth-anything-tensorrt)
 

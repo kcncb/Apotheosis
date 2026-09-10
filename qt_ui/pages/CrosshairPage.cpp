@@ -198,13 +198,12 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     // 取色:点「取色」后到「检测预览」窗口点一下准星,自动把该处颜色加进下面的颜色表。
     auto* pickRow = new QHBoxLayout;
     m_pickColorBtn = new QPushButton(QStringLiteral("取色"));
-    m_pickColorBtn->setToolTip(QStringLiteral(
-        "点击后切到「检测预览」窗口,在准星颜色上单击一下:\n"
-        "自动取该处 5×5 区域的 HSV(中位数)并按宽容差加一行到下面的颜色表"
-        "(红色跨 0/179 接缝时自动拆成两行)。\n"
-        "预览里右键、或再点一次本按钮可取消;预览窗口没开时会自动打开。"));
-    auto* pickHint = new QLabel(QStringLiteral(
-        "在预览画面点一下取样(固定 5×5 中位数,自动加色)"));
+    m_pickColorBtn->setToolTip(QString::fromUtf8(
+        u8"点击后切到“检测预览”窗口，在准星颜色上单击一下：\n"
+        "只读取点击位置1×1单个像素的HSV，并按宽容差加入颜色表。\n"
+        "预览里右键或再次点击本按钮可取消；预览未开启时会自动打开。"));
+    auto* pickHint = new QLabel(QString::fromUtf8(
+        u8"在预览画面精确点击准星像素（固定1×1取色）"));
     pickHint->setStyleSheet(QStringLiteral("color:#888;"));
     pickRow->addWidget(m_pickColorBtn);
     pickRow->addWidget(pickHint);
@@ -694,7 +693,7 @@ void CrosshairPage::toggleColorPick() {
     if (!cm.showWindow())
         cm.setShowWindow(true);
 
-    m_pickToken = crosshair::ArmColorPick();
+    m_pickToken = crosshair::ArmColorPick(0);
     m_pickColorBtn->setText(QStringLiteral("取消取色"));
     m_pickColorBtn->setStyleSheet(QStringLiteral("color:#D23B3B; font-weight:600;"));
     m_pickTimer->start();

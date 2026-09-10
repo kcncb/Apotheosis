@@ -90,16 +90,10 @@ void ConfigBridge::syncToRuntime() {
     // --- Hardware ---
     std::string oldInput = config.input_method;
     config.input_method      = qs(cm.inputMethod());
-    config.arduino_baudrate  = cm.arduinoBaudrate();
-    config.arduino_port      = qs(cm.arduinoPort());
-    config.arduino_16_bit_mouse = cm.arduino16BitMouse();
-    config.arduino_enable_keys  = cm.arduinoEnableKeys();
-    config.kmbox_net_ip   = qs(cm.kmboxNetIp());
-    config.kmbox_net_port = qs(cm.kmboxNetPort());
-    config.kmbox_net_uuid = qs(cm.kmboxNetUuid());
-    config.kmbox_a_pidvid = qs(cm.kmboxAPidvid());
     config.makcu_baudrate = cm.makcuBaudrate();
     config.makcu_port     = qs(cm.makcuPort());
+    config.makcu_new_baudrate = cm.makcuNewBaudrate();
+    config.makcu_new_port     = qs(cm.makcuNewPort());
     // --- AI ---
     std::string oldModel = config.ai_model;
     config.backend              = qs(cm.backend());
@@ -284,16 +278,10 @@ void ConfigBridge::syncFromRuntime()
 
     // --- Hardware ---
     cm.setInputMethod(qstr(config.input_method));
-    cm.setArduinoBaudrate(config.arduino_baudrate);
-    cm.setArduinoPort(qstr(config.arduino_port));
-    cm.setArduino16BitMouse(config.arduino_16_bit_mouse);
-    cm.setArduinoEnableKeys(config.arduino_enable_keys);
-    cm.setKmboxNetIp(qstr(config.kmbox_net_ip));
-    cm.setKmboxNetPort(qstr(config.kmbox_net_port));
-    cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
-    cm.setKmboxAPidvid(qstr(config.kmbox_a_pidvid));
     cm.setMakcuBaudrate(config.makcu_baudrate);
     cm.setMakcuPort(qstr(config.makcu_port));
+    cm.setMakcuNewBaudrate(config.makcu_new_baudrate);
+    cm.setMakcuNewPort(qstr(config.makcu_new_port));
     // --- AI ---
     cm.setBackend(qstr(config.backend));
     cm.setDmlDeviceId(config.dml_device_id);

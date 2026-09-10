@@ -56,3 +56,25 @@ void launch_circle_mask_bgr_u8(
     unsigned char* img, size_t step,
     int width, int height,
     cudaStream_t stream);
+
+// Compact HSV colour band consumed by the GPU crosshair reducer. Values use
+// OpenCV's HSV ranges: H=0..179, S/V=0..255.
+struct GpuHsvBand
+{
+    int h_low, h_high;
+    int s_min, s_max;
+    int v_min, v_max;
+};
+
+// Search only the supplied ROI of a packed BGR8 frame. The first pass selects
+// the strongest compact colour cluster near the static frame centre; the
+// second pass reduces only that cluster's neighbourhood into
+// result[1..3] = { count, sum_x, sum_y }. result[0] is internal scratch.
+// Coordinates are in the full frame.
+void launch_crosshair_hsv_reduce_bgr_u8(
+    const unsigned char* img, size_t step,
+    int width, int height,
+    int roi_x, int roi_y, int roi_w, int roi_h,
+    const GpuHsvBand* bands, int band_count,
+    int* result,
+    cudaStream_t stream);

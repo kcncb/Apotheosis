@@ -21,7 +21,7 @@ This file is a fresh project-orientation note for AI assistants. It is based on 
   - `Apotheosis/modules/TensorRT-10.15.1.29`
 - CUDA is enabled unconditionally in CMake and uses CUDA Toolkit 12.9 style paths/options.
 - `CUDA_ARCHITECTURES` is set to `75-real;80-real;86-real;89-real;120-real` so the project's own kernels run on Turing through Blackwell client GPUs without driver JIT.
-- Runtime DLL copying is controlled by `AIMBOT_COPY_RUNTIME_DLLS` and copies OpenCV, ONNX Runtime, DirectML, TensorRT, cuDNN, and `ghub_mouse.dll` when present.
+- Runtime DLL copying is controlled by the portable CMake deployment rules.
 - The project does NOT use OpenCV's CUDA modules (cudawarping/cudaimgproc/cudaarithm). All GPU image work goes through `Apotheosis/mem/gpu_image.{h,cpp}` (`GpuImage` / `GpuFrame`), `Apotheosis/capture/gpu_color_ops.{cu,h}` (BGRA->BGR, bilinear resize), and `Apotheosis/detector/cuda_preprocess.{cu,h}` (fused fp16 preprocess), with NPP / nvJPEG / TensorRT / cuDNN handling the rest.
 
 ## Runtime Architecture
@@ -73,7 +73,7 @@ This file is a fresh project-orientation note for AI assistants. It is based on 
   - `draw_ai.cpp`: backend/model/inference options.
   - `draw_capture.cpp`: capture source and resolution/FPS options.
   - `draw_depth.cpp`: depth inference and depth-mask settings.
-  - `draw_hardware.cpp`: Win32/GHUB/Arduino/KMBOX/MAKCU input settings.
+  - `HardwarePage.cpp`: MAKCU/MAKCUNEW input settings.
   - `draw_hotkeys.cpp`: active hotkey profiles and aim classes.
   - `draw_target.cpp`: target selection/aim tuning.
   - `draw_debug.cpp`: preview, replay, screenshots, debug diagnostics.
@@ -84,13 +84,9 @@ This file is a fresh project-orientation note for AI assistants. It is based on 
 
 ## Input and Hardware Backends
 
-- `input_method` options are `WIN32`, `GHUB`, `ARDUINO`, `KMBOX_NET`, `KMBOX_A`, and `MAKCU`.
+- `input_method` options are `MAKCU` and `MAKCUNEW`.
 - Device construction and teardown are centralized in `createInputDevices()` and `assignInputDevices()` in `Apotheosis.cpp`.
-- Implementations live under `Apotheosis/mouse/`:
-  - Win32 behavior is handled inside `MouseThread`/mouse code.
-  - GHUB uses `ghub_mouse.dll` through `ghub.*`.
-  - Arduino uses serial code in `Arduino.*` and the embedded serial library.
-  - KMBOX and MAKCU have separate network/HID/serial wrappers.
+- Implementations live under `Apotheosis/mouse/` as `Makcu.*` and `MakcuNew.*`.
 - Runtime input-method changes are signaled through `input_method_changed` and handled by the mouse loop.
 
 ## Threading and Shared State

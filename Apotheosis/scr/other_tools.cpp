@@ -575,24 +575,6 @@ bool LoadTextureFromMemory(const std::string& imageBase64, ID3D11Device* device,
     return true;
 }
 
-std::string get_ghub_version()
-{
-    std::string line;
-    std::ifstream in("C:\\Program Files\\LGHUB\\version");
-    if (in.is_open())
-    {
-        while (std::getline(in, line)) { }
-    }
-    in.close();
-
-    if (!line.empty())
-    {
-        return line;
-    }
-
-	return "unknown";
-}
-
 bool contains_tensorrt(const std::string& path)
 {
     std::string lowercase_path = path;

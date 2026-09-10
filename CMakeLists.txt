@@ -33,7 +33,6 @@ set(TENSORRT_ROOT "${SRC_DIR}/modules/TensorRT-10.15.1.29" CACHE PATH "TensorRT 
 set(CUDNN_ROOT "$ENV{ProgramW6432}/NVIDIA/CUDNN/v9.17" CACHE PATH "cuDNN 9 root")
 set(MSVC_REDIST_DIR "$ENV{ProgramW6432}/Microsoft Visual Studio/18/Community/VC/Redist/MSVC/14.50.35710/x64/Microsoft.VC145.CRT" CACHE PATH "MSVC x64 runtime redist")
 set(WINDOWS_DEBUGGERS_X64_DIR "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/Debuggers/x64" CACHE PATH "Windows Debugging Tools x64")
-set(GHUB_MOUSE_DLL "${SRC_DIR}/ghub_mouse.dll")
 
 function(pick_latest_dir out_var glob_pattern)
     file(GLOB candidates LIST_DIRECTORIES true "${glob_pattern}")
@@ -173,21 +172,17 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
-    "${SRC_DIR}/mouse/Arduino.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
     ${AVA_EXACT_SOURCES}
-    "${SRC_DIR}/mouse/ghub.cpp"
-    "${SRC_DIR}/mouse/hid.c"
-    "${SRC_DIR}/mouse/KmboxAConnection.cpp"
-    "${SRC_DIR}/mouse/kmboxA.cpp"
-    "${SRC_DIR}/mouse/kmboxNetConnection.cpp"
-    "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
     "${SRC_DIR}/mouse/Makcu.cpp"
+    "${SRC_DIR}/mouse/MakcuNew.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
     "${SRC_DIR}/overlay/app_log.cpp"
     "${SRC_DIR}/overlay/preview_window.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
+    "${SRC_DIR}/runtime/auto_backflash.cpp"
+    "${SRC_DIR}/runtime/auto_backflash.h"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
     "${SRC_DIR}/runtime/config_snapshot.cpp"
     "${SRC_DIR}/runtime/config_snapshot.h"
@@ -208,6 +203,8 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/AiModelPage.h"
     "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
     "${QT_UI_DIR}/pages/AutoCapturePage.h"
+    "${QT_UI_DIR}/pages/AutoBackflashPage.cpp"
+    "${QT_UI_DIR}/pages/AutoBackflashPage.h"
     "${QT_UI_DIR}/pages/CapturePage.cpp"
     "${QT_UI_DIR}/pages/CapturePage.h"
     "${QT_UI_DIR}/pages/CrosshairPage.cpp"
@@ -367,6 +364,7 @@ if(MSVC)
 endif()
 
 target_include_directories(ai PRIVATE
+    "${CMAKE_SOURCE_DIR}"
     "${SRC_DIR}"
     "${SRC_DIR}/auth"
     "${SRC_DIR}/capture"
@@ -438,7 +436,6 @@ target_link_libraries(ai PRIVATE
 copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")
 
 copy_runtime(ai "${OPENCV_DLL}")
-copy_runtime(ai "${GHUB_MOUSE_DLL}")
 copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")
 copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
 copy_runtime(ai "${DIRECTML_DIR}/bin/x64-win/DirectML.dll")
@@ -504,6 +501,15 @@ target_link_libraries(ava_chain_test PRIVATE "${OPENCV_LIB}" user32)
 target_compile_features(ava_chain_test PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(ava_chain_test PRIVATE /utf-8 /Zc:char8_t-)
+endif()
+
+add_executable(auto_backflash_test EXCLUDE_FROM_ALL
+    "${SRC_DIR}/mouse/tests/auto_backflash_test.cpp"
+    "${SRC_DIR}/runtime/auto_backflash.cpp")
+target_include_directories(auto_backflash_test PRIVATE "${SRC_DIR}")
+target_compile_features(auto_backflash_test PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(auto_backflash_test PRIVATE /utf-8 /Zc:char8_t-)
 endif()
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")

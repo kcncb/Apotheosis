@@ -9,6 +9,8 @@
 
 #include "crosshair_detector.h"
 
+class GpuImage;
+
 namespace crosshair_runtime
 {
 
@@ -24,7 +26,7 @@ struct PivotSnapshot
     bool valid = false;
 };
 
-inline constexpr int kFreshnessMs = 150;
+inline constexpr int kFreshnessMs = 20;
 
 // Single-writer (capture thread), multi-reader (mouse loop) snapshot.
 // Implemented as mutex-protected POD — the work is dwarfed by the rest of
@@ -39,6 +41,14 @@ void publish(const PivotSnapshot& snap);
 // supplied BGR detection-resolution frame and publishes a snapshot.
 // Otherwise publishes valid=false. Cheap when off.
 void process_frame(const cv::Mat& bgrFrame);
+
+// Fast path used by TensorRT/GPU capture: ordinary crosshair colour detection
+// runs directly on the device image and transfers only a compact selected-
+// cluster result back to the worker thread. Laser detection retains the CPU
+// path because it needs line fitting and optional crosshair hints.
+bool gpu_path_active();
+bool cpu_path_active();
+void process_gpu_frame(const GpuImage& bgrFrame);
 
 } // namespace crosshair_runtime
 

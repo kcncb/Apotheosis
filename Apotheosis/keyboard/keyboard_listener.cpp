@@ -9,13 +9,12 @@
 #include <iostream>
 #include <thread>
 
-#include "Arduino.h"
 #include "capture.h"
 #include "config.h"
 #include "keyboard_listener.h"
 #include "keycodes.h"
-#include "KmboxNetConnection.h"
 #include "Makcu.h"
+#include "MakcuNew.h"
 #include "mouse.h"
 #include "runtime/active_hotkey.h"
 #include "Apotheosis.h"
@@ -43,23 +42,6 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
         bool pressed = false;
         bool handled_by_device = false;
 
-        if (config.input_method == "KMBOX_NET")
-        {
-            handled_by_device = true;
-            if (kmboxNetSerial && kmboxNetSerial->isOpen())
-            {
-                int state = -1;
-                if (key_name == "LeftMouseButton")        state = kmboxNetSerial->monitorMouseLeft();
-                else if (key_name == "RightMouseButton")  state = kmboxNetSerial->monitorMouseRight();
-                else if (key_name == "MiddleMouseButton") state = kmboxNetSerial->monitorMouseMiddle();
-                else if (key_name == "X1MouseButton")     state = kmboxNetSerial->monitorMouseSide1();
-                else if (key_name == "X2MouseButton")     state = kmboxNetSerial->monitorMouseSide2();
-                else handled_by_device = false;
-
-                pressed = (state == 1);
-            }
-        }
-
         if (!pressed && config.input_method == "MAKCU")
         {
             handled_by_device = true;
@@ -73,14 +55,16 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
             }
         }
 
-        if (!pressed && config.input_method == "ARDUINO" && config.arduino_enable_keys)
+        if (!pressed && config.input_method == "MAKCUNEW")
         {
             handled_by_device = true;
-            if (arduinoSerial && arduinoSerial->isOpen())
+            if (makcuNewSerial && makcuNewSerial->isOpen())
             {
-                if (key_name == "LeftMouseButton")       pressed = arduinoSerial->shooting_active;
-                else if (key_name == "RightMouseButton") pressed = arduinoSerial->zooming_active;
-                else if (key_name == "X2MouseButton")    pressed = arduinoSerial->aiming_active;
+                if (key_name == "LeftMouseButton")       pressed = makcuNewSerial->physicalButtonPressed(1);
+                else if (key_name == "RightMouseButton") pressed = makcuNewSerial->physicalButtonPressed(2);
+                else if (key_name == "MiddleMouseButton") pressed = makcuNewSerial->physicalButtonPressed(3);
+                else if (key_name == "X1MouseButton")    pressed = makcuNewSerial->physicalButtonPressed(4);
+                else if (key_name == "X2MouseButton")    pressed = makcuNewSerial->physicalButtonPressed(5);
                 else handled_by_device = false;
             }
         }

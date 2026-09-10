@@ -1189,6 +1189,7 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_triggerIntervalJitter->setValue(hp.trigger_interval_jitter_ms);
     m_triggerSwitchCooldown->setValue(hp.trigger_switch_cooldown_ms);
 
+
     // 通过 rebuildAimClassList() 重建 (需要读 config)。loadProfileToUi 已经
     // 持有 configMutex, 而 rebuildAimClassList 会重新拿一次同一把递归锁,
     // 这里直接调没问题。
@@ -1278,6 +1279,7 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.trigger_duration_jitter_ms = m_triggerDurationJitter->value();
     hp.trigger_interval_jitter_ms = m_triggerIntervalJitter->value();
     hp.trigger_switch_cooldown_ms = m_triggerSwitchCooldown->value();
+
 
     // 目标选择: 每条目的 class_id / y_offset / min_conf 由行内滑条回调直接写入
     // config.hotkeys[ri].aim_classes, 顺序由 ▲▼ 的 moveAimClass 维护

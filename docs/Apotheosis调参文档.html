@@ -709,7 +709,7 @@ atten = 1.0   Path A (新检测帧)
     <div class="wwh">
       <div class="k">是什么</div><div class="v">满足"准星在命中区 + 枪口稳定"时自动按下左键，保持指定时长后释放。</div>
       <div class="k">为什么有</div><div class="v">把"瞄到位才开火"这个判断从人脑卸到代码上。比无脑 trigger 更克制、更像人。</div>
-      <div class="k">影响</div><div class="v">直接通过当前输入设备（WIN32 / KMBOX / MAKCU / GHUB / Arduino）按下左键，<b>不是只点亮 UI</b>。</div>
+      <div class="k">影响</div><div class="v">直接通过当前 MAKCU / MAKCUNEW 设备按下左键，<b>不是只点亮 UI</b>。</div>
     </div>
 
     <h3>三个开火门</h3>
@@ -802,25 +802,18 @@ atten = 1.0   Path A (新检测帧)
     <!-- ============ 输入设备 ============ -->
     <h2 id="input">输入设备</h2>
     <p>
-      六选一：<code>WIN32 / GHUB / ARDUINO / KMBOX_NET / KMBOX_A / MAKCU</code>。隐蔽性顺序大致是 KMBOX/MAKCU &gt; ARDUINO &gt; GHUB &gt; WIN32。
+      二选一：<code>MAKCU / MAKCUNEW</code>。
     </p>
     <ul>
-      <li><b>WIN32</b>：直接 SendInput，0 硬件成本，但容易被反作弊识别。</li>
-      <li><b>GHUB</b>：调罗技驱动 DLL，比 WIN32 略好。</li>
-      <li><b>ARDUINO</b>：通过串口让 Arduino 模拟 USB HID。需要硬件。</li>
-      <li><b>KMBOX_NET / KMBOX_A</b>：KMBox 系列硬件设备，网络 / USB-A 两种连接方式。</li>
-      <li><b>MAKCU</b>：另一种硬件 mouse-injector。</li>
+      <li><b>MAKCU</b>：原版 MAKCU 串口协议。</li>
+      <li><b>MAKCUNEW</b>：PID_MIRROR 二进制协议，PID 会话固定 4000000 波特率。</li>
     </ul>
 
     <table class="params">
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
-        <tr><td>arduino_port / baudrate</td><td>COM0 / 115200</td><td>Arduino 串口与波特率。</td></tr>
-        <tr><td>arduino_16_bit_mouse</td><td>false</td><td>启用 16-bit 鼠标位移协议。只有固件也支持时才打开。</td></tr>
-        <tr><td>arduino_enable_keys</td><td>false</td><td>允许 Arduino 路径派发按键。智能扳机需要硬件侧支持左键按下/释放。</td></tr>
-        <tr><td>kmbox_net_ip / port / uuid</td><td>10.42.42.42 / 1984 / DEADC0DE</td><td>KMBOX_NET 连接参数。</td></tr>
-        <tr><td>kmbox_a_pidvid</td><td>空</td><td>KMBOX_A USB 设备匹配信息。多设备时用于指定目标硬件。</td></tr>
         <tr><td>makcu_port / baudrate</td><td>COM0 / 115200</td><td>MAKCU 串口与波特率。</td></tr>
+        <tr><td>makcu_new_port / baudrate</td><td>COM0 / 4000000</td><td>MAKCUNEW 串口与固定会话波特率。</td></tr>
       </tbody>
     </table>
     <div class="note">
@@ -832,7 +825,7 @@ atten = 1.0   Path A (新检测帧)
     <div class="wwh">
       <div class="k">是什么</div><div class="v">嵌入 Lua 5.1 解释器,事件 → <code>OnEvent(event, arg)</code> 回调,API 表面与 Logitech G HUB / LGS 一致。</div>
       <div class="k">为什么有</div><div class="v">G HUB 上写好的压枪 / 连点 / 切枪宏可以<b>直接复制粘贴</b>运行,不绑定特定硬件;同时把脚本能力暴露给所有输入后端,而不只是罗技。</div>
-      <div class="k">影响</div><div class="v">脚本里的鼠标移动 / 按键自动走当前 <code>input_method</code>。WIN32 / GHUB / Arduino / KMBOX_NET / KMBOX_A / MAKCU 全部支持。脚本不感知硬件后端。</div>
+      <div class="k">影响</div><div class="v">脚本里的鼠标移动 / 按键自动走当前 <code>input_method</code>，仅支持 MAKCU 与 MAKCUNEW。</div>
     </div>
 
     <table class="params">
@@ -849,9 +842,9 @@ atten = 1.0   Path A (新检测帧)
       <thead><tr><th>分组</th><th>函数</th><th>说明</th></tr></thead>
       <tbody>
         <tr><td rowspan="3">运动</td><td><code>MoveMouseRelative(dx, dy)</code></td><td>相对移动,走当前输入后端。</td></tr>
-        <tr><td><code>MoveMouseTo(x, y)</code></td><td>归一化 0..65535 绝对坐标(走 SetCursorPos)。</td></tr>
+        <tr><td><code>MoveMouseTo(x, y)</code></td><td>读取当前坐标后，通过所选 MAKCU 后端发送相对差值。</td></tr>
         <tr><td><code>MoveMouseWheel(clicks)</code></td><td>滚轮,正上负下。</td></tr>
-        <tr><td rowspan="3">鼠标按键</td><td><code>PressMouseButton(n)</code> / <code>ReleaseMouseButton(n)</code></td><td>n = 1..5 (LMB/RMB/MMB/X1/X2)。<b>X1/X2 在 KMBOX_NET / KMBOX_A 上走原生 side1/side2 通道</b>,不退回 SendInput。</td></tr>
+        <tr><td rowspan="3">鼠标按键</td><td><code>PressMouseButton(n)</code> / <code>ReleaseMouseButton(n)</code></td><td>n = 1..5 (LMB/RMB/MMB/X1/X2)，通过所选 MAKCU 后端发送。</td></tr>
         <tr><td><code>PressAndReleaseMouseButton(n)</code></td><td>带 8 ms 内置 dwell。</td></tr>
         <tr><td><code>IsMouseButtonPressed(n)</code></td><td>实时查物理状态。</td></tr>
         <tr><td rowspan="3">键盘</td><td><code>PressKey(...)</code> / <code>ReleaseKey(...)</code> / <code>PressAndReleaseKey(...)</code></td><td>变长参数,每个参数可以是字符串(如 <code>"lalt"</code>、<code>"f1"</code>、<code>"a"</code>)或 VK 码整数。</td></tr>

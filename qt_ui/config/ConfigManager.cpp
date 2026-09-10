@@ -35,7 +35,7 @@ bool ConfigManager::load(const QString& path) {
         setDepthInferenceEnabled(true);
         setDepthModelPath("depth_anything_v2.engine");
 
-        setInputMethod("WIN32");
+        setInputMethod("MAKCU");
 
         HotkeyData hk;
         hk.name = "Aim";
@@ -301,83 +301,12 @@ void ConfigManager::setCaptureCardCropHeight(int v) {
 // --- Hardware ---
 
 QString ConfigManager::inputMethod() const {
-    return m_settings->value("Hardware/input_method", "WIN32").toString();
+    const QString value = m_settings->value("Hardware/input_method", "MAKCU").toString();
+    return value == QStringLiteral("MAKCUNEW") ? value : QStringLiteral("MAKCU");
 }
 
 void ConfigManager::setInputMethod(const QString& v) {
     m_settings->setValue("Hardware/input_method", v);
-    emit configChanged();
-}
-
-int ConfigManager::arduinoBaudrate() const {
-    return m_settings->value("Hardware/arduino_baudrate", 115200).toInt();
-}
-
-void ConfigManager::setArduinoBaudrate(int v) {
-    m_settings->setValue("Hardware/arduino_baudrate", v);
-    emit configChanged();
-}
-
-QString ConfigManager::arduinoPort() const {
-    return m_settings->value("Hardware/arduino_port", "COM0").toString();
-}
-
-void ConfigManager::setArduinoPort(const QString& v) {
-    m_settings->setValue("Hardware/arduino_port", v);
-    emit configChanged();
-}
-
-bool ConfigManager::arduino16BitMouse() const {
-    return m_settings->value("Hardware/arduino_16_bit_mouse", false).toBool();
-}
-
-void ConfigManager::setArduino16BitMouse(bool v) {
-    m_settings->setValue("Hardware/arduino_16_bit_mouse", v);
-    emit configChanged();
-}
-
-bool ConfigManager::arduinoEnableKeys() const {
-    return m_settings->value("Hardware/arduino_enable_keys", false).toBool();
-}
-
-void ConfigManager::setArduinoEnableKeys(bool v) {
-    m_settings->setValue("Hardware/arduino_enable_keys", v);
-    emit configChanged();
-}
-
-QString ConfigManager::kmboxNetIp() const {
-    return m_settings->value("Hardware/kmbox_net_ip", "10.42.42.42").toString();
-}
-
-void ConfigManager::setKmboxNetIp(const QString& v) {
-    m_settings->setValue("Hardware/kmbox_net_ip", v);
-    emit configChanged();
-}
-
-QString ConfigManager::kmboxNetPort() const {
-    return m_settings->value("Hardware/kmbox_net_port", "1984").toString();
-}
-
-void ConfigManager::setKmboxNetPort(const QString& v) {
-    m_settings->setValue("Hardware/kmbox_net_port", v);
-    emit configChanged();
-}
-
-QString ConfigManager::kmboxNetUuid() const {
-    return m_settings->value("Hardware/kmbox_net_uuid", "DEADC0DE").toString();
-}
-
-void ConfigManager::setKmboxNetUuid(const QString& v) {
-    m_settings->setValue("Hardware/kmbox_net_uuid", v);
-    emit configChanged();
-}
-
-QString ConfigManager::kmboxAPidvid() const {
-    return m_settings->value("Hardware/kmbox_a_pidvid", "").toString();
-}
-
-void ConfigManager::setKmboxAPidvid(const QString& v) {
-    m_settings->setValue("Hardware/kmbox_a_pidvid", v);
     emit configChanged();
 }
 
@@ -396,6 +325,24 @@ QString ConfigManager::makcuPort() const {
 
 void ConfigManager::setMakcuPort(const QString& v) {
     m_settings->setValue("Hardware/makcu_port", v);
+    emit configChanged();
+}
+
+int ConfigManager::makcuNewBaudrate() const {
+    return m_settings->value("Hardware/makcu_new_baudrate", 115200).toInt();
+}
+
+void ConfigManager::setMakcuNewBaudrate(int v) {
+    m_settings->setValue("Hardware/makcu_new_baudrate", v);
+    emit configChanged();
+}
+
+QString ConfigManager::makcuNewPort() const {
+    return m_settings->value("Hardware/makcu_new_port", "COM0").toString();
+}
+
+void ConfigManager::setMakcuNewPort(const QString& v) {
+    m_settings->setValue("Hardware/makcu_new_port", v);
     emit configChanged();
 }
 

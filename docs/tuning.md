@@ -234,7 +234,7 @@ move  = lround(P + I + D)
 | `smart_trigger_hold_ms` | `45` | `5..5000` | 每次按下左键的时长 |
 | `smart_trigger_cooldown_ms` | `55` | `0..5000` | 松开后到下一枪的强制冷却,控制连发节奏 |
 
-**机制:** 纯几何扳机 —— 把当前准星(开启准星颜色检测时用真实准星位置,否则用检测画面中心)与锁定目标的轴对齐矩形(瞄准锚点 ± `半宽×hit_scale_x` / `半高×hit_scale_y`)比较;判定用目标的**观测位置**而非卡尔曼预测点,因此预测提前量不会影响开火时机。准星连续停留满 `reaction_ms` 后按下、保持 `hold_ms` 松开、再冷却 `cooldown_ms`。开火由 `MouseThread` 走当前 `input_method` 后端发左键(包括 KMBOX/MAKCU/Arduino)。热键松开、开关切关、目标丢失或会话结束都会强制释放,不会卡键。
+**机制:** 纯几何扳机 —— 把当前准星(开启准星颜色检测时用真实准星位置,否则用检测画面中心)与锁定目标的轴对齐矩形(瞄准锚点 ± `半宽×hit_scale_x` / `半高×hit_scale_y`)比较;判定用目标的**观测位置**而非卡尔曼预测点,因此预测提前量不会影响开火时机。准星连续停留满 `reaction_ms` 后按下、保持 `hold_ms` 松开、再冷却 `cooldown_ms`。开火由 `MouseThread` 走当前 MAKCU/MAKCUNEW 后端发左键。热键松开、开关切关、目标丢失或会话结束都会强制释放,不会卡键。
 
 ### 4.7 锁定切换迟滞
 
@@ -377,29 +377,7 @@ score *= 1 + threat_weight * (threat − 0.5)              (近似;实际看代�
 
 | 键 | 默认 | 说明 |
 |---|---:|---|
-| `input_method` | `WIN32` | 六选一:`WIN32` / `GHUB` / `ARDUINO` / `KMBOX_NET` / `KMBOX_A` / `MAKCU` |
-
-各后端字段:
-
-### Arduino
-| 键 | 默认 |
-|---|---:|
-| `arduino_port` | `COM0` |
-| `arduino_baudrate` | `115200` |
-| `arduino_16_bit_mouse` | `false` |
-| `arduino_enable_keys` | `false` |
-
-### KMBOX_NET
-| 键 | 默认 |
-|---|---:|
-| `kmbox_net_ip` | `10.42.42.42` |
-| `kmbox_net_port` | `1984` |
-| `kmbox_net_uuid` | `DEADC0DE` |
-
-### KMBOX_A
-| 键 | 默认 | 说明 |
-|---|---:|---|
-| `kmbox_a_pidvid` | `""` | 8 位十六进制,格式 `PPPPVVVV`(PID+VID 拼接) |
+| `input_method` | `MAKCU` | 二选一:`MAKCU` / `MAKCUNEW` |
 
 ### MAKCU
 | 键 | 默认 |
@@ -407,12 +385,11 @@ score *= 1 + threat_weight * (threat − 0.5)              (近似;实际看代�
 | `makcu_port` | `COM0` |
 | `makcu_baudrate` | `115200` |
 
-### GHUB
-没有自己的 ini 字段。需要 `ghub_mouse.dll` 在 exe 同目录,且 G HUB 服务在跑。
-
-### 调参剧本
-- **反作弊敏感**:KMBOX_NET / KMBOX_A / MAKCU 优先,Win32 兜底。GHUB 走 Logitech 设备签名,中等隐蔽
-- **所有按键都被反作弊忽略**:多半是 Win32 走 SendInput 被检测到,换硬件后端
+### MAKCUNEW
+| 键 | 默认 |
+|---|---:|
+| `makcu_new_port` | `COM0` |
+| `makcu_new_baudrate` | 默认 `115200`；仅显式设为 `4000000` 时自动切速 |
 
 ---
 
@@ -424,7 +401,7 @@ score *= 1 + threat_weight * (threat − 0.5)              (近似;实际看代�
 | `macro_script_path` | `""` | `.lua` 文件绝对路径(支持 UTF-8 含中文) |
 | `macro_primary_button_events` | `false` | 等同脚本里 `EnablePrimaryMouseButtonEvents(true)`。默认关闭和 G HUB 一致 |
 
-实现的 G HUB API:`OnEvent` / `MoveMouseRelative` / `MoveMouseTo` / `MoveMouseWheel` / `PressMouseButton` (1..5,X1/X2 走 KMBOX 原生 side1/side2) / `ReleaseMouseButton` / `PressAndReleaseMouseButton` / `PressKey` (变长) / `ReleaseKey` / `PressAndReleaseKey` / `Sleep` / `GetRunningTime` / `IsMouseButtonPressed` / `IsModifierPressed` / `IsKeyLockOn` / `IsKeyDown` / `GetMousePosition` / `OutputLogMessage` (printf) / `OutputDebugMessage` / `ClearLog` / `EnablePrimaryMouseButtonEvents` / `GetMKeyState` / `SetMKeyState` / `PlayMacro` / `AbortMacro` / `SetBacklightColor` (no-op) / `RestoreBacklightColor` / `GetDate` / `print`。
+实现的 G HUB API:`OnEvent` / `MoveMouseRelative` / `MoveMouseTo` / `MoveMouseWheel` / `PressMouseButton` (1..5) / `ReleaseMouseButton` / `PressAndReleaseMouseButton` / `PressKey` (变长) / `ReleaseKey` / `PressAndReleaseKey` / `Sleep` / `GetRunningTime` / `IsMouseButtonPressed` / `IsModifierPressed` / `IsKeyLockOn` / `IsKeyDown` / `GetMousePosition` / `OutputLogMessage` (printf) / `OutputDebugMessage` / `ClearLog` / `EnablePrimaryMouseButtonEvents` / `GetMKeyState` / `SetMKeyState` / `PlayMacro` / `AbortMacro` / `SetBacklightColor` (no-op) / `RestoreBacklightColor` / `GetDate` / `print`。
 
 输入分发自动走当前 `input_method`,脚本无需关心后端。
 

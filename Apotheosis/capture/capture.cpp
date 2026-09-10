@@ -491,6 +491,65 @@ private:
     bool stop_{ false };
     std::thread thread_;
 };
+
+// Dedicated latest-frame GPU worker for ordinary crosshair colour detection.
+// It never downloads the image: CUDA transfers only {count,sumX,sumY} after
+// reducing the tiny centre ROI. Submit is non-blocking and stale work is
+// replaced when capture briefly outruns the worker.
+class GpuCrosshairWorker
+{
+public:
+    GpuCrosshairWorker() : thread_([this]() { Run(); }) {}
+    ~GpuCrosshairWorker() { Stop(); }
+
+    void Submit(GpuImage gpu)
+    {
+        if (gpu.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (stop_) return;
+            pending_ = std::move(gpu);
+            hasPending_ = true;
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void Stop()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_one();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void Run()
+    {
+        while (true)
+        {
+            GpuImage gpu;
+            {
+                std::unique_lock<std::mutex> lk(mutex_);
+                cv_.wait(lk, [this]() { return stop_ || hasPending_; });
+                if (stop_ && !hasPending_) break;
+                gpu = std::move(pending_);
+                pending_.release();
+                hasPending_ = false;
+            }
+            if (!gpu.empty())
+                crosshair_runtime::process_gpu_frame(gpu);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    GpuImage pending_;
+    bool hasPending_{ false };
+    bool stop_{ false };
+    std::thread thread_;
+};
 } // namespace
 
 std::vector<cv::Mat> getBatchFromQueue(int batch_size)
@@ -803,6 +862,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         // 完全没有 cudaEventSynchronize / cudaMemcpy2D / cv::Mat::copyTo 这些
         // host-blocking 操作,PCIe Gen1 的 D2H 也不会再压低 240fps 链路。
         HostCopyWorker hostCopyWorker;
+        GpuCrosshairWorker gpuCrosshairWorker;
 
         while (!shouldExit && !session_stop_requested.load())
         {
@@ -950,12 +1010,17 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             const bool needCpuStrict = depthNeeded
                 || screenshotRequested
                 || detectorNeedsCpu;
-            const bool crosshairActive =
-                (runtime::g_active_hotkey_index.load() >= 0);
-            const bool needCpuAsync = currentCfg.show_window || crosshairActive;
+            const bool gpuCrosshairActive = crosshair_runtime::gpu_path_active();
+            const bool cpuColourActive = crosshair_runtime::cpu_path_active();
+            const bool needCpuAsync = currentCfg.show_window || cpuColourActive;
 
             if (!screenshotGpu.empty())
             {
+                // Ordinary crosshair colour now sees every captured GPU frame.
+                // The worker launches only a tiny ROI kernel and copies 12 bytes.
+                if (gpuCrosshairActive)
+                    gpuCrosshairWorker.Submit(screenshotGpu);
+
                 if (needCpuStrict)
                 {
                     // 主循环必须同步等 host 副本,接受这部分阻塞。
@@ -964,19 +1029,18 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 }
                 if (needCpuAsync)
                 {
-                    // preview 节流到 ~60fps;准星检测 active 时按 active 节流到
-                    // ~120fps(给手感留点,即便 GPU mask kernel 没完成 worker
-                    // 等就是了,这部分等待在 worker 线程,不挤占主循环)。
+                    // Preview stays near 60fps. Only laser line fitting retains
+                    // the CPU colour path; ordinary crosshair colour runs above.
                     const auto now = std::chrono::steady_clock::now();
                     auto interval = kPreviewSubmitInterval;
-                    if (crosshairActive)
+                    if (cpuColourActive)
                         interval = std::chrono::microseconds(8000); // ~120fps
                     if (needFirstPreviewSubmit
                         || now - lastPreviewSubmitTime >= interval)
                     {
                         // 共享引用给 worker;detector 拿原引用 std::move 走也没
                         // 关系,storage 是 shared_ptr。
-                        hostCopyWorker.Submit(screenshotGpu, crosshairActive);
+                        hostCopyWorker.Submit(screenshotGpu, cpuColourActive);
                         lastPreviewSubmitTime = now;
                         needFirstPreviewSubmit = false;
                     }
@@ -1009,6 +1073,12 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             // host 重做一次 OpenCV 圆形掩码。gpuMaskApplied 守卫避免重复 mask。
             if (currentCfg.circle_mask && !gpuMaskApplied && !screenshotCpu.empty())
                 screenshotCpu = apply_circle_mask(screenshotCpu);
+
+            // CPU-only capture / DML fallback has no device image to search.
+            // Preserve the established detector on that path.
+            if (screenshotGpu.empty() && (gpuCrosshairActive || cpuColourActive)
+                && !screenshotCpu.empty())
+                crosshair_runtime::process_frame(screenshotCpu);
 
             detectionFrame = screenshotCpu;
             if (depthNeeded)

@@ -19,6 +19,7 @@ public:
     void press(int button);
     void release(int button);
     void move(int x, int y);
+    void wheel(int delta);
 
     bool aiming_active;
     bool shooting_active;

@@ -9,12 +9,9 @@
 #include "trt_detector.h"
 #include "dml_detector.h"
 #include "mouse.h"
-#include "Arduino.h"
-#include "ghub.h"
 #include "detection_buffer.h"
-#include "KmboxNetConnection.h"
-#include "KmboxAConnection.h"
 #include "Makcu.h"
+#include "MakcuNew.h"
 
 namespace runtime { class InferenceSession; }
 
@@ -25,11 +22,8 @@ extern IDetector* g_detector;
 extern runtime::InferenceSession* g_inference_session;
 extern DetectionBuffer detectionBuffer;
 extern MouseThread* globalMouseThread;
-extern GhubMouse* gHub;
-extern Arduino* arduinoSerial;
-extern KmboxNetConnection* kmboxNetSerial;
-extern KmboxAConnection* kmboxASerial;
 extern MakcuConnection* makcuSerial;
+extern MakcuNewConnection* makcuNewSerial;
 extern std::atomic<bool> input_method_changed;
 // `aiming` is a convenience mirror of "any aim hotkey pressed"; for the
 // actual active profile index consult runtime::g_active_hotkey_index.

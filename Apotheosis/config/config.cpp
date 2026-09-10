@@ -336,17 +336,16 @@ bool Config::loadConfig(const std::string& filename)
     circle_mask = get_bool("", "circle_mask", true);
 
     // ---------- Hardware ----------
-    input_method = get_string("", "input_method", "WIN32");
-    arduino_baudrate = get_long("", "arduino_baudrate", 115200);
-    arduino_port = get_string("", "arduino_port", "COM0");
-    arduino_16_bit_mouse = get_bool("", "arduino_16_bit_mouse", false);
-    arduino_enable_keys = get_bool("", "arduino_enable_keys", false);
-    kmbox_net_ip = get_string("", "kmbox_net_ip", "10.42.42.42");
-    kmbox_net_port = get_string("", "kmbox_net_port", "1984");
-    kmbox_net_uuid = get_string("", "kmbox_net_uuid", "DEADC0DE");
-    kmbox_a_pidvid = get_string("", "kmbox_a_pidvid", "");
+    input_method = get_string("", "input_method", "MAKCU");
+    if (input_method != "MAKCU" && input_method != "MAKCUNEW")
+        input_method = "MAKCU";
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
+    // 只有显式配置为4M时，MAKCUNEW才会发送START_PID并执行自动切速。
+    makcu_new_baudrate = std::clamp(
+        static_cast<int>(get_long("", "makcu_new_baudrate", 115200)),
+        1200, 4000000);
+    makcu_new_port = get_string("", "makcu_new_port", "COM0");
     // ---------- AI ----------
     backend = get_string("", "backend", "TRT");
     dml_device_id = get_long("", "dml_device_id", 0);
@@ -409,6 +408,33 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_output_dir = get_string("", "auto_capture_output_dir",
                                          "screenshots/auto");
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
+
+    // ── 自动背闪 ──
+    auto_backflash_enabled = get_bool("", "auto_backflash_enabled", false);
+    auto_backflash_classes.clear();
+    for (const auto& value : splitString(
+             get_string("", "auto_backflash_classes", "")))
+    {
+        if (value.empty()) continue;
+        try { auto_backflash_classes.push_back(std::stoi(value)); }
+        catch (...) { /* 忽略损坏的类别项 */ }
+    }
+    std::sort(auto_backflash_classes.begin(), auto_backflash_classes.end());
+    auto_backflash_classes.erase(
+        std::unique(auto_backflash_classes.begin(), auto_backflash_classes.end()),
+        auto_backflash_classes.end());
+    auto_backflash_confirm_frames = std::clamp(
+        get_long("", "auto_backflash_confirm_frames", 2), 1, 8);
+    auto_backflash_turn_amount = std::clamp(
+        get_long("", "auto_backflash_turn_amount", 4000), 100, 30000);
+    auto_backflash_turn_speed = std::clamp(
+        get_long("", "auto_backflash_turn_speed", 75), 1, 100);
+    auto_backflash_return_delay_ms = std::clamp(
+        get_long("", "auto_backflash_return_delay_ms", 800), 0, 5000);
+    auto_backflash_return_speed = std::clamp(
+        get_long("", "auto_backflash_return_speed", 100), 1, 100);
+    auto_backflash_cooldown_ms = std::clamp(
+        get_long("", "auto_backflash_cooldown_ms", 1500), 0, 10000);
 
     // ---------- Event orchestrator rules ----------
     event_rules_serialized.clear();
@@ -896,6 +922,7 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_interval_jitter_ms = std::clamp(hk.trigger_interval_jitter_ms, 0, 500);
         hk.trigger_switch_cooldown_ms = std::clamp(hk.trigger_switch_cooldown_ms, 0, 5000);
 
+
         // 目标选择 clamp
         for (auto& ac : hk.aim_classes)
         {
@@ -981,18 +1008,12 @@ bool Config::saveConfig(const std::string& filename)
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
 
     file << "# Hardware / input device\n"
-        << "# WIN32 | GHUB | ARDUINO | KMBOX_NET | KMBOX_A | MAKCU\n"
+        << "# MAKCU | MAKCUNEW\n"
         << "input_method = " << input_method << "\n"
-        << "arduino_baudrate = " << arduino_baudrate << "\n"
-        << "arduino_port = " << arduino_port << "\n"
-        << "arduino_16_bit_mouse = " << to_bool_str(arduino_16_bit_mouse) << "\n"
-        << "arduino_enable_keys = " << to_bool_str(arduino_enable_keys) << "\n"
-        << "kmbox_net_ip = " << kmbox_net_ip << "\n"
-        << "kmbox_net_port = " << kmbox_net_port << "\n"
-        << "kmbox_net_uuid = " << kmbox_net_uuid << "\n"
-        << "kmbox_a_pidvid = " << kmbox_a_pidvid << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
-        << "makcu_port = " << makcu_port << "\n\n";
+        << "makcu_port = " << makcu_port << "\n"
+        << "makcu_new_baudrate = " << makcu_new_baudrate << "\n"
+        << "makcu_new_port = " << makcu_new_port << "\n\n";
 
     file << "# AI\n"
         << "backend = " << backend << "\n"
@@ -1077,6 +1098,20 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
         << "auto_capture_save_label = " << to_bool_str(auto_capture_save_label) << "\n\n";
 
+    std::vector<std::string> backflash_classes;
+    backflash_classes.reserve(auto_backflash_classes.size());
+    for (int class_id : auto_backflash_classes)
+        backflash_classes.push_back(std::to_string(class_id));
+    file << "# 自动背闪（朝检测框反方向转身，移动量会原样反向偿还）\n"
+        << "auto_backflash_enabled = " << to_bool_str(auto_backflash_enabled) << "\n"
+        << "auto_backflash_classes = " << joinStrings(backflash_classes) << "\n"
+        << "auto_backflash_confirm_frames = " << auto_backflash_confirm_frames << "\n"
+        << "auto_backflash_turn_amount = " << auto_backflash_turn_amount << "\n"
+        << "auto_backflash_turn_speed = " << auto_backflash_turn_speed << "\n"
+        << "auto_backflash_return_delay_ms = " << auto_backflash_return_delay_ms << "\n"
+        << "auto_backflash_return_speed = " << auto_backflash_return_speed << "\n"
+        << "auto_backflash_cooldown_ms = " << auto_backflash_cooldown_ms << "\n\n";
+
     file << "# Event orchestrator (rule per line, format:\n"
             "#   v2|name|enabled|event|mode|count|interval|cooldown|type,a,b|...)\n"
         << "event_rule_count = " << event_rules_serialized.size() << "\n";
@@ -1136,8 +1171,8 @@ bool Config::saveConfig(const std::string& filename)
              << "trigger_delay_jitter_ms = "    << hk.trigger_delay_jitter_ms    << "\n"
              << "trigger_duration_jitter_ms = " << hk.trigger_duration_jitter_ms << "\n"
              << "trigger_interval_jitter_ms = " << hk.trigger_interval_jitter_ms << "\n"
-             << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
-             << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
+              << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
+              << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << std::setprecision(0)
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
              << "laser_detect_enabled = "      << to_bool_str(hk.laser_detect_enabled)      << "\n"

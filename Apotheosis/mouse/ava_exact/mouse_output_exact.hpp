@@ -165,30 +165,6 @@ private:
     std::once_flag stop_once_{};
 };
 
-enum class WinApiRelativeBackend : std::int32_t {
-    mouse_event = 0,
-    send_input = 1,
-};
-
-// sub_14037A7D0.  Returns the native API's return value: mouse_event is void
-// (reported as zero here), SendInput returns the number of inserted events.
-std::uint32_t emit_relative_move_winapi(WinApiRelativeBackend backend,
-                                        std::int32_t dx,
-                                        std::int32_t dy) noexcept;
-
-// WinAPI derived vtable +0x1d0 (0x14037A860).  Channel is the native 0..4
-// numbering.  mouse_event returns void (reported as zero); SendInput returns
-// its inserted-event count.
-std::uint32_t emit_mouse_button_winapi(WinApiRelativeBackend backend,
-                                       MouseButtonChannel channel,
-                                       bool pressed) noexcept;
-
-// WinAPI derived vtable +0xf0/+0xf8 (0x14037A700/0x14037A710 ->
-// 0x14037A9F0).  The original first resolves its key-name string through the
-// recovered name->VK map; this low-level boundary accepts that resolved VK.
-bool emit_virtual_key_winapi(std::uint16_t virtual_key,
-                             bool pressed) noexcept;
-
 } // namespace cvm::recovered
 
 static_assert(sizeof(cvm::recovered::RelativeMove) == 8);

@@ -16,11 +16,18 @@ void applyDeleteBucketFilter(std::vector<Detection>& detections)
         return;
 
     std::unordered_set<int> deleted;
+    std::unordered_set<int> backflash;
     {
         const auto snapshot = runtime_config::read();
+        if (snapshot->auto_backflash_enabled)
+            backflash.insert(snapshot->auto_backflash_classes.begin(),
+                             snapshot->auto_backflash_classes.end());
         for (const auto& cf : snapshot->class_filters)
         {
-            if (cf.bucket == ClassBucket::Delete)
+            // 自动背闪类别必须进入 DetectionBuffer；它是否参与瞄准仍由
+            // HotkeyProfile::aim_classes 独立决定。
+            if (cf.bucket == ClassBucket::Delete
+                && backflash.count(cf.class_id) == 0)
                 deleted.insert(cf.class_id);
         }
     }

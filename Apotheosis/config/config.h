@@ -211,20 +211,11 @@ public:
     bool circle_mask = true;
 
     // Hardware
-    std::string input_method = "WIN32"; // WIN32 | GHUB | ARDUINO | KMBOX_NET | KMBOX_A | MAKCU
-    int arduino_baudrate = 115200;
-    std::string arduino_port = "COM0";
-    bool arduino_16_bit_mouse = false;
-    bool arduino_enable_keys = false;
-
-    std::string kmbox_net_ip = "10.42.42.42";
-    std::string kmbox_net_port = "1984";
-    std::string kmbox_net_uuid = "DEADC0DE";
-
-    std::string kmbox_a_pidvid;
-
+    std::string input_method = "MAKCU"; // MAKCU | MAKCUNEW
     int makcu_baudrate = 115200;
     std::string makcu_port = "COM0";
+    int makcu_new_baudrate = 115200;
+    std::string makcu_new_port = "COM0";
 
     // AI
     std::string backend = "TRT";
@@ -310,6 +301,18 @@ public:
     std::vector<std::string> auto_capture_force_keys;
     std::string auto_capture_output_dir = "screenshots/auto";
     bool   auto_capture_save_label = true;
+
+    // 自动背闪：只依赖模型检测，不要求按住瞄准热键。检测到所选类别连续
+    // confirm_frames 帧后，按检测框所在左右半区向反方向发送 turn_amount；
+    // 等待 return_delay_ms 后，再以相反方向偿还相同移动量。
+    bool auto_backflash_enabled = false;
+    std::vector<int> auto_backflash_classes;
+    int auto_backflash_confirm_frames = 2;
+    int auto_backflash_turn_amount = 4000;
+    int auto_backflash_turn_speed = 75;   // 1..100，内部映射为移动单位/秒
+    int auto_backflash_return_delay_ms = 800;
+    int auto_backflash_return_speed = 100;
+    int auto_backflash_cooldown_ms = 1500;
 
     // 事件编排规则(每行一条,单行序列化,见 event_orchestrator::serialize_rule)。
     // 引擎启动时反序列化并 event_orch::set_rules;UI 修改后重新序列化写回。

@@ -6,6 +6,22 @@
 #include "Makcu.h"
 #include "Apotheosis.h"
 
+namespace
+{
+makcu::MouseButton mouseButtonFromChannel(int button)
+{
+    switch (button)
+    {
+    case 2: return makcu::MouseButton::RIGHT;
+    case 3: return makcu::MouseButton::MIDDLE;
+    case 4: return makcu::MouseButton::SIDE1;
+    case 5: return makcu::MouseButton::SIDE2;
+    case 1:
+    default:return makcu::MouseButton::LEFT;
+    }
+}
+}
+
 MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate)
     : is_open_(false)
     , aiming_active(false)
@@ -92,7 +108,7 @@ void MakcuConnection::click(int button)
     std::lock_guard<std::mutex> lock(write_mutex_);
     try
     {
-        device_.click(makcu::MouseButton::LEFT);
+        device_.click(mouseButtonFromChannel(button));
     }
     catch (...)
     {
@@ -108,7 +124,7 @@ void MakcuConnection::press(int button)
     std::lock_guard<std::mutex> lock(write_mutex_);
     try
     {
-        device_.mouseDown(makcu::MouseButton::LEFT);
+        device_.mouseDown(mouseButtonFromChannel(button));
     }
     catch (...)
     {
@@ -124,7 +140,7 @@ void MakcuConnection::release(int button)
     std::lock_guard<std::mutex> lock(write_mutex_);
     try
     {
-        device_.mouseUp(makcu::MouseButton::LEFT);
+        device_.mouseUp(mouseButtonFromChannel(button));
     }
     catch (...)
     {
@@ -159,5 +175,21 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         // Mouse5 (side button 2)
         side2_active = pressed;
         break;
+    }
+}
+
+void MakcuConnection::wheel(int delta)
+{
+    if (!is_open_)
+        return;
+
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    try
+    {
+        device_.mouseWheel(delta);
+    }
+    catch (...)
+    {
+        is_open_ = false;
     }
 }

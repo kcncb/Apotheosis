@@ -13,6 +13,7 @@ namespace crosshair
 namespace
 {
 std::atomic<int> g_armed_token{ 0 }; // 0 = idle; else current owner token
+std::atomic<int> g_pick_half{ kPickHalf };
 
 std::mutex g_result_mutex;           // guards everything below
 int  g_next_token   = 0;
@@ -23,8 +24,9 @@ int  g_result_s = 0;
 int  g_result_v = 0;
 } // namespace
 
-int ArmColorPick()
+int ArmColorPick(int sampleHalf)
 {
+    g_pick_half.store(std::clamp(sampleHalf, 0, 8));
     int token;
     {
         std::lock_guard<std::mutex> lk(g_result_mutex);
@@ -49,6 +51,11 @@ bool IsColorPickArmed()
 int ArmedToken()
 {
     return g_armed_token.load();
+}
+
+int PickHalf()
+{
+    return g_pick_half.load();
 }
 
 void SubmitPickedColor(int h, int s, int v)

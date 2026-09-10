@@ -140,7 +140,7 @@ Defaults below are first-run defaults from `config.cpp`.
 | `snapBoostFactor` | float | `1.15` | UI range `0.01..4.0` |
 | `easynorecoil` | bool | `false` | Recoil compensation master switch |
 | `easynorecoilstrength` | float | `0.0` | UI range `0.1..500.0` when enabled |
-| `input_method` | string | `WIN32` | `WIN32`, `GHUB`, `ARDUINO`, `KMBOX_NET`, `KMBOX_A`, `MAKCU` |
+| `input_method` | string | `MAKCU` | `MAKCU`, `MAKCUNEW` |
 
 ### 4.4 Wind Mouse
 
@@ -152,35 +152,19 @@ Defaults below are first-run defaults from `config.cpp`.
 | `wind_M` | float | `10.0` | UI range `1.0..40.0` |
 | `wind_D` | float | `8.0` | UI range `1.0..40.0` |
 
-### 4.5 Arduino
-
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `arduino_baudrate` | int | `115200` | UI presets: `9600`, `19200`, `38400`, `57600`, `115200` |
-| `arduino_port` | string | `COM0` | UI COM list `COM1..COM30` |
-| `arduino_16_bit_mouse` | bool | `false` | Device-specific mode |
-| `arduino_enable_keys` | bool | `false` | Device-specific mode |
-
-### 4.6 KMBOX_NET
-
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `kmbox_net_ip` | string | `10.42.42.42` | Device IP |
-| `kmbox_net_port` | string | `1984` | Device port as string |
-| `kmbox_net_uuid` | string | `DEADC0DE` | Device UUID |
-
-### 4.7 KMBOX_A
-
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `kmbox_a_pidvid` | string | empty | Format `PPPPVVVV` in one field |
-
-### 4.8 MAKCU
+### 4.5 MAKCU
 
 | Key | Type | Default | Allowed / Notes |
 |---|---|---:|---|
 | `makcu_baudrate` | int | `115200` | UI presets: `9600`, `19200`, `38400`, `57600`, `115200` |
 | `makcu_port` | string | `COM0` | UI COM list `COM1..COM30` |
+
+### 4.6 MAKCUNEW
+
+| Key | Type | Default | Allowed / Notes |
+|---|---|---:|---|
+| `makcu_new_baudrate` | int | `115200` | 仅显式设为 `4000000` 时执行 START_PID 自动切速 |
+| `makcu_new_port` | string | `COM0` | CH343 serial port |
 
 ### 4.9 Mouse Shooting
 

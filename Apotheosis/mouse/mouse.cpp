@@ -1,8 +1,3 @@
-#define WIN32_LEAN_AND_MEAN
-#define _WINSOCKAPI_
-#include <winsock2.h>
-#include <Windows.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -11,11 +6,8 @@
 #include "mouse.h"
 #include "capture.h"
 #include "Apotheosis.h"
-#include "Arduino.h"
-#include "KmboxAConnection.h"
-#include "KmboxNetConnection.h"
 #include "Makcu.h"
-#include "ghub.h"
+#include "MakcuNew.h"
 
 namespace
 {
@@ -38,16 +30,10 @@ std::atomic<float> g_dynamic_fov_radius_y_px{ 0.0f };
 
 MouseThread::MouseThread(
     const MouseRuntimeParams& params,
-    Arduino* arduinoConnection,
-    GhubMouse* gHubMouse,
-    KmboxAConnection* kmboxAConnection,
-    KmboxNetConnection* kmboxNetConnection,
-    MakcuConnection* makcuConnection)
-    : arduino_(arduinoConnection),
-      kmbox_a_(kmboxAConnection),
-      kmbox_net_(kmboxNetConnection),
-      makcu_(makcuConnection),
-      gHub_(gHubMouse)
+    MakcuConnection* makcuConnection,
+    MakcuNewConnection* makcuNewConnection)
+    : makcu_(makcuConnection),
+      makcu_new_(makcuNewConnection)
 {
     updateParams(params);
     moveWorker_ = std::thread(&MouseThread::moveWorkerLoop, this);
@@ -68,53 +54,25 @@ MouseThread::~MouseThread()
 void MouseThread::sendLeftDownToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (kmbox_net_)
-        kmbox_net_->leftDown();
-    else if (kmbox_a_)
-        kmbox_a_->leftDown();
-    else if (makcu_)
+    if (makcu_)
         makcu_->press(1);
-    else if (arduino_)
-        arduino_->press();
-    else if (gHub_)
-        gHub_->mouse_down(1);
-    else
-    {
-        INPUT in{};
-        in.type = INPUT_MOUSE;
-        in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-        SendInput(1, &in, sizeof(INPUT));
-    }
+    else if (makcu_new_)
+        makcu_new_->press(1);
 }
 
 void MouseThread::sendLeftUpToDriver()
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (kmbox_net_)
-        kmbox_net_->leftUp();
-    else if (kmbox_a_)
-        kmbox_a_->leftUp();
-    else if (makcu_)
+    if (makcu_)
         makcu_->release(1);
-    else if (arduino_)
-        arduino_->release();
-    else if (gHub_)
-        gHub_->mouse_up(1);
-    else
-    {
-        INPUT in{};
-        in.type = INPUT_MOUSE;
-        in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        SendInput(1, &in, sizeof(INPUT));
-    }
+    else if (makcu_new_)
+        makcu_new_->release(1);
 }
 
 void MouseThread::updateParams(const MouseRuntimeParams& in)
 {
     const auto sanitized = sanitize(in);
     params_ = sanitized;
-    screen_width_ = params_.detection_resolution;
-    screen_height_ = params_.detection_resolution;
 }
 
 void MouseThread::queueMove(int dx, int dy)
@@ -182,7 +140,34 @@ void MouseThread::moveWorkerLoop()
 
 void MouseThread::sendRawMove(int dx, int dy)
 {
+    {
+        std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+        if (makcu_new_)
+        {
+            makcu_new_->move(dx, dy);
+            return;
+        }
+    }
     queueMove(dx, dy);
+}
+
+bool MouseThread::sendPriorityRawMove(int dx, int dy)
+{
+    if (dx == 0 && dy == 0)
+        return true;
+
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    if (makcu_new_)
+    {
+        makcu_new_->cancelMove();
+        return makcu_new_->moveConfirmed(dx, dy);
+    }
+    if (makcu_)
+    {
+        makcu_->move(dx, dy);
+        return makcu_->isOpen();
+    }
+    return false;
 }
 
 void MouseThread::pressLeftButton()
@@ -201,40 +186,12 @@ bool MouseThread::sendMovementToDriver(int dx, int dy)
         return true;
 
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (kmbox_net_)
-    {
-        kmbox_net_->move(dx, dy);
-        return true;
-    }
-    else if (kmbox_a_)
-    {
-        kmbox_a_->move(dx, dy);
-        return true;
-    }
-    else if (makcu_)
+    if (makcu_)
     {
         makcu_->move(dx, dy);
         return true;
     }
-    else if (arduino_)
-    {
-        arduino_->move(dx, dy);
-        return true;
-    }
-    else if (gHub_)
-    {
-        gHub_->mouse_xy(dx, dy);
-        return true;
-    }
-    else
-    {
-        INPUT in{};
-        in.type = INPUT_MOUSE;
-        in.mi.dx = dx;
-        in.mi.dy = dy;
-        in.mi.dwFlags = MOUSEEVENTF_MOVE;
-        return SendInput(1, &in, sizeof(INPUT)) == 1;
-    }
+    return false;
 }
 
 void MouseThread::clearQueuedMoves()
@@ -242,6 +199,8 @@ void MouseThread::clearQueuedMoves()
     std::lock_guard<std::mutex> lock(queueMtx_);
     // generation 同步提升，可抢占 worker 已取出但尚未发送的旧移动。
     moveSlot_.clear();
+    std::lock_guard<std::recursive_mutex> inputLock(input_method_mutex);
+    if (makcu_new_) makcu_new_->cancelMove();
 }
 
 MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
@@ -259,32 +218,14 @@ MouseThread::MovementFeedback MouseThread::consumeMovementFeedback()
     return out;
 }
 
-void MouseThread::setArduinoConnection(Arduino* newArduino)
-{
-    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    arduino_ = newArduino;
-}
-
-void MouseThread::setKmboxAConnection(KmboxAConnection* newKmbox_a)
-{
-    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    kmbox_a_ = newKmbox_a;
-}
-
-void MouseThread::setKmboxNetConnection(KmboxNetConnection* newKmbox_net)
-{
-    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    kmbox_net_ = newKmbox_net;
-}
-
 void MouseThread::setMakcuConnection(MakcuConnection* newMakcu)
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     makcu_ = newMakcu;
 }
 
-void MouseThread::setGHubMouse(GhubMouse* newGHub)
+void MouseThread::setMakcuNewConnection(MakcuNewConnection* newMakcu)
 {
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    gHub_ = newGHub;
+    makcu_new_ = newMakcu;
 }

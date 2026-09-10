@@ -230,3 +230,173 @@ void launch_circle_mask_bgr_u8(
     circle_mask_bgr_u8_kernel<<<grid, block, 0, stream>>>(
         img, (int)step, width, height, cx, cy, r2);
 }
+
+// ---- Crosshair HSV ROI reduction ------------------------------------------
+static __device__ __forceinline__ bool hsv_band_match_bgr(
+    const unsigned char* p, const GpuHsvBand* bands, int band_count)
+{
+    const float b = static_cast<float>(p[0]);
+    const float g = static_cast<float>(p[1]);
+    const float r = static_cast<float>(p[2]);
+    const float vmax = fmaxf(r, fmaxf(g, b));
+    const float vmin = fminf(r, fminf(g, b));
+    const float delta = vmax - vmin;
+
+    float hue_deg = 0.0f;
+    if (delta > 0.0f)
+    {
+        if (vmax == r)      hue_deg = 60.0f * fmodf((g - b) / delta, 6.0f);
+        else if (vmax == g) hue_deg = 60.0f * ((b - r) / delta + 2.0f);
+        else                hue_deg = 60.0f * ((r - g) / delta + 4.0f);
+        if (hue_deg < 0.0f) hue_deg += 360.0f;
+    }
+    const int h = max(0, min(179, static_cast<int>(hue_deg * 0.5f + 0.5f)));
+    const int s = vmax > 0.0f
+        ? max(0, min(255, static_cast<int>(delta * 255.0f / vmax + 0.5f)))
+        : 0;
+    const int v = max(0, min(255, static_cast<int>(vmax + 0.5f)));
+
+    for (int i = 0; i < band_count; ++i)
+    {
+        const GpuHsvBand q = bands[i];
+        const int hlo = min(q.h_low, q.h_high), hhi = max(q.h_low, q.h_high);
+        const int slo = min(q.s_min, q.s_max),   shi = max(q.s_min, q.s_max);
+        const int vlo = min(q.v_min, q.v_max),   vhi = max(q.v_min, q.v_max);
+        if (h >= hlo && h <= hhi && s >= slo && s <= shi && v >= vlo && v <= vhi)
+            return true;
+    }
+    return false;
+}
+
+static __global__ void crosshair_hsv_reduce_bgr_u8_kernel(
+    const unsigned char* __restrict__ img, int step,
+    int width, int height,
+    int roi_x, int roi_y, int roi_w, int roi_h,
+    const GpuHsvBand* __restrict__ bands, int band_count,
+    int* __restrict__ result)
+{
+    const int lx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ly = blockIdx.y * blockDim.y + threadIdx.y;
+    if (lx >= roi_w || ly >= roi_h) return;
+    const int x = roi_x + lx, y = roi_y + ly;
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+
+    const unsigned char* p = img + static_cast<size_t>(y) * step + x * 3;
+    if (!hsv_band_match_bgr(p, bands, band_count)) return;
+
+    // Approximate a 3x3 elliptical OPEN without a temporary mask.
+    int support = 1;
+    const int nx[4] = { -1, 1, 0, 0 };
+    const int ny[4] = { 0, 0, -1, 1 };
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        const int xx = x + nx[i], yy = y + ny[i];
+        if (xx < roi_x || yy < roi_y || xx >= roi_x + roi_w || yy >= roi_y + roi_h)
+            continue;
+        const unsigned char* q = img + static_cast<size_t>(yy) * step + xx * 3;
+        support += hsv_band_match_bgr(q, bands, band_count) ? 1 : 0;
+    }
+    if (support < 3) return;
+
+    // Rank compact local clusters before proximity. Density is capped so a
+    // large same-colour scene object cannot beat a proper reticle merely by
+    // occupying more pixels; after the cap, the cluster nearest the expected
+    // static centre wins. The ROI is at most 256x256, so its index fits in the
+    // low 16 bits of the atomic key.
+    constexpr int kLocalRadius = 5;
+    int local_count = 0;
+    for (int yy = max(roi_y, y - kLocalRadius);
+         yy <= min(roi_y + roi_h - 1, y + kLocalRadius); ++yy)
+    {
+        for (int xx = max(roi_x, x - kLocalRadius);
+             xx <= min(roi_x + roi_w - 1, x + kLocalRadius); ++xx)
+        {
+            const unsigned char* q = img + static_cast<size_t>(yy) * step + xx * 3;
+            local_count += hsv_band_match_bgr(q, bands, band_count) ? 1 : 0;
+        }
+    }
+
+    const int centre_dx = x - width / 2;
+    const int centre_dy = y - height / 2;
+    const int distance2 = centre_dx * centre_dx + centre_dy * centre_dy;
+    const int roi_distance2 = max(1, roi_w * roi_w + roi_h * roi_h);
+    const unsigned int scaled_distance = static_cast<unsigned int>(fminf(
+        4095.0f, static_cast<float>(distance2) * 4095.0f
+            / static_cast<float>(roi_distance2)));
+    const unsigned int proximity = 4095u - scaled_distance;
+    const unsigned int quality =
+        (static_cast<unsigned int>(min(local_count, 15)) << 12) | proximity;
+    const unsigned int index = static_cast<unsigned int>(ly * roi_w + lx);
+    const unsigned int key = (quality << 16) | (0xffffu - min(index, 0xffffu));
+    atomicMax(reinterpret_cast<unsigned int*>(result), key);
+}
+
+static __global__ void crosshair_hsv_selected_cluster_kernel(
+    const unsigned char* __restrict__ img, int step,
+    int width, int height,
+    int roi_x, int roi_y, int roi_w, int roi_h,
+    const GpuHsvBand* __restrict__ bands, int band_count,
+    int* __restrict__ result)
+{
+    const unsigned int key = reinterpret_cast<unsigned int*>(result)[0];
+    if (key == 0) return;
+
+    const unsigned int index = 0xffffu - (key & 0xffffu);
+    if (index >= static_cast<unsigned int>(roi_w * roi_h)) return;
+    const int candidate_x = roi_x + static_cast<int>(index % roi_w);
+    const int candidate_y = roi_y + static_cast<int>(index / roi_w);
+
+    constexpr int kLocalRadius = 5;
+    const int ox = static_cast<int>(threadIdx.x) - kLocalRadius;
+    const int oy = static_cast<int>(threadIdx.y) - kLocalRadius;
+    if (abs(ox) > kLocalRadius || abs(oy) > kLocalRadius) return;
+    const int x = candidate_x + ox;
+    const int y = candidate_y + oy;
+    if (x < roi_x || y < roi_y || x >= roi_x + roi_w || y >= roi_y + roi_h
+        || x < 0 || y < 0 || x >= width || y >= height)
+        return;
+
+    const unsigned char* p = img + static_cast<size_t>(y) * step + x * 3;
+    if (!hsv_band_match_bgr(p, bands, band_count)) return;
+
+    int support = 1;
+    const int nx[4] = { -1, 1, 0, 0 };
+    const int ny[4] = { 0, 0, -1, 1 };
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        const int xx = x + nx[i], yy = y + ny[i];
+        if (xx < roi_x || yy < roi_y || xx >= roi_x + roi_w || yy >= roi_y + roi_h)
+            continue;
+        const unsigned char* q = img + static_cast<size_t>(yy) * step + xx * 3;
+        support += hsv_band_match_bgr(q, bands, band_count) ? 1 : 0;
+    }
+    if (support < 3) return;
+
+    atomicAdd(result + 1, 1);
+    atomicAdd(result + 2, x);
+    atomicAdd(result + 3, y);
+}
+
+void launch_crosshair_hsv_reduce_bgr_u8(
+    const unsigned char* img, size_t step,
+    int width, int height,
+    int roi_x, int roi_y, int roi_w, int roi_h,
+    const GpuHsvBand* bands, int band_count,
+    int* result,
+    cudaStream_t stream)
+{
+    if (!img || !bands || !result || width <= 0 || height <= 0
+        || roi_w <= 0 || roi_h <= 0 || band_count <= 0)
+        return;
+    const dim3 block(16, 16);
+    const dim3 grid((roi_w + block.x - 1) / block.x,
+                    (roi_h + block.y - 1) / block.y);
+    crosshair_hsv_reduce_bgr_u8_kernel<<<grid, block, 0, stream>>>(
+        img, static_cast<int>(step), width, height,
+        roi_x, roi_y, roi_w, roi_h, bands, band_count, result);
+    crosshair_hsv_selected_cluster_kernel<<<1, dim3(16, 16), 0, stream>>>(
+        img, static_cast<int>(step), width, height,
+        roi_x, roi_y, roi_w, roi_h, bands, band_count, result);
+}

@@ -1,11 +1,6 @@
 #ifndef MOUSE_H
 #define MOUSE_H
 
-#define WIN32_LEAN_AND_MEAN
-#define _WINSOCKAPI_
-#include <winsock2.h>
-#include <Windows.h>
-
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -17,11 +12,8 @@
 #include "latest_move_slot.h"
 
 // Forward declarations so that mouse.h stays light.
-class Arduino;
-class GhubMouse;
-class KmboxAConnection;
-class KmboxNetConnection;
 class MakcuConnection;
+class MakcuNewConnection;
 
 struct MouseRuntimeParams
 {
@@ -42,11 +34,8 @@ public:
 
     MouseThread(
         const MouseRuntimeParams& params,
-        Arduino* arduinoConnection = nullptr,
-        GhubMouse* gHubMouse = nullptr,
-        KmboxAConnection* kmboxAConnection = nullptr,
-        KmboxNetConnection* kmboxNetConnection = nullptr,
-        MakcuConnection* makcuConnection = nullptr);
+        MakcuConnection* makcuConnection = nullptr,
+        MakcuNewConnection* makcuNewConnection = nullptr);
     ~MouseThread();
 
     MouseThread(const MouseThread&) = delete;
@@ -63,15 +52,15 @@ public:
 
     // ─── Raw driver channel (used by the Boss AI aim engine) ───────────────
     void sendRawMove(int dx, int dy);
+    // 自动背闪等独占动作使用：绕过瞄准 latest-only 槽，但仍与按键和
+    // 设备切换共用同一把驱动锁。
+    bool sendPriorityRawMove(int dx, int dy);
     void pressLeftButton();
     void releaseLeftButton();
 
     // Input device hot-swap.
-    void setArduinoConnection(Arduino* arduino);
-    void setKmboxAConnection(KmboxAConnection* kmbox_a);
-    void setKmboxNetConnection(KmboxNetConnection* kmbox_net);
     void setMakcuConnection(MakcuConnection* makcu);
-    void setGHubMouse(GhubMouse* ghub);
+    void setMakcuNewConnection(MakcuNewConnection* makcuNew);
 
 private:
     void moveWorkerLoop();
@@ -82,9 +71,6 @@ private:
     void sendLeftUpToDriver();
 
     MouseRuntimeParams params_{};
-
-    double screen_width_ = 320.0;
-    double screen_height_ = 320.0;
 
     // Async driver dispatch.
     mouse_async::LatestMoveSlot moveSlot_;
@@ -97,11 +83,8 @@ private:
     std::atomic<long long> lastLatencyUs_{ 0 };
     std::atomic<unsigned long long> failedMoves_{ 0 };
 
-    Arduino* arduino_ = nullptr;
-    KmboxAConnection* kmbox_a_ = nullptr;
-    KmboxNetConnection* kmbox_net_ = nullptr;
     MakcuConnection* makcu_ = nullptr;
-    GhubMouse* gHub_ = nullptr;
+    MakcuNewConnection* makcu_new_ = nullptr;
 };
 
 #endif // MOUSE_H

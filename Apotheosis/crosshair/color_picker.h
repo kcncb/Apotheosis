@@ -23,13 +23,13 @@
 namespace crosshair
 {
 
-// Fixed sampling footprint: a (2*kPickHalf+1) square = 5x5 region around the
-// click, sampled robustly (median S/V, circular-mean H). See SampleRegionHSV.
+// Default sampling footprint used by callers that do not request a custom
+// size. The crosshair picker explicitly requests half=0 for an exact 1x1 pick.
 constexpr int kPickHalf = 2;
 
 // Arm pick mode; returns a non-zero owner token for this session. Clears any
 // stale (unconsumed) result so a fresh session never reads a leftover sample.
-int  ArmColorPick();
+int  ArmColorPick(int sampleHalf = kPickHalf);
 // Force-cancel the current session (idempotent). Used by the active page's
 // cancel button and by the preview's right-click — only one session is ever
 // armed, so no token is needed to cancel it.
@@ -38,6 +38,7 @@ bool IsColorPickArmed();
 // Current owner token, or 0 when idle. A page compares this to its own token
 // to notice it was superseded or cancelled.
 int  ArmedToken();
+int  PickHalf();
 
 // Called by the preview thread once a sample has been taken: stores the HSV
 // (OpenCV ranges: H 0..179, S/V 0..255), tags it with the current owner token,
