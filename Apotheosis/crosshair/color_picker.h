@@ -1,7 +1,7 @@
 #ifndef CROSSHAIR_COLOR_PICKER_H
 #define CROSSHAIR_COLOR_PICKER_H
 
-#include <opencv2/core.hpp>
+namespace cv { class Mat; }
 
 // Eyedropper ("取色") shared state for the colour-find palettes (crosshair,
 // glass film, ...).

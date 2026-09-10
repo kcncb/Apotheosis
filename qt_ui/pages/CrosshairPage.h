@@ -1,14 +1,16 @@
 #pragma once
 
 #include <QWidget>
+#include <QList>
+#include "config/ConfigManager.h"
 
 class QSlider;
 class QSpinBox;
 class QDoubleSpinBox;
-class QTableWidget;
 class QPushButton;
 class QComboBox;
 class QTimer;
+class QVBoxLayout;
 
 class CrosshairPage : public QWidget {
     Q_OBJECT
@@ -18,23 +20,19 @@ public:
 
 private:
     void loadConfig();
-
-    // ---- Crosshair color table helpers ----
-    void addCrosshairColorRow(const QString& name, bool enabled,
-                              int hLo, int hHi, int sLo, int sHi, int vLo, int vHi);
-    void addEmptyCrosshairColor();
-    void removeCrosshairSelectedRows();
-    void addCrosshairPreset();
+    void rebuildColorList();
     void saveCrosshairColors();
 
-    // ---- Crosshair colour eyedropper (取色) ----
-    // Arm/cancel pick mode, poll the OpenCV preview thread for a result, and
-    // turn one sampled HSV point into a (wide-tolerance) band row.
+    // ---- Color operations ----
+    void addPreset(int presetIdx);
+    void addNewColor();
+    void removeColorAt(int index);
+
+    // ---- Screen eyedropper (取色) ----
     void toggleColorPick();
     void pollPickedColor();
     void applyPickedColor(int h, int s, int v);
     void finishPicking();
-
 
     // ---- Crosshair sampling region ----
     QSpinBox* m_rectW{};
@@ -46,16 +44,16 @@ private:
     QDoubleSpinBox* m_smoothSpin{};
     QSlider* m_smoothSlider{};
 
-    // ---- Crosshair color table ----
-    QTableWidget* m_colorTable{};
-    QPushButton* m_addColorBtn{};
-    QPushButton* m_removeColorBtn{};
+    // ---- Color Palette UI ----
+    QList<ConfigManager::ColorProfile> m_colors;
+    QWidget* m_colorListContainer{};
+    QVBoxLayout* m_colorListLayout{};
     QComboBox* m_presetCombo{};
+    QPushButton* m_addPresetBtn{};
+    QPushButton* m_addColorBtn{};
 
-    // ---- Crosshair colour eyedropper ----
+    // ---- Screen eyedropper ----
     QPushButton* m_pickColorBtn{};
     QTimer* m_pickTimer{};
-    int m_pickToken = 0;   // 0 = not picking; else this page's color_picker token
-
-
+    int m_pickToken = 0;
 };
