@@ -257,18 +257,6 @@ public:
     std::string auto_capture_output_dir = "screenshots/auto";
     bool   auto_capture_save_label = true;
 
-    // 自动背闪：只依赖模型检测，不要求按住瞄准热键。检测到所选类别连续
-    // confirm_frames 帧后，按检测框所在左右半区向反方向发送 turn_amount；
-    // 等待 return_delay_ms 后，再以相反方向偿还相同移动量。
-    bool auto_backflash_enabled = false;
-    std::vector<int> auto_backflash_classes;
-    int auto_backflash_confirm_frames = 2;
-    int auto_backflash_turn_amount = 4000;
-    int auto_backflash_turn_speed = 75;   // 1..100，内部映射为移动单位/秒
-    int auto_backflash_return_delay_ms = 800;
-    int auto_backflash_return_speed = 100;
-    int auto_backflash_cooldown_ms = 1500;
-
     // Class filter table (one entry per class_id the user has seen). New
     // classes discovered after a model change start in Delete and the user
     // opts them in from the Target panel.

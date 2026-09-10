@@ -151,25 +151,6 @@ void MouseThread::sendRawMove(int dx, int dy)
     queueMove(dx, dy);
 }
 
-bool MouseThread::sendPriorityRawMove(int dx, int dy)
-{
-    if (dx == 0 && dy == 0)
-        return true;
-
-    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
-    if (makcu_new_)
-    {
-        makcu_new_->cancelMove();
-        return makcu_new_->moveConfirmed(dx, dy);
-    }
-    if (makcu_)
-    {
-        makcu_->move(dx, dy);
-        return makcu_->isOpen();
-    }
-    return false;
-}
-
 void MouseThread::pressLeftButton()
 {
     sendLeftDownToDriver();

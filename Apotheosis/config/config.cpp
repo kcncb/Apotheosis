@@ -391,34 +391,6 @@ bool Config::loadConfig(const std::string& filename)
                                          "screenshots/auto");
     auto_capture_save_label = get_bool("",   "auto_capture_save_label", true);
 
-    // ── 自动背闪 ──
-    auto_backflash_enabled = get_bool("", "auto_backflash_enabled", false);
-    auto_backflash_classes.clear();
-    for (const auto& value : splitString(
-             get_string("", "auto_backflash_classes", "")))
-    {
-        if (value.empty()) continue;
-        try { auto_backflash_classes.push_back(std::stoi(value)); }
-        catch (...) { /* 忽略损坏的类别项 */ }
-    }
-    std::sort(auto_backflash_classes.begin(), auto_backflash_classes.end());
-    auto_backflash_classes.erase(
-        std::unique(auto_backflash_classes.begin(), auto_backflash_classes.end()),
-        auto_backflash_classes.end());
-    auto_backflash_confirm_frames = std::clamp(
-        get_long("", "auto_backflash_confirm_frames", 2), 1, 8);
-    auto_backflash_turn_amount = std::clamp(
-        get_long("", "auto_backflash_turn_amount", 4000), 100, 30000);
-    auto_backflash_turn_speed = std::clamp(
-        get_long("", "auto_backflash_turn_speed", 75), 1, 100);
-    auto_backflash_return_delay_ms = std::clamp(
-        get_long("", "auto_backflash_return_delay_ms", 800), 0, 5000);
-    auto_backflash_return_speed = std::clamp(
-        get_long("", "auto_backflash_return_speed", 100), 1, 100);
-    auto_backflash_cooldown_ms = std::clamp(
-        get_long("", "auto_backflash_cooldown_ms", 1500), 0, 10000);
-
-
     // ---------- Crosshair color detector (palette + rect + area) ----------
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
     crosshair_rect_h           = std::clamp(get_long("", "crosshair_rect_h",  40), 4, 512);
@@ -913,21 +885,6 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_capture_force_keys = " << joinStrings(auto_capture_force_keys) << "\n"
         << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
         << "auto_capture_save_label = " << to_bool_str(auto_capture_save_label) << "\n\n";
-
-    std::vector<std::string> backflash_classes;
-    backflash_classes.reserve(auto_backflash_classes.size());
-    for (int class_id : auto_backflash_classes)
-        backflash_classes.push_back(std::to_string(class_id));
-    file << "# 自动背闪（朝检测框反方向转身，移动量会原样反向偿还）\n"
-        << "auto_backflash_enabled = " << to_bool_str(auto_backflash_enabled) << "\n"
-        << "auto_backflash_classes = " << joinStrings(backflash_classes) << "\n"
-        << "auto_backflash_confirm_frames = " << auto_backflash_confirm_frames << "\n"
-        << "auto_backflash_turn_amount = " << auto_backflash_turn_amount << "\n"
-        << "auto_backflash_turn_speed = " << auto_backflash_turn_speed << "\n"
-        << "auto_backflash_return_delay_ms = " << auto_backflash_return_delay_ms << "\n"
-        << "auto_backflash_return_speed = " << auto_backflash_return_speed << "\n"
-        << "auto_backflash_cooldown_ms = " << auto_backflash_cooldown_ms << "\n\n";
-
 
     file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
             "# macro_script_path; runtime loads it on startup when macro_enabled\n"

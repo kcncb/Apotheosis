@@ -166,8 +166,6 @@ set(APP_SOURCES
     "${SRC_DIR}/overlay/preview_window.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
-    "${SRC_DIR}/runtime/auto_backflash.cpp"
-    "${SRC_DIR}/runtime/auto_backflash.h"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
     "${SRC_DIR}/runtime/config_snapshot.cpp"
     "${SRC_DIR}/runtime/config_snapshot.h"
@@ -187,8 +185,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/AiModelPage.h"
     "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
     "${QT_UI_DIR}/pages/AutoCapturePage.h"
-    "${QT_UI_DIR}/pages/AutoBackflashPage.cpp"
-    "${QT_UI_DIR}/pages/AutoBackflashPage.h"
     "${QT_UI_DIR}/pages/CapturePage.cpp"
     "${QT_UI_DIR}/pages/CapturePage.h"
     "${QT_UI_DIR}/pages/CrosshairPage.cpp"
@@ -429,15 +425,6 @@ target_link_libraries(ava_chain_test PRIVATE "${OPENCV_LIB}" user32)
 target_compile_features(ava_chain_test PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(ava_chain_test PRIVATE /utf-8 /Zc:char8_t-)
-endif()
-
-add_executable(auto_backflash_test EXCLUDE_FROM_ALL
-    "${SRC_DIR}/mouse/tests/auto_backflash_test.cpp"
-    "${SRC_DIR}/runtime/auto_backflash.cpp")
-target_include_directories(auto_backflash_test PRIVATE "${SRC_DIR}")
-target_compile_features(auto_backflash_test PRIVATE cxx_std_20)
-if(MSVC)
-    target_compile_options(auto_backflash_test PRIVATE /utf-8 /Zc:char8_t-)
 endif()
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")

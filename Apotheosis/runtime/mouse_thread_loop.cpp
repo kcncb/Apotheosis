@@ -19,7 +19,6 @@
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
-#include "runtime/auto_backflash.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 
@@ -230,8 +229,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
     auto last_tick_ts = std::chrono::steady_clock::time_point::min();
 
     TriggerState trigger;
-    auto_backflash::Controller backflash;
-
 
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
@@ -328,43 +325,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 publish_boss_debug(engine);
             }
         }
-
-        auto_backflash::Params backflash_params;
-        backflash_params.enabled = config_snapshot->auto_backflash_enabled;
-        backflash_params.classes = config_snapshot->auto_backflash_classes;
-        backflash_params.confirm_frames = config_snapshot->auto_backflash_confirm_frames;
-        backflash_params.turn_amount = config_snapshot->auto_backflash_turn_amount;
-        backflash_params.turn_speed = config_snapshot->auto_backflash_turn_speed;
-        backflash_params.return_delay_ms = config_snapshot->auto_backflash_return_delay_ms;
-        backflash_params.return_speed = config_snapshot->auto_backflash_return_speed;
-        backflash_params.cooldown_ms = config_snapshot->auto_backflash_cooldown_ms;
-
-        const bool backflash_was_active = backflash.active();
-        std::vector<float> backflash_centers_x;
-        backflash_centers_x.reserve(precise_boxes.size());
-        for (const auto& box : precise_boxes)
-            backflash_centers_x.push_back(box.x + box.width * 0.5f);
-        const bool backflash_active = backflash.tick(
-            backflash_params, hasNewDetection, classes, confidences,
-            backflash_centers_x, static_cast<float>(config_resolution) * 0.5f,
-            std::chrono::steady_clock::now(),
-            [&mouseThread](int dx) {
-                return mouseThread.sendPriorityRawMove(dx, 0);
-            });
-
-        if (!backflash_was_active && backflash_active)
-        {
-            // 背闪接管期间不允许瞄准余量、AimPath 或扳机继续输出；否则
-            // 返回量会混入普通锁敌位移，无法回到触发前视角。
-            mouseThread.clearQueuedMoves();
-            engine.reset();
-            aim_path_driver.reset();
-            reset_trigger(mouseThread, trigger);
-            publish_boss_debug(engine);
-        }
-
-        if (backflash_active)
-            continue;
 
         // No active hotkey → idle. Force-release the fire button and clear
         // any queued moves so the cursor stops drifting after the user lifts
@@ -711,12 +671,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         }
     }
 
-    // 先清掉普通瞄准余量；停止推理或退出程序时也不能把视角留在
-    // 背身位置。紧急返回发出后不能再次 clear，否则 MAKCUNEW 会取消它。
     reset_trigger(mouseThread, trigger);
     mouseThread.clearQueuedMoves();
-    const int emergency_return = backflash.emergency_return_delta();
-    if (emergency_return != 0)
-        mouseThread.sendPriorityRawMove(emergency_return, 0);
-
 }

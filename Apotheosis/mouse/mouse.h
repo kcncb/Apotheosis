@@ -52,9 +52,6 @@ public:
 
     // ─── Raw driver channel (used by the Boss AI aim engine) ───────────────
     void sendRawMove(int dx, int dy);
-    // 自动背闪等独占动作使用：绕过瞄准 latest-only 槽，但仍与按键和
-    // 设备切换共用同一把驱动锁。
-    bool sendPriorityRawMove(int dx, int dy);
     void pressLeftButton();
     void releaseLeftButton();
 
