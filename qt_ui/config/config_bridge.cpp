@@ -52,39 +52,23 @@ void ConfigBridge::syncToRuntime() {
 
     auto qs = [](const QString& s) { return s.toStdString(); };
 
-    // --- Capture ---
-    std::string oldMethod = config.capture_method;
-    const int oldDeviceIndex = config.opencv_capture_index;
-    const std::string oldCaptureApi = config.opencv_capture_api;
-    const std::string oldCaptureUrl = config.opencv_capture_url;
-    const int oldCaptureWidth = config.opencv_capture_width;
-    const int oldCaptureHeight = config.opencv_capture_height;
-    const int oldDeviceFps = config.opencv_capture_fps;
-    const bool oldMfGpu = config.capture_mf_gpu;
-    const int oldCaptureCrop = config.capture_crop;
+    // --- Capture: 只有「采集卡」一种方式 ---
+    const std::string oldCaptureDevice = config.capture_device;
     const std::string oldCaptureFormat = config.capture_format;
-    config.capture_method = qs(cm.captureMethod());
-    config.udp_ip         = qs(cm.udpIp());
-    config.udp_port       = cm.udpPort();
-    config.tcp_ip         = qs(cm.tcpIp());
-    config.tcp_port       = cm.tcpPort();
-    config.eth_adapter    = qs(cm.ethAdapter());
-    config.eth_ethertype  = cm.ethEthertype();
-    config.opencv_capture_index = cm.opencvCaptureIndex();
-    config.opencv_capture_api   = qs(cm.opencvCaptureApi());
-    config.opencv_capture_url   = qs(cm.opencvCaptureUrl());
-    config.opencv_capture_width = cm.opencvCaptureWidth();
-    config.opencv_capture_height = cm.opencvCaptureHeight();
-    config.opencv_capture_fps   = cm.opencvCaptureFps();
-    config.capture_mf_gpu       = cm.captureMfGpu();
-    config.capture_crop         = cm.captureCrop();
-    config.capture_format       = qs(cm.captureFormat());
+    const int  oldCaptureWidth  = config.capture_width;
+    const int  oldCaptureHeight = config.capture_height;
+    const int  oldCaptureFps    = config.capture_fps;
+    const bool oldCaptureGpu    = config.capture_gpu_decode;
+
+    config.capture_device     = qs(cm.captureDevice());
+    config.capture_format     = qs(cm.captureFormat());
+    config.capture_width      = cm.captureWidth();
+    config.capture_height     = cm.captureHeight();
+    config.capture_fps        = cm.captureFps();
+    config.capture_gpu_decode = cm.captureGpuDecode();
 
     int oldDetRes = config.detection_resolution;
     config.detection_resolution = cm.detectionResolution();
-
-    int oldFps = config.capture_fps;
-    config.capture_fps   = cm.captureFps();
     config.circle_mask   = cm.circleMask();
 
     // --- Hardware ---
@@ -154,21 +138,20 @@ void ConfigBridge::syncToRuntime() {
     // double-encoding CJK group names.  Do NOT overwrite here.
 
     // --- Set change flags ---
+    // 采集参数任一变化都必须重建采集器 —— 采集卡路径不做任何热切换,
+    // 因为格式/分辨率/帧率对不上时 MFCapture 会直接失败而不是降级。
     const bool captureDeviceChanged =
-        config.opencv_capture_index != oldDeviceIndex
-        || config.opencv_capture_api != oldCaptureApi
-        || config.opencv_capture_url != oldCaptureUrl
-        || config.opencv_capture_width != oldCaptureWidth
-        || config.opencv_capture_height != oldCaptureHeight
-        || config.opencv_capture_fps != oldDeviceFps
-        || config.capture_mf_gpu != oldMfGpu
-        || config.capture_crop != oldCaptureCrop
-        || config.capture_format != oldCaptureFormat;
-    if (config.capture_method != oldMethod || captureDeviceChanged)
+        config.capture_device != oldCaptureDevice
+        || config.capture_format != oldCaptureFormat
+        || config.capture_width  != oldCaptureWidth
+        || config.capture_height != oldCaptureHeight
+        || config.capture_fps    != oldCaptureFps
+        || config.capture_gpu_decode != oldCaptureGpu;
+    if (captureDeviceChanged)
         capture_method_changed = true;
     if (config.detection_resolution != oldDetRes)
         detection_resolution_changed = true;
-    if (config.capture_fps != oldFps)
+    if (config.capture_fps != oldCaptureFps)
         capture_fps_changed = true;
     if (config.ai_model != oldModel) {
         detector_model_changed = true;
@@ -190,25 +173,14 @@ void ConfigBridge::syncFromRuntime()
 
     QSignalBlocker blocker(&cm);
 
-    // --- Capture ---
-    cm.setCaptureMethod(qstr(config.capture_method));
-    cm.setUdpIp(qstr(config.udp_ip));
-    cm.setUdpPort(config.udp_port);
-    cm.setTcpIp(qstr(config.tcp_ip));
-    cm.setTcpPort(config.tcp_port);
-    cm.setEthAdapter(qstr(config.eth_adapter));
-    cm.setEthEthertype(config.eth_ethertype);
-    cm.setOpencvCaptureIndex(config.opencv_capture_index);
-    cm.setOpencvCaptureApi(qstr(config.opencv_capture_api));
-    cm.setOpencvCaptureUrl(qstr(config.opencv_capture_url));
-    cm.setOpencvCaptureWidth(config.opencv_capture_width);
-    cm.setOpencvCaptureHeight(config.opencv_capture_height);
-    cm.setOpencvCaptureFps(config.opencv_capture_fps);
-    cm.setCaptureMfGpu(config.capture_mf_gpu);
-    cm.setCaptureCrop(config.capture_crop);
+    // --- Capture: 只有「采集卡」一种方式 ---
+    cm.setCaptureDevice(qstr(config.capture_device));
     cm.setCaptureFormat(qstr(config.capture_format));
-    cm.setDetectionResolution(config.detection_resolution);
+    cm.setCaptureWidth(config.capture_width);
+    cm.setCaptureHeight(config.capture_height);
     cm.setCaptureFps(config.capture_fps);
+    cm.setCaptureGpuDecode(config.capture_gpu_decode);
+    cm.setDetectionResolution(config.detection_resolution);
     cm.setCircleMask(config.circle_mask);
 
     // --- Hardware ---

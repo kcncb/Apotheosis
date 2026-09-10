@@ -58,149 +58,63 @@ QString ConfigManager::configPath() const {
     return m_path;
 }
 
-// --- Capture ---
+// --- Capture: 只有「采集卡」一种方式 ---
+//
+// 旧的 capture_method / udp_* / tcp_* / eth_* / opencv_capture_* / capture_crop /
+// capture_mf_gpu 键已全部废弃。这里不再提供它们的读写接口, 老 QSettings 里的
+// 残留值不会被读取, 也不会再被写回。
 
-QString ConfigManager::captureMethod() const {
-    return m_settings->value("Capture/capture_method", "udp_capture").toString();
+QString ConfigManager::captureDevice() const {
+    return m_settings->value("Capture/capture_device", "").toString();
 }
 
-void ConfigManager::setCaptureMethod(const QString& v) {
-    m_settings->setValue("Capture/capture_method", v);
-    emit configChanged();
-}
-
-QString ConfigManager::udpIp() const {
-    return m_settings->value("Capture/udp_ip", "0.0.0.0").toString();
-}
-
-void ConfigManager::setUdpIp(const QString& v) {
-    m_settings->setValue("Capture/udp_ip", v);
-    emit configChanged();
-}
-
-int ConfigManager::udpPort() const {
-    return m_settings->value("Capture/udp_port", 1234).toInt();
-}
-
-void ConfigManager::setUdpPort(int v) {
-    m_settings->setValue("Capture/udp_port", v);
-    emit configChanged();
-}
-
-QString ConfigManager::tcpIp() const {
-    return m_settings->value("Capture/tcp_ip", "0.0.0.0").toString();
-}
-
-void ConfigManager::setTcpIp(const QString& v) {
-    m_settings->setValue("Capture/tcp_ip", v);
-    emit configChanged();
-}
-
-int ConfigManager::tcpPort() const {
-    return m_settings->value("Capture/tcp_port", 1235).toInt();
-}
-
-void ConfigManager::setTcpPort(int v) {
-    m_settings->setValue("Capture/tcp_port", v);
-    emit configChanged();
-}
-
-QString ConfigManager::ethAdapter() const {
-    return m_settings->value("Capture/eth_adapter", "").toString();
-}
-
-void ConfigManager::setEthAdapter(const QString& v) {
-    m_settings->setValue("Capture/eth_adapter", v);
-    emit configChanged();
-}
-
-int ConfigManager::ethEthertype() const {
-    return m_settings->value("Capture/eth_ethertype", 0x88B5).toInt();
-}
-
-void ConfigManager::setEthEthertype(int v) {
-    m_settings->setValue("Capture/eth_ethertype", v);
-    emit configChanged();
-}
-
-int ConfigManager::opencvCaptureIndex() const {
-    return m_settings->value("Capture/opencv_capture_index", 0).toInt();
-}
-
-void ConfigManager::setOpencvCaptureIndex(int v) {
-    m_settings->setValue("Capture/opencv_capture_index", v);
-    emit configChanged();
-}
-
-QString ConfigManager::opencvCaptureApi() const {
-    return m_settings->value("Capture/opencv_capture_api", "DSHOW").toString();
-}
-
-void ConfigManager::setOpencvCaptureApi(const QString& v) {
-    m_settings->setValue("Capture/opencv_capture_api", v);
-    emit configChanged();
-}
-
-QString ConfigManager::opencvCaptureUrl() const {
-    return m_settings->value("Capture/opencv_capture_url", "").toString();
-}
-
-void ConfigManager::setOpencvCaptureUrl(const QString& v) {
-    m_settings->setValue("Capture/opencv_capture_url", v);
-    emit configChanged();
-}
-
-int ConfigManager::opencvCaptureWidth() const {
-    return m_settings->value("Capture/opencv_capture_width", 0).toInt();
-}
-
-void ConfigManager::setOpencvCaptureWidth(int v) {
-    m_settings->setValue("Capture/opencv_capture_width", v);
-    emit configChanged();
-}
-
-int ConfigManager::opencvCaptureHeight() const {
-    return m_settings->value("Capture/opencv_capture_height", 0).toInt();
-}
-
-void ConfigManager::setOpencvCaptureHeight(int v) {
-    m_settings->setValue("Capture/opencv_capture_height", v);
-    emit configChanged();
-}
-
-int ConfigManager::opencvCaptureFps() const {
-    return m_settings->value("Capture/opencv_capture_fps", 0).toInt();
-}
-
-void ConfigManager::setOpencvCaptureFps(int v) {
-    m_settings->setValue("Capture/opencv_capture_fps", v);
-    emit configChanged();
-}
-
-bool ConfigManager::captureMfGpu() const {
-    return m_settings->value("Capture/capture_mf_gpu", true).toBool();
-}
-
-void ConfigManager::setCaptureMfGpu(bool v) {
-    m_settings->setValue("Capture/capture_mf_gpu", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCrop() const {
-    return m_settings->value("Capture/capture_crop", 0).toInt();
-}
-
-void ConfigManager::setCaptureCrop(int v) {
-    m_settings->setValue("Capture/capture_crop", v);
+void ConfigManager::setCaptureDevice(const QString& v) {
+    m_settings->setValue("Capture/capture_device", v);
     emit configChanged();
 }
 
 QString ConfigManager::captureFormat() const {
-    return m_settings->value("Capture/capture_format", "NV12").toString();
+    return m_settings->value("Capture/capture_format", "").toString();
 }
 
 void ConfigManager::setCaptureFormat(const QString& v) {
     m_settings->setValue("Capture/capture_format", v);
+    emit configChanged();
+}
+
+int ConfigManager::captureWidth() const {
+    return m_settings->value("Capture/capture_width", 0).toInt();
+}
+
+void ConfigManager::setCaptureWidth(int v) {
+    m_settings->setValue("Capture/capture_width", v);
+    emit configChanged();
+}
+
+int ConfigManager::captureHeight() const {
+    return m_settings->value("Capture/capture_height", 0).toInt();
+}
+
+void ConfigManager::setCaptureHeight(int v) {
+    m_settings->setValue("Capture/capture_height", v);
+    emit configChanged();
+}
+
+int ConfigManager::captureFps() const {
+    return m_settings->value("Capture/capture_fps", 0).toInt();
+}
+
+void ConfigManager::setCaptureFps(int v) {
+    m_settings->setValue("Capture/capture_fps", v);
+    emit configChanged();
+}
+
+bool ConfigManager::captureGpuDecode() const {
+    return m_settings->value("Capture/capture_gpu_decode", true).toBool();
+}
+
+void ConfigManager::setCaptureGpuDecode(bool v) {
+    m_settings->setValue("Capture/capture_gpu_decode", v);
     emit configChanged();
 }
 
@@ -213,86 +127,12 @@ void ConfigManager::setDetectionResolution(int v) {
     emit configChanged();
 }
 
-int ConfigManager::captureFps() const {
-    return m_settings->value("Capture/capture_fps", 60).toInt();
-}
-
-void ConfigManager::setCaptureFps(int v) {
-    m_settings->setValue("Capture/capture_fps", v);
-    emit configChanged();
-}
-
 bool ConfigManager::circleMask() const {
     return m_settings->value("Capture/circle_mask", true).toBool();
 }
 
 void ConfigManager::setCircleMask(bool v) {
     m_settings->setValue("Capture/circle_mask", v);
-    emit configChanged();
-}
-
-// --- Capture card ---
-
-int ConfigManager::captureCardIndex() const {
-    return m_settings->value("Capture/capture_card_index", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardIndex(int v) {
-    m_settings->setValue("Capture/capture_card_index", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCardWidth() const {
-    return m_settings->value("Capture/capture_card_width", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardWidth(int v) {
-    m_settings->setValue("Capture/capture_card_width", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCardHeight() const {
-    return m_settings->value("Capture/capture_card_height", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardHeight(int v) {
-    m_settings->setValue("Capture/capture_card_height", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCardFps() const {
-    return m_settings->value("Capture/capture_card_fps", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardFps(int v) {
-    m_settings->setValue("Capture/capture_card_fps", v);
-    emit configChanged();
-}
-
-QString ConfigManager::captureCardFormat() const {
-    return m_settings->value("Capture/capture_card_format", "AUTO").toString();
-}
-
-void ConfigManager::setCaptureCardFormat(const QString& v) {
-    m_settings->setValue("Capture/capture_card_format", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCardCropWidth() const {
-    return m_settings->value("Capture/capture_card_crop_width", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardCropWidth(int v) {
-    m_settings->setValue("Capture/capture_card_crop_width", v);
-    emit configChanged();
-}
-
-int ConfigManager::captureCardCropHeight() const {
-    return m_settings->value("Capture/capture_card_crop_height", 0).toInt();
-}
-
-void ConfigManager::setCaptureCardCropHeight(int v) {
-    m_settings->setValue("Capture/capture_card_crop_height", v);
     emit configChanged();
 }
 
@@ -327,7 +167,7 @@ void ConfigManager::setMakcuPort(const QString& v) {
 }
 
 int ConfigManager::makcuNewBaudrate() const {
-    return m_settings->value("Hardware/makcu_new_baudrate", 115200).toInt();
+    return m_settings->value("Hardware/makcu_new_baudrate", 6000000).toInt();
 }
 
 void ConfigManager::setMakcuNewBaudrate(int v) {

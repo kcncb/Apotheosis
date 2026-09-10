@@ -806,14 +806,14 @@ atten = 1.0   Path A (新检测帧)
     </p>
     <ul>
       <li><b>MAKCU</b>：原版 MAKCU 串口协议。</li>
-      <li><b>MAKCUNEW</b>：PID_MIRROR 二进制协议，PID 会话固定 4000000 波特率。</li>
+      <li><b>MAKCUNEW</b>：fw_device 直通透传二进制协议 (v1.0)。上电固定 115200，连接期自动切至配置速率。</li>
     </ul>
 
     <table class="params">
       <thead><tr><th>参数</th><th>默认</th><th>含义</th></tr></thead>
       <tbody>
         <tr><td>makcu_port / baudrate</td><td>COM0 / 115200</td><td>MAKCU 串口与波特率。</td></tr>
-        <tr><td>makcu_new_port / baudrate</td><td>COM0 / 4000000</td><td>MAKCUNEW 串口与固定会话波特率。</td></tr>
+        <tr><td>makcu_new_port / baudrate</td><td>COM0 / 6000000</td><td>MAKCUNEW 串口与目标波特率，默认取固件上限 6 Mbps；固件上电固定 115200，连接时由上位机发 0x42 SET_BAUD（失败再用 DE AD 转义帧）切换并重连，协商失败自动退回 115200。</td></tr>
       </tbody>
     </table>
     <div class="note">

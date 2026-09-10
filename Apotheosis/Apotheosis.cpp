@@ -31,6 +31,7 @@
 #include "mem/cpu_affinity_manager.h"
 #include "runtime/cuda_availability.h"
 #include "runtime/inference_session.h"
+#include "runtime/latency_probe.h"
 #include "runtime/thread_loops.h"
 #include "detector/dml_detector.h"
 #include "auth/auth_state.h"
@@ -234,6 +235,23 @@ int main(int argc, char* argv[])
     {
         std::cerr << "[Config] Error with loading config!" << std::endl;
         return FatalExit("[Config] Error with loading config!");
+    }
+
+    // 端到端延迟日志落盘 (logs/latency_<时间>.log)。
+    // 工作目录已在上面切到 exe 所在目录, 所以日志就落在程序旁边。
+    // 探针每写一行都 flush, 因此即使进程被强杀也不会丢数据。
+    // 失败 (只读目录等) 不阻断启动, 只打印原因。
+    {
+        runtime::latency::FileLogConfig logCfg;
+        logCfg.directory   = "logs";
+        logCfg.basename    = "latency";
+        logCfg.interval_ms = 1000;
+        logCfg.spike_ms    = 25.0;
+        if (runtime::latency::startFileLog(logCfg))
+            std::cout << "[Latency] Logging to " << runtime::latency::fileLogPath() << std::endl;
+        else
+            std::cerr << "[Latency] File log disabled: "
+                      << runtime::latency::fileLogError() << std::endl;
     }
 
     // 主界面可匿名使用；模型加密/授权页在需要时再弹出登录框。

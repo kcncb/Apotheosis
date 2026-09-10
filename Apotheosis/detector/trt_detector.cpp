@@ -30,6 +30,7 @@
 #include "cuda_preprocess.h"
 #include "capture.h"
 #include "runtime/active_hotkey.h"
+#include "runtime/latency_probe.h"
 
 int model_quant;
 std::vector<float> outputData;
@@ -1314,6 +1315,9 @@ void TrtDetector::processFrame(const cv::Mat& frame)
     if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
+    // 延迟探针: 记录 detector 取走该帧的时刻, 顺带取回它的采集戳,
+    // 供推理线程发布时写进 detectionBuffer.frame_stamp_ns。
+    runtime::latency::markSubmit();
     currentFrame = frame;
     currentFrameGpu.release();
     pendingFrameType = PendingFrameType::Cpu;
@@ -1326,6 +1330,7 @@ void TrtDetector::processFrameGpu(GpuImage frame)
     if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
+    runtime::latency::markSubmit();
     currentFrame.release();
     currentFrameGpu = std::move(frame);
     pendingFrameType = PendingFrameType::Gpu;
@@ -1668,7 +1673,9 @@ void TrtDetector::inferenceThread()
                                     detectionBuffer.classes.push_back(det.classId);
                                     detectionBuffer.confidences.push_back(det.confidence);
                                 }
-                                detectionBuffer.bumpVersionLocked();
+                                runtime::latency::markInferenceDone();
+                                detectionBuffer.bumpVersionLocked(
+                                    runtime::latency::takeSubmittedCaptureNs());
                                 detectionBuffer.cv.notify_all();
                             }
                             continue;
@@ -1833,7 +1840,8 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
             detectionBuffer.confidences.push_back(det.confidence);
         }
 
-        detectionBuffer.bumpVersionLocked();
+        runtime::latency::markInferenceDone();
+        detectionBuffer.bumpVersionLocked(runtime::latency::takeSubmittedCaptureNs());
         detectionBuffer.cv.notify_all();
     }
 }

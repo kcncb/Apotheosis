@@ -156,35 +156,29 @@ struct CrosshairColorProfileConfig
 class Config
 {
 public:
-    // Capture
-    std::string capture_method;
-    std::string udp_ip;
-    int udp_port = 0;
-    std::string tcp_ip;
-    int tcp_port = 0;
-    // eth_capture: ProSexy 原始以太网帧接收端。eth_adapter 为 npcap 设备名
-    // (\Device\NPF_{GUID}); eth_ethertype 须与发送端一致(ProSexy 默认 0x88B5)。
-    std::string eth_adapter;
-    int eth_ethertype = 0x88B5;
-    // 采集卡几何参数,由 OpenCV / MF / 圆刚 SDK 后端共用。
-    int opencv_capture_index = 0;
-    std::string opencv_capture_api = "DSHOW"; // DSHOW | MSMF | FFMPEG | ANY (仅 opencv)
-    std::string opencv_capture_url;           // 可选连接 URL (rtsp:// / 文件路径); 空 = 用设备索引 (仅 opencv)
-    int opencv_capture_width = 0;             // 原始采集宽度, 0 = 让设备决定
-    int opencv_capture_height = 0;            // 原始采集高度, 0 = 让设备决定
-    int opencv_capture_fps = 0;               // 采集 FPS, 0 = 设备默认
-    int capture_crop = 0;                     // 中心裁切正方形边长; >0 时驱动 detection_resolution, 0 = 整帧缩放到 detection_resolution
-    std::string capture_format = "MJPG";      // NV12 | MJPG | YUY2 | RGB32
-    bool capture_mf_gpu = true;               // MF/圆刚: true=GPU 转换, false=CPU 转换
+    // ── 采集方式: 只有一种 ──
+    // 全程序只有「采集卡」这一条采集路径。参数全部来自设备真实能力探测,
+    // UI 用 格式 / 分辨率 / 帧率 三级联动下拉让用户从中选, 不再手填。
+    //
+    // 关键: 这里存的组合【必须】是设备真实支持的。采集侧不做任何替换 ——
+    // 对不上就直接报错, 而不是悄悄换个"差不多的"模式跑起来。
+    std::string capture_device;   // 设备 friendly name (index 随插拔变化, 名字不会)
+    std::string capture_format;   // NV12 | MJPG | YUY2 | RGB32
+    int  capture_width  = 0;
+    int  capture_height = 0;
+    int  capture_fps    = 0;
+    bool capture_gpu_decode = true;
+
+    // 没有 capture_crop: 中心裁切恒等于模型输入边长(detection_resolution),
+    // 保证送进模型的永远正好是模型要的尺寸 —— 不多裁, 也不少裁再缩。
     int detection_resolution = 320;
-    int capture_fps = 60;
     bool circle_mask = true;
 
     // Hardware
     std::string input_method = "MAKCU"; // MAKCU | MAKCUNEW
     int makcu_baudrate = 115200;
     std::string makcu_port = "COM0";
-    int makcu_new_baudrate = 115200;
+    int makcu_new_baudrate = 6000000; // 固件上限; 协商失败自动退回 115200
     std::string makcu_new_port = "COM0";
 
     // AI

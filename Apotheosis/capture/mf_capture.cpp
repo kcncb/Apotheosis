@@ -1,4 +1,5 @@
 #include "mf_capture.h"
+#include "capture_card_probe.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
@@ -63,51 +64,63 @@ bool GetSubType(IMFMediaType* type, GUID* subtype)
     return type && subtype && SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, subtype));
 }
 
-// 跨多个 subtype 一次性枚举设备的所有原生媒体类型,综合打分挑选最优 type,然后
-// 直接 SetCurrentMediaType 选中的原生类型(设备一定接受)。
+// 严格协商: 只接受【完全一致】的 (格式, 分辨率, 帧率)。这里没有任何回退。
 //
-// 关键设计:
-//   1) 不再像旧版那样锁死单一请求 subtype 才挑候选 —— 圆刚 / AVerMedia 改 EDID 后,
-//      用户填 NV12 但设备真正暴露的可能是 YUY2/MJPG/低 fps NV12;旧版协商必败或锁到
-//      30fps 的 NV12。这里把 4 种已知 subtype 都拿来一起评分,把"接近请求 fps"放到
-//      首要位次,"用户偏好的 subtype"作次序。
-//   2) MF_MT_FRAME_RATE 在部分驱动上是 0,真实帧率写在 MF_MT_FRAME_RATE_RANGE_MAX —
-//      读不到 FRAME_RATE 时回退到 RANGE_MAX,避免把这类条目当成 0fps 错排。
-//   3) 设备没有 size 属性时不强行按面积比对,纯靠 fps + 偏好定阶,让 EDID 怪卡也能开。
+// 失败一律返回 false 并给出可操作的错误信息, 由调用方终止采集并报错。
 //
-// preferred: 用户偏好的 subtype 顺序(第 0 个是 UI 里选的格式),后续元素打分次序低
-// chosenSubtype: 出参,实际选用的 subtype(可能不是用户偏好的第 0 个)
-bool SelectAndApplyBestType(IMFSourceReader* reader,
-                             const std::vector<GUID>& preferred,
-                             int wantW, int wantH, int wantFps,
-                             GUID& chosenSubtype, double& outFps,
-                             bool log_enumeration)
+// 为什么不做回退 —— 静默换 mode 的代价全部由用户承担, 而且用户无从得知:
+//   * 选 NV12 被换成 MJPG  -> 白多一次编解码往返, 延迟变差
+//   * 选 1080p 被换成 720p -> 检测精度下降, 表现成"准星跟不上"
+//   * 选 240fps 被锁 30fps -> 控制环频率掉到 1/8, 手感直接崩
+// 这三件都比"开不起来 + 明确告诉你设备到底支持什么"糟糕得多。
+//
+// out_error 里会列出设备【真实支持】的组合, 用户照着改下拉即可。
+bool SelectExactMediaType(IMFSourceReader* reader,
+                          GUID wantSubtype,
+                          int wantW, int wantH, int wantFps,
+                          double& outFps,
+                          std::string& out_error)
 {
     outFps = 0.0;
-    chosenSubtype = GUID_NULL;
-    if (!reader || preferred.empty())
+    out_error.clear();
+
+    if (!reader)
+    {
+        out_error = "source reader unavailable";
         return false;
+    }
+    if (wantW <= 0 || wantH <= 0)
+    {
+        out_error = "no resolution selected (pick one from the device capability list)";
+        return false;
+    }
+    if (wantFps <= 0)
+    {
+        out_error = "no frame rate selected (pick one from the device capability list)";
+        return false;
+    }
+
+    const char* wantName = "OTHER";
+    if (wantSubtype == MFVideoFormat_NV12)  wantName = "NV12";
+    if (wantSubtype == MFVideoFormat_MJPG)  wantName = "MJPG";
+    if (wantSubtype == MFVideoFormat_YUY2)  wantName = "YUY2";
+    if (wantSubtype == MFVideoFormat_RGB32) wantName = "RGB32";
 
     struct TypeInfo
     {
         ComPtr<IMFMediaType> type;
-        GUID  sub{};
-        int   w = 0;
-        int   h = 0;
+        int    w = 0;
+        int    h = 0;
         double fps = 0.0;
-        int   prefIdx = INT_MAX;   // 在 preferred 里的下标(越小越优先)
     };
 
-    auto subtypeShortName = [](const GUID& g) -> const char*
-    {
-        if (g == MFVideoFormat_NV12)  return "NV12";
-        if (g == MFVideoFormat_MJPG)  return "MJPG";
-        if (g == MFVideoFormat_YUY2)  return "YUY2";
-        if (g == MFVideoFormat_RGB32) return "RGB32";
-        return "OTHER";
-    };
+    // 全量枚举原生媒体类型, 一边分类一边攒"报错素材"。
+    std::vector<TypeInfo>            sameFormat;      // 同 subtype
+    std::vector<TypeInfo>            sameRes;         // 同 subtype + 同尺寸
+    std::vector<std::string>         otherFormats;    // 设备还提供哪些格式
+    std::vector<std::pair<int,int>>  allResolutions;  // 该格式下有哪些分辨率
+    const TypeInfo*                  exact = nullptr;
 
-    std::vector<TypeInfo> all;
     for (DWORD i = 0;; ++i)
     {
         ComPtr<IMFMediaType> t;
@@ -121,89 +134,112 @@ bool SelectAndApplyBestType(IMFSourceReader* reader,
         if (!GetSubType(t.Get(), &sub))
             continue;
 
-        int pref = -1;
-        for (size_t p = 0; p < preferred.size(); ++p)
-            if (preferred[p] == sub) { pref = static_cast<int>(p); break; }
-        if (pref < 0)
-            continue;   // 不在用户允许的 subtype 集合里,跳过
+        UINT32 w = 0, h = 0;
+        if (FAILED(MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0)
+            continue;
 
         TypeInfo info;
         info.type = t;
-        info.sub = sub;
-        info.prefIdx = pref;
-        UINT32 w = 0, h = 0;
-        if (SUCCEEDED(MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h)))
-        {
-            info.w = static_cast<int>(w);
-            info.h = static_cast<int>(h);
-        }
-        // 优先取声明的 frame rate;若该属性缺失或分母为 0,回退到 RANGE_MAX。
-        // 一些 AVerMedia/EDID 改装驱动只在 RANGE_MAX 里写真实帧率。
+        info.w = static_cast<int>(w);
+        info.h = static_cast<int>(h);
         UINT32 num = 0, den = 0;
         if (SUCCEEDED(MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, &num, &den)) && den != 0 && num != 0)
             info.fps = static_cast<double>(num) / den;
         else if (SUCCEEDED(MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE_RANGE_MAX, &num, &den)) && den != 0 && num != 0)
             info.fps = static_cast<double>(num) / den;
-        all.push_back(std::move(info));
-    }
 
-    if (log_enumeration)
-    {
-        std::cerr << "[MFCapture] Enumerated " << all.size() << " supported native type(s):" << std::endl;
-        for (const auto& t : all)
-            std::cerr << "  - " << subtypeShortName(t.sub)
-                      << " " << t.w << "x" << t.h
-                      << " @ " << t.fps << "fps (prefIdx=" << t.prefIdx << ")" << std::endl;
-    }
-
-    if (all.empty())
-        return false;
-
-    // 评分:先按"分辨率组"过滤一遍,再综合 fps 接近度 + subtype 偏好排序。
-    //   resScore:分辨率精确匹配 = 0;否则取与请求面积的差值(未指定分辨率时 = 0,不影响)。
-    //   fpsScore:|fps - wantFps|;wantFps<=0 时取 -fps(等价"越高越优")。
-    //   prefScore:preferred 下标,小者优先。
-    // 三者按 (resScore, fpsScore, prefScore) 字典序比较。这样:
-    //   * 圆刚 EDID 改装 + 用户选 NV12:NV12 不存在但 YUY2/MJPG 存在 → 自动落到后者
-    //   * GC553G2 + 用户选 NV12 + wantFps=240:NV12@30 vs MJPG@120 → MJPG@120 胜出
-    //     (因为 fps 差更小);若用户保留 NV12 偏好,但 fps 差异更大,以 fps 为主。
-    auto resScore = [&](const TypeInfo& t) -> double
-    {
-        if (wantW <= 0 || wantH <= 0) return 0.0;
-        if (t.w == wantW && t.h == wantH) return 0.0;
-        return std::abs(static_cast<double>(t.w) * t.h
-                        - static_cast<double>(wantW) * wantH);
-    };
-    auto fpsScore = [&](const TypeInfo& t) -> double
-    {
-        if (wantFps <= 0) return -t.fps;   // 取最高 fps
-        return std::abs(t.fps - static_cast<double>(wantFps));
-    };
-
-    const TypeInfo* chosen = nullptr;
-    for (const auto& t : all)
-    {
-        if (!chosen)
+        if (sub != wantSubtype)
         {
-            chosen = &t;
+            const char* other = "OTHER";
+            if      (sub == MFVideoFormat_NV12)  other = "NV12";
+            else if (sub == MFVideoFormat_MJPG)  other = "MJPG";
+            else if (sub == MFVideoFormat_YUY2)  other = "YUY2";
+            else if (sub == MFVideoFormat_RGB32) other = "RGB32";
+            if (std::find(otherFormats.begin(), otherFormats.end(), std::string(other)) == otherFormats.end())
+                otherFormats.push_back(other);
             continue;
         }
-        const double r1 = resScore(*chosen), r2 = resScore(t);
-        if (r2 < r1) { chosen = &t; continue; }
-        if (r2 > r1) continue;
-        const double f1 = fpsScore(*chosen), f2 = fpsScore(t);
-        if (f2 < f1) { chosen = &t; continue; }
-        if (f2 > f1) continue;
-        if (t.prefIdx < chosen->prefIdx) chosen = &t;
+
+        const std::pair<int,int> wh{ info.w, info.h };
+        if (std::find(allResolutions.begin(), allResolutions.end(), wh) == allResolutions.end())
+            allResolutions.push_back(wh);
+
+        if (info.w == wantW && info.h == wantH)
+        {
+            // 29.97 / 59.94 这类非整数帧率按 ±1 容差匹配, 这是设备侧的表示差异,
+            // 不是"换了个模式"。
+            if (std::abs(info.fps - static_cast<double>(wantFps)) <= 1.0 && !exact)
+                exact = &info;
+            sameRes.push_back(std::move(info));
+        }
+        sameFormat.push_back(std::move(info));
     }
-    if (!chosen)
-        return false;
 
-    if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, chosen->type.Get())))
-        return false;
+    const auto joinRes = [](const std::vector<std::pair<int,int>>& v) {
+        std::ostringstream os;
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            if (i) os << ", ";
+            os << v[i].first << "x" << v[i].second;
+        }
+        return os.str();
+    };
+    const auto joinNames = [](const std::vector<std::string>& v) {
+        std::ostringstream os;
+        for (size_t i = 0; i < v.size(); ++i) { if (i) os << ", "; os << v[i]; }
+        return os.str();
+    };
 
-    chosenSubtype = chosen->sub;
-    outFps = chosen->fps;
+    // ---- 逐级诊断: 每一级都给出"设备实际有什么", 而不是含糊地失败 ----
+    if (sameFormat.empty())
+    {
+        std::ostringstream os;
+        os << "device does not offer the requested pixel format " << wantName;
+        if (!otherFormats.empty())
+            os << "; it offers: " << joinNames(otherFormats);
+        else
+            os << "; it offers no usable pixel format at all";
+        out_error = os.str();
+        return false;
+    }
+
+    if (sameRes.empty())
+    {
+        std::ostringstream os;
+        os << "device does not offer " << wantW << "x" << wantH << " in " << wantName
+           << "; that format supports: " << joinRes(allResolutions);
+        out_error = os.str();
+        return false;
+    }
+
+    if (!exact)
+    {
+        std::ostringstream os;
+        os << "device does not support " << wantName << " " << wantW << "x" << wantH
+           << " @ " << wantFps << "fps; that combination supports fps:";
+        std::vector<int> rates;
+        for (const auto& t : sameRes)
+        {
+            const int r = static_cast<int>(std::lround(t.fps));
+            if (std::find(rates.begin(), rates.end(), r) == rates.end())
+                rates.push_back(r);
+        }
+        std::sort(rates.begin(), rates.end());
+        for (int r : rates) os << " " << r;
+        out_error = os.str();
+        return false;
+    }
+
+    if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, exact->type.Get())))
+    {
+        std::ostringstream os;
+        os << "device refused to switch to " << wantName << " " << wantW << "x" << wantH
+           << " @ " << wantFps << "fps (SetCurrentMediaType failed)";
+        out_error = os.str();
+        return false;
+    }
+
+    outFps = exact->fps;
     return true;
 }
 
@@ -330,6 +366,9 @@ std::vector<MFDeviceInfo> MFCapture::EnumerateDevices()
 
                 MFDeviceInfo info;
                 info.index = static_cast<int>(i);
+                // friendly_name 是设备自报的原始名, 用于配置持久化 ——
+                // index 会随插拔顺序变化, 名字不会。
+                info.friendly_name = label;
                 std::ostringstream display;
                 display << u8"设备 #" << i;
                 if (!label.empty())
@@ -346,6 +385,238 @@ std::vector<MFDeviceInfo> MFCapture::EnumerateDevices()
         CoUninitialize();
     return devices;
 }
+
+
+// =============================================================================
+// 采集卡能力探测
+// =============================================================================
+//
+// 只做一件事: 把设备【真实支持】的 (像素格式, 分辨率, 帧率) 全集问出来。
+// 不做任何"猜测/补齐/升级" —— 设备支持什么就是什么。
+//
+// 手段是 Media Foundation 的 IMFSourceReader::GetNativeMediaType: 从 0 开始
+// 一直枚举到 MF_E_NO_MORE_TYPES, 每一条原生媒体类型就是设备宣称的一种能力。
+// 这比"设一个 mode 然后看能不能打开"可靠得多 —— 后者会把"能打开但实际
+// 每帧都超时"的 mode 也算作支持。
+namespace
+{
+
+struct KnownFormat
+{
+    const GUID* guid;
+    const char* name;
+    bool        supported;   // 本程序是否真的能解码
+};
+
+// 设备可能报出来的像素格式。supported=false 的也列出来 —— 诚实反映设备能力,
+// 但 UI 默认不展示 (本程序吃不下, 展示了只会误导)。
+const KnownFormat kKnownFormats[] = {
+    { &MFVideoFormat_NV12,   "NV12",  true  },
+    { &MFVideoFormat_MJPG,   "MJPG",  true  },
+    { &MFVideoFormat_YUY2,   "YUY2",  true  },
+    { &MFVideoFormat_RGB32,  "RGB32", true  },
+    { &MFVideoFormat_ARGB32, "RGB32", true  },
+    { &MFVideoFormat_H264,   "H264",  false },
+    { &MFVideoFormat_H264_ES,"H264",  false },
+    { &MFVideoFormat_P010,   "P010",  false },
+    { &MFVideoFormat_P016,   "P016",  false },
+    { &MFVideoFormat_I420,   "I420",  false },
+    { &MFVideoFormat_IYUV,   "IYUV",  false },
+    { &MFVideoFormat_YV12,   "YV12",  false },
+    { &MFVideoFormat_UYVY,   "UYVY",  false },
+    { &MFVideoFormat_YUYV,   "YUYV",  false },
+    { &MFVideoFormat_M4S2,   "M4S2",  false },
+    { &MFVideoFormat_NV11,   "NV11",  false },
+    { &MFVideoFormat_MP43,   "MP43",  false },
+    { &MFVideoFormat_MP4S,   "MP4S",  false },
+};
+
+std::string FormatNameFromSubtype(REFGUID subtype, bool& supported)
+{
+    for (const auto& k : kKnownFormats)
+    {
+        if (IsEqualGUID(subtype, *k.guid))
+        {
+            supported = k.supported;
+            return k.name;
+        }
+    }
+    // 未知格式: 原样打印 GUID, 不编造名字。
+    supported = false;
+    wchar_t buf[64]{};
+    StringFromGUID2(subtype, buf, 64);
+    return WideToUtf8(buf);
+}
+
+// 设备常报 29.97 / 59.94 这类非整数帧率, 统一四舍五入到整数再做匹配。
+int RoundFps(UINT32 num, UINT32 den)
+{
+    if (den == 0) return 0;
+    return static_cast<int>(std::lround(static_cast<double>(num) / den));
+}
+
+} // namespace
+
+bool MFCapture::ProbeCapabilities(MFDeviceInfo& dev)
+{
+    dev.caps.clear();
+    dev.caps_probed = false;
+
+    const HRESULT coInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool shouldUninit = SUCCEEDED(coInit);
+
+    bool ok = false;
+    if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE)))
+    {
+        ComPtr<IMFAttributes> attrs = CreateVideoDeviceAttributes();
+        IMFActivate** activates = nullptr;
+        UINT32 count = 0;
+        if (attrs && SUCCEEDED(MFEnumDeviceSources(attrs.Get(), &activates, &count)))
+        {
+            if (dev.index >= 0 && static_cast<UINT32>(dev.index) < count)
+            {
+                IMFActivate* activate = activates[dev.index];
+
+                ComPtr<IMFMediaSource> source;
+                if (SUCCEEDED(activate->ActivateObject(
+                        __uuidof(IMFMediaSource),
+                        reinterpret_cast<void**>(source.GetAddressOf()))))
+                {
+                    ComPtr<IMFSourceReader> reader;
+                    if (SUCCEEDED(MFCreateSourceReaderFromMediaSource(
+                            source.Get(), nullptr, &reader)))
+                    {
+                        // 关键: 不 SetCurrentMediaType。我们要的是【原生】能力表,
+                        // 一旦设了 current type, 部分驱动会把 GetNativeMediaType
+                        // 的返回收窄到与 current 兼容的子集, 表就不全了。
+                        for (DWORD i = 0; ; ++i)
+                        {
+                            ComPtr<IMFMediaType> mt;
+                            const HRESULT hr = reader->GetNativeMediaType(
+                                static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+                                i, mt.GetAddressOf());
+                            if (hr == MF_E_NO_MORE_TYPES || FAILED(hr))
+                                break;
+
+                            GUID sub{};
+                            if (FAILED(mt->GetGUID(MF_MT_SUBTYPE, &sub)))
+                                continue;
+
+                            UINT32 w = 0, h = 0;
+                            if (FAILED(MFGetAttributeSize(mt.Get(), MF_MT_FRAME_SIZE, &w, &h)))
+                                continue;
+                            if (w == 0 || h == 0)
+                                continue;
+
+                            UINT32 num = 0, den = 0;
+                            if (FAILED(MFGetAttributeRatio(mt.Get(), MF_MT_FRAME_RATE, &num, &den)))
+                            {
+                                // 少数驱动只给 FRAME_RATE_RANGE_MAX。取不到就跳过这条,
+                                // 不编造帧率 —— 编造的帧率正是"帧率下降"的根源。
+                                if (FAILED(MFGetAttributeRatio(
+                                        mt.Get(), MF_MT_FRAME_RATE_RANGE_MAX, &num, &den)))
+                                    continue;
+                            }
+                            const int fps = RoundFps(num, den);
+                            if (fps <= 0) continue;
+
+                            bool supported = false;
+                            const std::string fname = FormatNameFromSubtype(sub, supported);
+
+                            // 合并到 (format, width, height) 桶里, 帧率去重。
+                            MFCapability* slot = nullptr;
+                            for (auto& c : dev.caps)
+                            {
+                                if (c.format == fname && c.width == static_cast<int>(w)
+                                    && c.height == static_cast<int>(h))
+                                {
+                                    slot = &c;
+                                    break;
+                                }
+                            }
+                            if (!slot)
+                            {
+                                MFCapability c;
+                                c.format    = fname;
+                                c.width     = static_cast<int>(w);
+                                c.height    = static_cast<int>(h);
+                                c.supported = supported;
+                                dev.caps.push_back(std::move(c));
+                                slot = &dev.caps.back();
+                            }
+                            if (std::find(slot->fps.begin(), slot->fps.end(), fps)
+                                == slot->fps.end())
+                                slot->fps.push_back(fps);
+                        }
+
+                        for (auto& c : dev.caps)
+                            std::sort(c.fps.begin(), c.fps.end());
+
+                        ok = !dev.caps.empty();
+                    }
+                    activate->ShutdownObject();
+                }
+                for (UINT32 i = 0; i < count; ++i)
+                    activates[i]->Release();
+                CoTaskMemFree(activates);
+            }
+            else
+            {
+                for (UINT32 i = 0; i < count; ++i)
+                    activates[i]->Release();
+                CoTaskMemFree(activates);
+            }
+        }
+        MFShutdown();
+    }
+    if (shouldUninit)
+        CoUninitialize();
+
+    dev.caps_probed = ok;
+    return ok;
+}
+
+// =============================================================================
+// capture_card 门面实现 (薄封装, 声明见 capture_card_probe.h)
+// =============================================================================
+namespace capture_card
+{
+
+std::vector<MFDeviceInfo> ProbeAll()
+{
+    return MFCapture::EnumerateDevicesWithCaps(/*probe_index=*/-1);
+}
+
+std::vector<MFDeviceInfo> ProbeOne(int device_index)
+{
+    return MFCapture::EnumerateDevicesWithCaps(device_index);
+}
+
+const MFDeviceInfo* FindByName(const std::vector<MFDeviceInfo>& devs,
+                               const std::string& friendly_name)
+{
+    if (friendly_name.empty())
+        return nullptr;
+    for (const auto& d : devs)
+        if (d.friendly_name == friendly_name)
+            return &d;
+    return nullptr;   // 刻意不回退到 devs[0]: 上次选的卡没插就该报错, 不该偷偷换一张
+}
+
+} // namespace capture_card
+
+std::vector<MFDeviceInfo> MFCapture::EnumerateDevicesWithCaps(int probe_index)
+{
+    std::vector<MFDeviceInfo> devices = EnumerateDevices();
+    for (auto& d : devices)
+    {
+        if (probe_index >= 0 && d.index != probe_index)
+            continue;
+        ProbeCapabilities(d);
+    }
+    return devices;
+}
+
 
 cv::Mat MFCapture::GetNextFrameCpu()
 {
@@ -424,8 +695,16 @@ void MFCapture::ReceiveThread()
         goto cleanup;
     }
 
+    // 设备索引越界【不静默换设备】。换了之后用户以为在用 A 卡, 实际采的是 B 卡,
+    // EDID / 分辨率 / 帧率全部错位, 比直接报错难查得多。
     if (device_index_ >= static_cast<int>(count))
-        device_index_ = 0;
+    {
+        std::cerr << "[MFCapture] Device index " << device_index_
+                  << " out of range (only " << count << " device(s) present). "
+                     "No substitution is performed." << std::endl;
+        open_error_ = "selected capture device is no longer present";
+        goto cleanup;
+    }
 
     if (FAILED(activates[device_index_]->ActivateObject(IID_PPV_ARGS(&source))))
     {
@@ -434,87 +713,44 @@ void MFCapture::ReceiveThread()
     }
 
     {
-        // 构造偏好顺序:UI 选的格式排第 0,其余 3 种依次跟在后面作为兜底。这样
-        // 圆刚 / EDID 改装等卡上,即便用户填的 subtype 在驱动里被砍掉,也能落到
-        // 设备真实暴露的格式;同时若用户偏好的 subtype 帧率远低于请求(GC553G2
-        // 上的 NV12@30 vs MJPG@120),按 fps 接近度优先而非锁死偏好。
-        auto buildPreferred = [&]() -> std::vector<GUID>
+        // 禁用 MF 内置 converter, 要求设备直送原生帧格式。这是【唯一】路径 ——
+        // 启用 converter 意味着 source reader 会在 CPU 上把帧偷偷转一手,
+        // 帧率 / 带宽 / 延迟全部不可控, 正是要杜绝的那类"看不见的回退"。
+        reader.Reset();
+        ComPtr<IMFAttributes> readerAttrs;
+        MFCreateAttributes(&readerAttrs, 2);
+        if (readerAttrs)
         {
-            std::vector<GUID> p;
-            p.reserve(4);
-            p.push_back(SubtypeFor(format_));
-            const Format chain[] = { Format::Mjpg, Format::Nv12, Format::Yuy2, Format::Rgb32 };
-            for (Format f : chain)
-            {
-                const GUID& g = SubtypeFor(f);
-                bool dup = false;
-                for (const auto& q : p) if (q == g) { dup = true; break; }
-                if (!dup) p.push_back(g);
-            }
-            return p;
-        };
-
-        // 第一次尝试:禁用 MF 内置 converter,要求设备直送原生帧格式。这是稳态路径,
-        // 帧率/带宽不会被 source reader 在 CPU 上偷偷转一手。
-        auto createReader = [&](bool disable_converters) -> bool
-        {
-            reader.Reset();
-            ComPtr<IMFAttributes> readerAttrs;
-            MFCreateAttributes(&readerAttrs, 2);
-            if (readerAttrs)
-            {
-                readerAttrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, disable_converters ? TRUE : FALSE);
-                readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, disable_converters ? FALSE : TRUE);
-            }
-            return SUCCEEDED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttrs.Get(), &reader));
-        };
-
-        if (!createReader(true))
+            readerAttrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+            readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
+        }
+        if (FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttrs.Get(), &reader)))
         {
             std::cerr << "[MFCapture] Failed to create source reader." << std::endl;
+            open_error_ = "failed to create Media Foundation source reader";
             goto cleanup;
         }
 
-        const std::vector<GUID> preferred = buildPreferred();
-        GUID chosenSubtype = GUID_NULL;
-        bool ok = SelectAndApplyBestType(reader.Get(), preferred, src_width_, src_height_,
-                                          capture_fps_, chosenSubtype, negotiatedFps, /*log_enumeration=*/false);
-
-        // 严格路径失败:某些 EDID 改装驱动只在启用 converter 的 reader 上才把
-        // 真实 type 列出来。重建 reader 再试一次,仍限制在 4 种已知 subtype 内,
-        // 不会让 MF 把帧格式悄悄换成不认识的东西。
+        // 严格协商: 只接受与配置【完全一致】的 格式 / 分辨率 / 帧率。
+        // 任何一处对不上都直接失败, 不做任何替换。
+        double negotiatedOut = 0.0;
+        std::string why;
+        const bool ok = SelectExactMediaType(reader.Get(), SubtypeFor(format_),
+                                             src_width_, src_height_, capture_fps_,
+                                             negotiatedOut, why);
         if (!ok)
         {
-            std::cerr << "[MFCapture] Strict negotiation failed; retrying with MF converters enabled." << std::endl;
-            if (!createReader(false))
-            {
-                std::cerr << "[MFCapture] Failed to recreate source reader for fallback." << std::endl;
-                goto cleanup;
-            }
-            ok = SelectAndApplyBestType(reader.Get(), preferred, src_width_, src_height_,
-                                         capture_fps_, chosenSubtype, negotiatedFps, /*log_enumeration=*/true);
-        }
-
-        if (!ok || !QueryCurrentFrameGeometry(reader.Get(), frame_width_, frame_height_, frame_stride_))
-        {
-            std::cerr << "[MFCapture] Device does not expose any of the requested formats "
-                         "(NV12/MJPG/YUY2/RGB32). See enumeration above." << std::endl;
-            // 上面 log_enumeration=true 的那次失败已经打印了实际枚举,这里再补一行总结。
+            std::cerr << "[MFCapture] " << why << std::endl;
+            open_error_ = why;
             goto cleanup;
         }
+        negotiatedFps = negotiatedOut;
 
-        // 把"实际选用的格式"回写到 format_,这样后续 switch(format_) 走到正确的解码路径。
-        // 用户填的是 NV12 但实际拿到 MJPG 的情况下,这一步至关重要,否则会用 NV12 解码器
-        // 去喂 JPEG 字节流。
-        const Format previous = format_;
-        if      (chosenSubtype == MFVideoFormat_MJPG)  format_ = Format::Mjpg;
-        else if (chosenSubtype == MFVideoFormat_NV12)  format_ = Format::Nv12;
-        else if (chosenSubtype == MFVideoFormat_YUY2)  format_ = Format::Yuy2;
-        else if (chosenSubtype == MFVideoFormat_RGB32) format_ = Format::Rgb32;
-        if (format_ != previous)
+        if (!QueryCurrentFrameGeometry(reader.Get(), frame_width_, frame_height_, frame_stride_))
         {
-            std::cerr << "[MFCapture] Requested " << FormatLabel(previous)
-                      << " unavailable / suboptimal; using " << FormatLabel(format_) << " instead." << std::endl;
+            std::cerr << "[MFCapture] Device accepted the mode but reported no frame geometry." << std::endl;
+            open_error_ = "device accepted the mode but reported no frame geometry";
+            goto cleanup;
         }
     }
 
@@ -545,9 +781,13 @@ void MFCapture::ReceiveThread()
             gpu_decoder_ = std::make_unique<capture::GpuJpegDecoder>();
             if (!gpu_decoder_->init())
             {
-                std::cerr << "[MFCapture] nvJPEG unavailable; MJPG falls back to CPU decode." << std::endl;
-                gpu_decoder_.reset();
-                mjpg_cpu_fallback_ = true;
+                std::cerr << "[MFCapture] nvJPEG is unavailable but MJPG was selected. "
+                             "Refusing to fall back to CPU decode (that would silently cost "
+                             "several ms per frame). Pick an uncompressed format instead."
+                          << std::endl;
+                open_error_ = "MJPG selected but nvJPEG GPU decoder is unavailable";
+                goto cleanup;
+                // 旧的 CPU 解码回退已按"采集卡路径不允许回退"的要求移除。
             }
         }
     }

@@ -163,7 +163,7 @@ Defaults below are first-run defaults from `config.cpp`.
 
 | Key | Type | Default | Allowed / Notes |
 |---|---|---:|---|
-| `makcu_new_baudrate` | int | `115200` | 仅显式设为 `4000000` 时执行 START_PID 自动切速 |
+| `makcu_new_baudrate` | int | `6000000` | 固件上限 6 Mbps。固件上电固定 115200；!= 115200 时连接期发送 `0x42 SET_BAUD`（失败再用 `DE AD` 转义帧）并重连，协商失败自动退回 115200 |
 | `makcu_new_port` | string | `COM0` | CH343 serial port |
 
 ### 4.9 Mouse Shooting

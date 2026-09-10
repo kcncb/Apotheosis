@@ -29,6 +29,7 @@ MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate
     , zooming_active(false)
     , side1_active(false)
     , side2_active(false)
+    , middle_active(false)
 {
     try
     {
@@ -163,7 +164,8 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         break;
 
     case makcu::MouseButton::MIDDLE:
-        // MMB - not used for now
+        // MMB = middle
+        middle_active = pressed;
         break;
 
     case makcu::MouseButton::SIDE1:

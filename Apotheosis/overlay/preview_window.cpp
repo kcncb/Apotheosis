@@ -24,6 +24,7 @@
 #include "runtime/active_hotkey.h"
 #include "runtime/inference_session.h"
 #include "runtime/aim_telemetry.h"
+#include "runtime/latency_probe.h"
 
 namespace
 {
@@ -278,6 +279,21 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     std::snprintf(buf, sizeof(buf), "Infer %.1f FPS | Lat %.1f ms",
                   displayed_fps, infer_ms);
     draw_text_with_bg(canvas, buf, cv::Point(6, 16), bgr(245, 245, 245), bgr(0, 0, 0));
+
+    // 端到端延迟分解面板。
+    //
+    // 这里显示的 E2E 是【像素被采集 -> 位移写出】的真实耗时, 与上面那行
+    // "Lat"(仅推理耗时)完全是两回事 —— 后者只是整条链路中的一段。
+    // T0->T3 是控制环消费检测的时刻, 也就是决定"准星落后移动目标多少"
+    // (v × L) 的那个 L。数值不含采集卡内部 HDMI->USB 的固有延迟 (PC 侧
+    // 不可观测, 典型 +20~60ms), 因此是【下界】。
+    int y = 34;
+    for (const auto& line : runtime::latency::formatLinesAscii(true))
+    {
+        draw_text_with_bg(canvas, line, cv::Point(6, y),
+                          bgr(120, 255, 160), bgr(0, 0, 0));
+        y += 16;
+    }
 }
 
 // Mouse callback for the preview window. HighGUI runs this on the preview

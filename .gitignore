@@ -69,3 +69,6 @@ _stdout.log
 build_vs_cmake_release.log
 diag*.txt
 out/
+
+# IDE
+.idea/

@@ -19,6 +19,7 @@
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
+#include "runtime/latency_probe.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 
@@ -238,6 +239,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
         bool hasNewDetection = false;
         double detection_age_ms = 0.0;
         double detection_interval_ms = 0.0;
+        // 延迟探针: 本拍消费的那批检测, 其像素的采集时刻 / 发布时刻。
+        int64_t probed_frame_capture_ns = 0;
+        int64_t probed_publish_ns = 0;
 
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);
@@ -274,6 +278,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
             if (detectionBuffer.stamp.time_since_epoch().count() != 0)
                 detection_age_ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - detectionBuffer.stamp).count();
+            probed_frame_capture_ns = detectionBuffer.frame_stamp_ns;
+            probed_publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                detectionBuffer.stamp.time_since_epoch()).count();
         }
 
         // 只用硬件工作线程已完成的位移更新控制器测量状态。
@@ -373,6 +380,13 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
             continue;
         }
+
+        // 延迟探针 T3: 控制环此刻真正拿到了一批【新鲜】检测。到这里的路径
+        // 已经排除了无新帧与陈旧缓存的 continue, 所以结算出来的是真实消费
+        // 延迟, 不会被"读旧数据"污染。T4 用上一步刚取回的鼠标队列延迟。
+        runtime::latency::markAimConsume(
+            probed_frame_capture_ns, probed_publish_ns,
+            static_cast<double>(g_mouse_queue_latency_ms.load()));
 
         const auto pivot = resolve_crosshair_pivot(profile_ptr, config_resolution);
 

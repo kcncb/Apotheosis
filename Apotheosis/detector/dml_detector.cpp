@@ -22,6 +22,7 @@
 #include "model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "runtime/active_hotkey.h"
+#include "runtime/latency_probe.h"
 
 extern std::atomic<bool> detector_model_changed;
 extern std::atomic<bool> detection_resolution_changed;
@@ -526,6 +527,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
 void DirectMLDetector::processFrame(const cv::Mat& frame)
 {
     std::unique_lock<std::mutex> lock(inferenceMutex);
+    runtime::latency::markSubmit();
     currentFrame = frame;
     frameReady = true;
     inferenceCV.notify_one();
@@ -589,7 +591,8 @@ void DirectMLDetector::inferenceThread()
                     detectionBuffer.classes.push_back(d.classId);
                     detectionBuffer.confidences.push_back(d.confidence);
                 }
-                detectionBuffer.bumpVersionLocked();
+                runtime::latency::markInferenceDone();
+                detectionBuffer.bumpVersionLocked(runtime::latency::takeSubmittedCaptureNs());
                 detectionBuffer.cv.notify_all();
             }
         }

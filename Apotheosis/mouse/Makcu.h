@@ -24,6 +24,7 @@ public:
     bool aiming_active;
     bool shooting_active;
     bool zooming_active;
+    bool middle_active;
     bool side1_active;
     bool side2_active;
 

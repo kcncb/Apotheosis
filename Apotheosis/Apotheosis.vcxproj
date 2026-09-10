@@ -16,9 +16,6 @@
   <ItemGroup>
     <ClCompile Include="capture\capture.cpp" />
     <ClCompile Include="capture\capture_utils.cpp" />
-    <ClCompile Include="capture\udp_capture.cpp" />
-    <ClCompile Include="capture\tcp_capture.cpp" />
-    <ClCompile Include="capture\opencv_capture.cpp" />
     <ClCompile Include="capture\mf_capture.cpp" />
     <ClCompile Include="config\config.cpp" />
     <ClCompile Include="detector\detection_buffer.cpp" />
@@ -59,10 +56,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="capture\capture.h" />
+    <ClInclude Include="capture\capture_card_caps.h" />
+    <ClInclude Include="capture\capture_card_probe.h" />
     <ClInclude Include="capture\capture_utils.h" />
-    <ClInclude Include="capture\udp_capture.h" />
-    <ClInclude Include="capture\tcp_capture.h" />
-    <ClInclude Include="capture\opencv_capture.h" />
     <ClInclude Include="capture\mf_capture.h" />
     <ClInclude Include="config\config.h" />
     <ClInclude Include="detector\cuda_preprocess.h" />
@@ -94,6 +90,7 @@
     <ClInclude Include="runtime\thread_loops.h" />
     <ClInclude Include="runtime\cuda_availability.h" />
     <ClInclude Include="runtime\inference_session.h" />
+    <ClInclude Include="runtime\latency_probe.h" />
     <ClInclude Include="tensorrt\nvinf.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>

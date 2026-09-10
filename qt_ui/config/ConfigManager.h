@@ -15,62 +15,25 @@ public:
     bool save();
     QString configPath() const;
 
-    // Capture
-    QString captureMethod() const;
-    void setCaptureMethod(const QString& v);
-    QString udpIp() const;
-    void setUdpIp(const QString& v);
-    int udpPort() const;
-    void setUdpPort(int v);
-    QString tcpIp() const;
-    void setTcpIp(const QString& v);
-    int tcpPort() const;
-    void setTcpPort(int v);
-    QString ethAdapter() const;
-    void setEthAdapter(const QString& v);
-    int ethEthertype() const;
-    void setEthEthertype(int v);
-    int opencvCaptureIndex() const;
-    void setOpencvCaptureIndex(int v);
-    QString opencvCaptureApi() const;
-    void setOpencvCaptureApi(const QString& v);
-    QString opencvCaptureUrl() const;
-    void setOpencvCaptureUrl(const QString& v);
-    int opencvCaptureWidth() const;
-    void setOpencvCaptureWidth(int v);
-    int opencvCaptureHeight() const;
-    void setOpencvCaptureHeight(int v);
-    int opencvCaptureFps() const;
-    void setOpencvCaptureFps(int v);
-    bool captureMfGpu() const;
-    void setCaptureMfGpu(bool v);
-    int captureCrop() const;
-    void setCaptureCrop(int v);
-    QString captureFormat() const;
+    // ── Capture: 只有「采集卡」一种方式 ──
+    // 所有参数都来自设备真实能力探测, UI 用 格式/分辨率/帧率 三级联动下拉让
+    // 用户从中选。这里只是 Qt 侧的内存缓存, 真正落盘由 Config::saveConfig() 完成。
+    QString captureDevice() const;      // 设备 friendly name (不是 index)
+    void setCaptureDevice(const QString& v);
+    QString captureFormat() const;      // NV12 | MJPG | YUY2 | RGB32
     void setCaptureFormat(const QString& v);
-    int detectionResolution() const;
-    void setDetectionResolution(int v);
+    int captureWidth() const;
+    void setCaptureWidth(int v);
+    int captureHeight() const;
+    void setCaptureHeight(int v);
     int captureFps() const;
     void setCaptureFps(int v);
+    bool captureGpuDecode() const;
+    void setCaptureGpuDecode(bool v);
+    int detectionResolution() const;
+    void setDetectionResolution(int v);
     bool circleMask() const;
     void setCircleMask(bool v);
-
-    // Capture card
-    int captureCardIndex() const;
-    void setCaptureCardIndex(int v);
-    int captureCardWidth() const;
-    void setCaptureCardWidth(int v);
-    int captureCardHeight() const;
-    void setCaptureCardHeight(int v);
-    int captureCardFps() const;
-    void setCaptureCardFps(int v);
-    QString captureCardFormat() const;
-    void setCaptureCardFormat(const QString& v);
-    int captureCardCropWidth() const;
-    void setCaptureCardCropWidth(int v);
-    int captureCardCropHeight() const;
-    void setCaptureCardCropHeight(int v);
-
     // Hardware
     QString inputMethod() const;
     void setInputMethod(const QString& v);

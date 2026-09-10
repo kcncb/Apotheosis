@@ -22,11 +22,9 @@
 #include <thread>
 #include <vector>
 
-struct MFDeviceInfo
-{
-    int index = 0;
-    std::string name;
-};
+// 采集卡能力表 (数据模型 + 三级联动查询) 见 capture_card_caps.h。
+// 单独成文件是为了让 Qt UI 与单元测试不必拖进 CUDA / TensorRT 头文件。
+#include "capture_card_caps.h"
 
 // Self-written capture-card backend talking to the device directly through
 // Media Foundation (IMFSourceReader). No cv::VideoCapture involved.
@@ -79,7 +77,25 @@ public:
 
     bool IsOpen() const { return is_open_.load(); }
 
+    // 打开失败的原因 (严格协商失败 / 设备消失 / 模式被拒)。
+    // 采集卡路径没有任何回退, 所以失败时必须把【设备实际支持什么】讲清楚,
+    // 让用户照着改下拉, 而不是对着黑屏猜。
+    const std::string& LastError() const { return open_error_; }
+
     static std::vector<MFDeviceInfo> EnumerateDevices();
+
+    // 枚举设备【并探测每个设备的真实能力】(分辨率/帧率/像素格式全集)。
+    //
+    // 比 EnumerateDevices() 慢: 每个设备都要激活 source reader 并把
+    // GetNativeMediaType 从 0 枚举到 MF_E_NO_MORE_TYPES。典型 20-300ms/设备,
+    // 所以只在"用户点刷新/打开采集页"时调用, 不要放进采集热路径。
+    //
+    // probe_index >= 0 时只探测该设备, 其余设备保留名称但 caps 留空 ——
+    // 用于"用户切换设备后只重探新设备"的场景。
+    static std::vector<MFDeviceInfo> EnumerateDevicesWithCaps(int probe_index = -1);
+
+    // 单独探测某个已枚举设备的能力 (就地填充 dev.caps / dev.caps_probed)。
+    static bool ProbeCapabilities(MFDeviceInfo& dev);
     static Format ParseFormat(const std::string& s);
     static const char* FormatLabel(Format f);
 
@@ -151,6 +167,7 @@ private:
 
     std::atomic<bool> is_open_{ false };
     std::atomic<bool> should_stop_{ false };
+    std::string open_error_;   // 仅在协商/打开失败时非空
     std::atomic<int> source_fps_{ 0 };
     std::atomic<int> negotiated_fps_{ 0 };
     int source_frame_count_{ 0 };

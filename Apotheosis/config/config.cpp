@@ -191,18 +191,13 @@ void Config::writeDefaultsInPlace()
     // Most members already initialized via C++ default initializers in the
     // header; this routine only fixes up the fields that want non-default
     // values when a brand-new config.ini is generated.
-    capture_method = "udp_capture";
-    udp_ip = "0.0.0.0";
-    udp_port = 1234;
-    tcp_ip = "0.0.0.0";
-    tcp_port = 1235;
-    eth_adapter = "";
-    eth_ethertype = 0x88B5;
-    capture_crop = 0;
-    capture_format = "MJPG";
-    capture_mf_gpu = true;
+    capture_device = "";
+    capture_format = "";
+    capture_width = 0;
+    capture_height = 0;
+    capture_fps = 0;
+    capture_gpu_decode = true;
     detection_resolution = 320;
-    capture_fps = 60;
     circle_mask = true;
 
     backend = "TRT";
@@ -278,55 +273,24 @@ bool Config::loadConfig(const std::string& filename)
     };
 
     // ---------- Capture ----------
-    capture_method = get_string("", "capture_method", "udp_capture");
-    // 旧版本持久化的各种采集卡后端迁移到当前两套实现:
-    //   裸 capture_card / _cv / _ds -> opencv_capture(cv::VideoCapture)
-    //   capture_card_mf            -> mf_capture(自写 Media Foundation)
-    if (capture_method == "capture_card"
-        || capture_method == "capture_card_cv"
-        || capture_method == "capture_card_ds")
-        capture_method = "opencv_capture";
-    if (capture_method == "capture_card_mf")
-        capture_method = "mf_capture";
-    if (capture_method == "avermedia_capture")
-        capture_method = "mf_capture";
-    if (capture_method != "udp_capture" && capture_method != "tcp_capture"
-        && capture_method != "eth_capture"
-        && capture_method != "opencv_capture" && capture_method != "mf_capture")
-        capture_method = "udp_capture";
-    udp_ip = get_string("", "udp_ip", "0.0.0.0");
-    udp_port = get_long("", "udp_port", 1234);
-    if (udp_port < 1 || udp_port > 65535) udp_port = 1234;
-    tcp_ip = get_string("", "tcp_ip", "0.0.0.0");
-    tcp_port = get_long("", "tcp_port", 1235);
-    if (tcp_port < 1 || tcp_port > 65535) tcp_port = 1235;
-    eth_adapter = get_string("", "eth_adapter", "");
-    eth_ethertype = (int)get_long("", "eth_ethertype", 0x88B5);
-    if (eth_ethertype < 0x0600 || eth_ethertype > 0xFFFF) eth_ethertype = 0x88B5;
-    opencv_capture_index = get_long("", "opencv_capture_index", 0);
-    // -1000-N 表示圆刚 SDK 的第 N 个设备；非负值保持系统视频设备索引。
-    if (opencv_capture_index < -1063) opencv_capture_index = 0;
-    opencv_capture_api = get_string("", "opencv_capture_api", "DSHOW");
-    if (opencv_capture_api != "DSHOW" && opencv_capture_api != "MSMF"
-        && opencv_capture_api != "FFMPEG" && opencv_capture_api != "ANY")
-        opencv_capture_api = "DSHOW";
-    opencv_capture_url = get_string("", "opencv_capture_url", "");
-    opencv_capture_width = get_long("", "opencv_capture_width", 0);
-    opencv_capture_height = get_long("", "opencv_capture_height", 0);
-    opencv_capture_fps = get_long("", "opencv_capture_fps", 0);
-    if (opencv_capture_width < 0) opencv_capture_width = 0;
-    if (opencv_capture_height < 0) opencv_capture_height = 0;
-    if (opencv_capture_fps < 0) opencv_capture_fps = 0;
-    capture_crop = get_long("", "capture_crop", 0);
-    if (capture_crop < 0) capture_crop = 0;
-    if (capture_crop > 0) capture_crop = std::clamp(capture_crop, 32, 2048);
-    capture_format = get_string("", "capture_format", "MJPG");
-    if (capture_format != "NV12" && capture_format != "MJPG"
-        && capture_format != "YUY2" && capture_format != "RGB32")
-        capture_format = "MJPG";
-    capture_mf_gpu = get_bool("", "capture_mf_gpu", true);
-    detection_resolution = std::clamp(get_long("", "detection_resolution", 320), 32, 2048);
-    capture_fps = get_long("", "capture_fps", 60);
+    // ---------- Capture: 只有「采集卡」一种方式 ----------
+    // 旧配置里的 capture_method / udp_* / tcp_* / eth_* / opencv_capture_* /
+    // capture_crop / capture_mf_gpu 一律不再读取; 老 config.ini 里这些键会被
+    // 静默忽略, 并在下次保存时自动消失。
+    //
+    // 这里【不做任何校验或修正】: 组合是否真被设备支持, 要等探测完才知道。
+    // 校验分两处: UI 侧(把无效项从下拉里去掉) + 采集侧(对不上直接报错)。
+    // 之所以不在这里"顺手改成合法值", 是因为那正是用户明令禁止的回退路线。
+    capture_device = get_string("", "capture_device", "");
+    capture_format = get_string("", "capture_format", "");
+    capture_width  = static_cast<int>(get_long("", "capture_width", 0));
+    capture_height = static_cast<int>(get_long("", "capture_height", 0));
+    capture_fps    = static_cast<int>(get_long("", "capture_fps", 0));
+    if (capture_width  < 0) capture_width  = 0;
+    if (capture_height < 0) capture_height = 0;
+    if (capture_fps    < 0) capture_fps    = 0;
+    capture_gpu_decode = get_bool("", "capture_gpu_decode", true);
+    detection_resolution = std::clamp(static_cast<int>(get_long("", "detection_resolution", 320)), 32, 2048);
     circle_mask = get_bool("", "circle_mask", true);
 
     // ---------- Hardware ----------
@@ -335,9 +299,11 @@ bool Config::loadConfig(const std::string& filename)
         input_method = "MAKCU";
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
-    // 显式配置为高速率时，MAKCUNEW会发送SET_BAUD/START_PID并执行自动切速。
+    // MAKCUNEW固件上电固定115200且不回任何二进制响应帧。
+    // 目标速率 != 115200 时由 MakcuNewConnection 发 0x42 SET_BAUD(或 DE AD 转义帧)
+    // 后自行重连; 协商失败会自动退回 115200, 因此这里默认取固件允许的上限 6000000。
     makcu_new_baudrate = std::clamp(
-        static_cast<int>(get_long("", "makcu_new_baudrate", 115200)),
+        static_cast<int>(get_long("", "makcu_new_baudrate", 6000000)),
         1200, 6000000);
     makcu_new_port = get_string("", "makcu_new_port", "COM0");
     // ---------- AI ----------
@@ -801,25 +767,15 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Apotheosis configuration.\n";
     file << "# Generated automatically; hand-edit with care.\n\n";
 
-    file << "# Capture\n"
-        << "capture_method = " << capture_method << "\n"
-        << "udp_ip = " << udp_ip << "\n"
-        << "udp_port = " << udp_port << "\n"
-        << "tcp_ip = " << tcp_ip << "\n"
-        << "tcp_port = " << tcp_port << "\n"
-        << "eth_adapter = " << eth_adapter << "\n"
-        << "eth_ethertype = " << eth_ethertype << "\n"
-        << "opencv_capture_index = " << opencv_capture_index << "\n"
-        << "opencv_capture_api = " << opencv_capture_api << "\n"
-        << "opencv_capture_url = " << opencv_capture_url << "\n"
-        << "opencv_capture_width = " << opencv_capture_width << "\n"
-        << "opencv_capture_height = " << opencv_capture_height << "\n"
-        << "opencv_capture_fps = " << opencv_capture_fps << "\n"
-        << "capture_crop = " << capture_crop << "\n"
+    file << "# Capture  (只有「采集卡」一种方式; 参数必须来自设备真实能力探测,\n"
+            "# 组合对不上会直接报错, 不做任何替换)\n"
+        << "capture_device = " << capture_device << "\n"
         << "capture_format = " << capture_format << "\n"
-        << "capture_mf_gpu = " << to_bool_str(capture_mf_gpu) << "\n"
-        << "detection_resolution = " << detection_resolution << "\n"
+        << "capture_width = " << capture_width << "\n"
+        << "capture_height = " << capture_height << "\n"
         << "capture_fps = " << capture_fps << "\n"
+        << "capture_gpu_decode = " << to_bool_str(capture_gpu_decode) << "\n"
+        << "detection_resolution = " << detection_resolution << "\n"
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
 
     file << "# Hardware / input device\n"

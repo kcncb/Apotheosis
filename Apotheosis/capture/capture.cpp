@@ -27,16 +27,12 @@
 #include "keycodes.h"
 #include "keyboard_listener.h"
 #include "other_tools.h"
-#include "udp_capture.h"
-#include "tcp_capture.h"
-#include "eth_capture.h"
-#include "opencv_capture.h"
 #include "mf_capture.h"
-#include "avermedia/avermedia_capture.h"
+#include "capture_card_probe.h"
 #include "runtime/active_hotkey.h"
+#include "runtime/latency_probe.h"
 #include "gpu_color_ops.h"
 #include <cuda_runtime.h>
-#include "avermedia/avermedia_sdk.h"
 #include "capture_utils.h"
 
 // Declared in overlay.h; capture.cpp drives it when a capture-card backend's
@@ -74,71 +70,21 @@ std::deque<cv::Mat> frameQueue;
 
 namespace
 {
-std::string normalized_device_name(const std::string& value)
-{
-    std::string out;
-    for (unsigned char c : value)
-        if (std::isalnum(c)) out.push_back(static_cast<char>(std::tolower(c)));
-    return out;
-}
-
-std::optional<uint32_t> detect_avermedia_sdk_device(int system_index)
-{
-    const auto devices = MFCapture::EnumerateDevices();
-    const auto it = std::find_if(devices.begin(), devices.end(),
-        [system_index](const MFDeviceInfo& d) { return d.index == system_index; });
-    if (it == devices.end() || !avermedia::IsAverMediaFriendlyName(it->name))
-        return std::nullopt;
-
-    auto& loader = avermedia::SdkLoader::Instance();
-    if (!loader.IsUsable()) return std::nullopt;
-    const auto& api = loader.Api();
-    uint32_t count = 0;
-    if (!api.GetDeviceNum || api.GetDeviceNum(&count) != avermedia::AVER_ERR_SUCCESS)
-        return std::nullopt;
-
-    const std::string systemName = normalized_device_name(it->name);
-    std::optional<uint32_t> fallback;
-    for (uint32_t i = 0; i < count; ++i) {
-        char sdkName[512]{};
-        if (api.GetDeviceFriendlyName
-            && api.GetDeviceFriendlyName(i, sdkName, sizeof(sdkName)) == avermedia::AVER_ERR_SUCCESS) {
-            const std::string candidate = normalized_device_name(sdkName);
-            if (!candidate.empty()
-                && (systemName.find(candidate) != std::string::npos
-                    || candidate.find(systemName) != std::string::npos))
-                return i;
-        }
-        if (!fallback) fallback = i;
-    }
-    // 名称可能被 UVC/MF 驱动加后缀；单卡环境下安全回退到唯一 SDK 设备。
-    return count == 1 ? fallback : std::nullopt;
-}
 
 struct CaptureThreadConfig
 {
-    std::string capture_method;
-    int capture_fps = 0;
-    int detection_resolution = 0;
+    // 只有「采集卡」一种采集方式; 所有参数都必须来自设备真实能力探测。
+    std::string capture_device;      // friendly name (index 会随插拔变化)
+    std::string capture_format;      // NV12 | MJPG | YUY2 | RGB32
+    int  capture_width  = 0;
+    int  capture_height = 0;
+    int  capture_fps    = 0;
+    bool capture_gpu_decode = true;
+    int  detection_resolution = 0;   // = 模型输入边长, 同时就是中心裁切边长
     bool circle_mask = false;
-    std::string udp_ip;
-    int udp_port = 0;
-    std::string tcp_ip;
-    int tcp_port = 0;
-    std::string eth_adapter;
-    int eth_ethertype = 0x88B5;
-    int opencv_capture_index = 0;
-    std::string opencv_capture_api;
-    std::string opencv_capture_url;
-    int opencv_capture_width = 0;
-    int opencv_capture_height = 0;
-    int opencv_capture_fps = 0;
-    int capture_crop = 0;
-    std::string capture_format;
-    bool capture_mf_gpu = true;
     std::string backend;
     std::vector<std::string> screenshot_button;
-    int screenshot_delay = 0;
+    int  screenshot_delay = 0;
     bool show_window = false;
     bool verbose = false;
 
@@ -148,25 +94,14 @@ CaptureThreadConfig SnapshotCaptureConfig()
 {
     std::lock_guard<std::recursive_mutex> cfgLock(configMutex);
     CaptureThreadConfig snapshot;
-    snapshot.capture_method = config.capture_method;
-    snapshot.capture_fps = config.capture_fps;
+    snapshot.capture_device = config.capture_device;
+    snapshot.capture_format = config.capture_format;
+    snapshot.capture_width  = config.capture_width;
+    snapshot.capture_height = config.capture_height;
+    snapshot.capture_fps    = config.capture_fps;
+    snapshot.capture_gpu_decode = config.capture_gpu_decode;
     snapshot.detection_resolution = config.detection_resolution;
     snapshot.circle_mask = config.circle_mask;
-    snapshot.udp_ip = config.udp_ip;
-    snapshot.udp_port = config.udp_port;
-    snapshot.tcp_ip = config.tcp_ip;
-    snapshot.tcp_port = config.tcp_port;
-    snapshot.eth_adapter = config.eth_adapter;
-    snapshot.eth_ethertype = config.eth_ethertype;
-    snapshot.opencv_capture_index = config.opencv_capture_index;
-    snapshot.opencv_capture_api = config.opencv_capture_api;
-    snapshot.opencv_capture_url = config.opencv_capture_url;
-    snapshot.opencv_capture_width = config.opencv_capture_width;
-    snapshot.opencv_capture_height = config.opencv_capture_height;
-    snapshot.opencv_capture_fps = config.opencv_capture_fps;
-    snapshot.capture_crop = config.capture_crop;
-    snapshot.capture_format = config.capture_format;
-    snapshot.capture_mf_gpu = config.capture_mf_gpu;
     snapshot.backend = config.backend;
     snapshot.screenshot_button = config.screenshot_button;
     snapshot.screenshot_delay = config.screenshot_delay;
@@ -176,29 +111,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     return snapshot;
 }
 
-std::string NormalizeCaptureMethod(const std::string& method)
-{
-    if (method == "avermedia_capture")
-        return "mf_capture";
-    // 旧版本持久化的采集卡后端迁移到当前两套实现:
-    //   裸 capture_card / _cv / _ds -> opencv_capture
-    //   capture_card_mf            -> mf_capture(自写 Media Foundation)
-    if (method == "capture_card"
-        || method == "capture_card_cv"
-        || method == "capture_card_ds")
-        return "opencv_capture";
-    if (method == "capture_card_mf")
-        return "mf_capture";
-    if (method == "udp_capture"
-        || method == "tcp_capture"
-        || method == "eth_capture"
-        || method == "opencv_capture"
-        || method == "mf_capture")
-        return method;
-    return "udp_capture";
-}
 
-class TimerResolutionGuard
 {
 public:
     void Enable()
@@ -574,116 +487,65 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
         auto createCapturer = [&](const CaptureThreadConfig& cfg, int width, int height) -> std::unique_ptr<IScreenCapture>
         {
+            (void)width; (void)height;
             try
             {
-                const std::string method = NormalizeCaptureMethod(cfg.capture_method);
+                // ── 唯一的采集路径: 采集卡 (Media Foundation 直采) ──
+                //
+                // 中心裁切【恒等于】模型输入边长 detection_resolution。
+                // 不再有独立的 capture_crop 设置: 送进检测器的永远正好是模型要的
+                // 尺寸, 不多裁也不少裁再缩 —— 省掉一次缩放(少一份延迟), 同时避免
+                // "裁切尺寸与模型尺寸不一致"导致检测框和鼠标坐标空间错位。
+                const bool crop_enabled = true;
+                const int  out_side = std::max(1, cfg.detection_resolution);
 
-                if (method == "tcp_capture")
+                // 按 friendly name 找设备。index 会随插拔顺序变化, 名字不会。
+                // 找不到【不换设备】: 上次选的卡没插就该报错, 而不是偷偷采了
+                // 另一张卡的画面, 让用户对着错位的画面调半天参数。
+                const auto devices = MFCapture::EnumerateDevices();
+                int device_index = -1;
+                for (const auto& d : devices)
+                    if (d.friendly_name == cfg.capture_device) { device_index = d.index; break; }
+
+                if (device_index < 0)
                 {
-                    if (cfg.verbose)
-                        std::cout << "[Capture] Using TCP capture" << std::endl;
-                    return std::make_unique<TCPCapture>(width, height, cfg.tcp_ip, cfg.tcp_port);
-                }
-
-                if (method == "eth_capture")
-                {
-                    if (cfg.verbose)
-                        std::cout << "[Capture] Using ETH (ProSexy raw L2) capture" << std::endl;
-                    return std::make_unique<EthCapture>(width, height, cfg.eth_adapter, cfg.eth_ethertype);
-                }
-
-                if (method == "opencv_capture" || method == "mf_capture")
-                {
-                    // The square crop, when enabled, IS the inference frame and
-                    // therefore drives detection_resolution so the detector input
-                    // and the mouse/overlay coordinate space (which assume a
-                    // square detection_resolution) stay aligned. Crop disabled =>
-                    // fall back to scaling the whole frame to detection_resolution.
-                    bool crop_enabled = cfg.capture_crop > 0;
-                    int out_side = crop_enabled ? cfg.capture_crop : std::max(1, cfg.detection_resolution);
-                    if (crop_enabled)
-                    {
-                        std::lock_guard<std::recursive_mutex> cfgLock(configMutex);
-                        if (config.detection_resolution != out_side)
-                        {
-                            config.detection_resolution = out_side;
-                            detector_model_changed.store(true);
-                        }
-                    }
-
-                    // 设备下拉框中的圆刚 SDK 项使用 -1000-N 编码。它可以直接在
-                    // OpenCV 或 MF 页面选择，并由此处切换到 SDK 原生取帧链路。
-                    const bool explicitAver = cfg.opencv_capture_index <= -1000;
-                    const auto detectedAver = explicitAver ? std::optional<uint32_t>{}
-                        : detect_avermedia_sdk_device(cfg.opencv_capture_index);
-                    const bool integratedAver = explicitAver || detectedAver.has_value();
-                    const uint32_t averIndex = explicitAver
-                        ? static_cast<uint32_t>(-1000 - cfg.opencv_capture_index)
-                        : detectedAver.value_or(static_cast<uint32_t>(cfg.opencv_capture_index));
-                    if (integratedAver)
-                    {
-                        auto& aver = avermedia::SdkLoader::Instance();
-                        if (!aver.IsUsable())
-                            throw std::runtime_error("AVerMedia SDK unavailable");
-                        return std::make_unique<AverMediaCapture>(
-                            cfg.opencv_capture_width,
-                            cfg.opencv_capture_height,
-                            out_side,
-                            crop_enabled,
-                            cfg.opencv_capture_fps,
-                            averIndex,
-                            /*prefer_hdmi_source=*/true,
-                            cfg.capture_mf_gpu);
-                    }
-
-                    if (method == "mf_capture")
-                    {
-                        if (cfg.verbose)
-                            std::cout << "[Capture] Using MF capture card (index="
-                                      << cfg.opencv_capture_index << ", fmt="
-                                      << cfg.capture_format << ", "
-                                      << (cfg.capture_mf_gpu ? "GPU" : "CPU") << ")" << std::endl;
-                        return std::make_unique<MFCapture>(
-                            cfg.opencv_capture_width,
-                            cfg.opencv_capture_height,
-                            out_side,
-                            crop_enabled,
-                            cfg.opencv_capture_fps,
-                            cfg.capture_format,
-                            cfg.opencv_capture_index,
-                            cfg.capture_mf_gpu);
-                    }
-
-                    if (cfg.verbose)
-                        std::cout << "[Capture] Using OpenCV capture card (index="
-                                  << cfg.opencv_capture_index << ", api="
-                                  << cfg.opencv_capture_api << ", fmt="
-                                  << cfg.capture_format << ")" << std::endl;
-                    return std::make_unique<OpenCVCapture>(
-                        cfg.opencv_capture_width,
-                        cfg.opencv_capture_height,
-                        out_side,
-                        crop_enabled,
-                        cfg.opencv_capture_fps,
-                        cfg.capture_format,
-                        cfg.opencv_capture_index,
-                        cfg.opencv_capture_api,
-                        cfg.opencv_capture_url);
+                    std::cerr << "[Capture] Selected capture card \"" << cfg.capture_device
+                              << "\" is NOT present (" << devices.size()
+                              << " device(s) found). No substitution is performed; "
+                                 "open the capture settings and pick a connected card."
+                              << std::endl;
+                    return nullptr;
                 }
 
                 if (cfg.verbose)
-                    std::cout << "[Capture] Using UDP capture" << std::endl;
-                return std::make_unique<UDPCapture>(width, height, cfg.udp_ip, cfg.udp_port);
+                    std::cout << "[Capture] Capture card: " << cfg.capture_device
+                              << " | " << cfg.capture_format
+                              << " " << cfg.capture_width << "x" << cfg.capture_height
+                              << "@" << cfg.capture_fps << "fps"
+                              << " | crop " << out_side << "x" << out_side
+                              << " | " << (cfg.capture_gpu_decode ? "GPU" : "CPU") << std::endl;
+
+                // 注意: 这里不传 device_index 之外的任何"兜底"。格式/分辨率/帧率
+                // 只要设备对不上, MFCapture 会直接失败并在 LastError() 里写明
+                // 设备实际支持什么 —— 不做任何替换。
+                return std::make_unique<MFCapture>(
+                    cfg.capture_width,
+                    cfg.capture_height,
+                    out_side,
+                    crop_enabled,
+                    cfg.capture_fps,
+                    cfg.capture_format,
+                    device_index,
+                    cfg.capture_gpu_decode);
             }
             catch (const std::exception& e)
             {
-                std::cerr << "[Capture] Failed to initialize '" << cfg.capture_method
-                    << "' capture: " << e.what() << std::endl;
+                std::cerr << "[Capture] Failed to initialize capture card: " << e.what() << std::endl;
                 return nullptr;
             }
         };
 
-        std::unique_ptr<IScreenCapture> capturer = createCapturer(currentCfg, captureWidth, captureHeight);
+
         if (capturer)
             capturer->SetTargetFps(currentCfg.capture_fps);
         auto lastCapturerCreateAttempt = std::chrono::steady_clock::now();
@@ -938,6 +800,13 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             bool freshCpuFrameThisIter = false;
             bool gpuMaskApplied = false;
 
+            // ★ 端到端延迟探针的起点: 帧刚进入本进程, 这是 PC 侧能打的最早
+            // 时刻。打点必须在下游任何处理之前 —— circle_mask 下推、D2H 下载、
+            // 提交 detector、推理、发布、控制环唤醒, 全部计入总延迟。
+            // (采集卡内部 HDMI->USB 那段在此刻已经花掉, 无法观测, 见探针头注释)
+            if (!screenshotGpu.empty())
+                runtime::latency::noteCaptureForStats(runtime::latency::markCapture());
+
             // circle_mask 下推 GPU:在解码 BGR 之后、D2H/detector 之前 in-place
             // 跑一个圆形掩码 kernel,detector 直接吃 masked GpuImage,后续 D2H
             // 拷回 host 的也是 masked 副本——CPU 完全不再需要重做 cv::Mat 拷贝。
@@ -1018,6 +887,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             {
                 screenshotCpu = capturer->GetNextFrameCpu();
                 freshCpuFrameThisIter = !screenshotCpu.empty();
+                if (freshCpuFrameThisIter)
+                    runtime::latency::noteCaptureForStats(runtime::latency::markCapture());
             }
 
             if (screenshotGpu.empty() && screenshotCpu.empty())

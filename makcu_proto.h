@@ -1,11 +1,17 @@
 // ============================================================
 // makcu_proto.h - MAKCU直通透传固件 C++ 对接头文件 (单头文件, 零依赖)
-// 协议规范见 docs/proto.md  |  用法:
+// 协议规范见 proto.md  |  用法:
 //   MakcuLink link("COM4", 115200);        // 或串口句柄自行注入
 //   link.move(dx, dy);                     // 直通位移
 //   link.setButtons(MAKCU_BTN_L);          // 绝对态按键
 //   link.click(MAKCU_BTN_L, 45);           // 固件内点击
 // 编译: C++11 及以上, Windows/Linux 通用; 串口读写函数需按平台实现
+//
+// !! 关键事实: 当前固件从不发送任何二进制响应帧 !!
+//    proto_parser.h 的 sendFrame 回调从未被赋值, send_resp() 首行即 return,
+//    因此 ACK(0x80)/NAK(0x81)/VERSION_RESP(0x82)/STATS_RESP(0x83) 都不会上线.
+//    设备唯一主动发出的二进制帧, 是订阅后的 0x84 ASYNC_BUTTON.
+//    上位机必须 ACK-free: 写完即视为成功, 不要等待应答.
 // ============================================================
 #pragma once
 #include <cstdint>
@@ -21,22 +27,26 @@ enum Cmd : uint8_t {
     CMD_MOVE_RAW        = 0x02,
     CMD_MOVE_BATCH      = 0x03,
     CMD_MOVETO          = 0x04,
+    CMD_MOVE_CANCEL     = 0x05,   // 清空设备侧待发出的位移/滚轮积压(停火)
     CMD_BUTTON_MASK     = 0x10,
-    CMD_BUTTON_MASK_EX  = 0x11,
-    CMD_CLICK           = 0x12,
+    CMD_BUTTON_MASK_EX  = 0x11,   // 固件未实现: 落入 default 被忽略, 请勿使用
+    CMD_CLICK           = 0x12,   // payload u8 btn_bits + u16 down_ms, 固件内定时弹起
     CMD_WHEEL           = 0x20,
     CMD_KEY_MASK        = 0x21,
     CMD_KEY_TAP         = 0x22,
-    CMD_GET_VERSION     = 0x40,
-    CMD_GET_STATS       = 0x41,
-    CMD_SET_BAUD        = 0x42,
-    CMD_GHOST_MODE      = 0x43,
+    CMD_GET_VERSION     = 0x40,   // 固件会组 0x82 响应, 但从不发出
+    CMD_GET_STATS       = 0x41,   // 同上, 组 0x83 但从不发出
+    CMD_SET_BAUD        = 0x42,   // u32 baud; 固件内 Serial0.end/begin, 允许 115200..6000000
+    CMD_GHOST_MODE      = 0x43,   // 固件仅返回 ack(0), 无实际行为(占位)
     CMD_PANIC           = 0x44,
     CMD_REBOOT          = 0x45,
     CMD_SUB_ASYNC       = 0x48,   // uint8 enable: 订阅按键异步上报(会话级)
-    CMD_ACK             = 0x80,
-    CMD_NAK             = 0x81,
-    // 异步帧: 0x84 ASYNC_BUTTON {uint8 real_mask, uint8 inj_mask} 需订阅
+    CMD_ACK             = 0x80,   // 固件从不发出
+    CMD_NAK             = 0x81,   // 固件从不发出
+    // 响应/异步帧 (上位机只需识别 0x84):
+    CMD_VERSION_RESP    = 0x82,   // 固件从不发出
+    CMD_STATS_RESP      = 0x83,   // 固件从不发出
+    CMD_ASYNC_BUTTON    = 0x84,   // u8 real_mask + u8 inj_mask, 需先 0x48 订阅
 };
 
 // 按键位定义
@@ -93,10 +103,14 @@ inline std::vector<uint8_t> frame_move(int16_t dx, int16_t dy) {
     std::vector<uint8_t> p; put_i16(p, dx); put_i16(p, dy);
     return build_frame(CMD_MOVE, p.data(), p.size());
 }
+// 注意: 固件把 points 组增量求和后只输出一次位移, 并非逐点回放
 inline std::vector<uint8_t> frame_move_batch(const int16_t* dxdy, size_t points) {
     std::vector<uint8_t> p; p.reserve(points * 4);
     for (size_t i = 0; i < points * 2; ++i) put_i16(p, dxdy[i]);
     return build_frame(CMD_MOVE_BATCH, p.data(), p.size());
+}
+inline std::vector<uint8_t> frame_move_cancel() {
+    return build_frame(CMD_MOVE_CANCEL, nullptr, 0);
 }
 inline std::vector<uint8_t> frame_button_mask(uint8_t mask) {
     return build_frame(CMD_BUTTON_MASK, &mask, 1);
@@ -136,10 +150,11 @@ public:
         return wait_ack ? wait_ack_for(_seq) : true;
     }
 
+    // 固件不回应答, wait_ack 必须保持 false, 否则每个调用都会超时
     bool move(int16_t dx, int16_t dy)        { auto f = frame_move(dx, dy); return send(CMD_MOVE, f); }
-    bool buttons(uint8_t mask)               { auto f = frame_button_mask(mask); return send(CMD_BUTTON_MASK, f, true); }
-    bool ghost(bool on)                      { auto f = frame_ghost(on); return send(CMD_GHOST_MODE, f, true); }
-    bool panic()                             { auto f = frame_panic(); return send(CMD_PANIC, f, true); }
+    bool buttons(uint8_t mask)               { auto f = frame_button_mask(mask); return send(CMD_BUTTON_MASK, f); }
+    bool ghost(bool on)                      { auto f = frame_ghost(on); return send(CMD_GHOST_MODE, f); }
+    bool panic()                             { auto f = frame_panic(); return send(CMD_PANIC, f); }
 
 private:
     bool wait_ack_for(uint8_t seq);
