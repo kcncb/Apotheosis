@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -260,6 +260,9 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
     }, &running_);
 
     mouse_thread_ = start_guarded("MouseThread", [this] {
+#ifdef _WIN32
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
         mouseThreadFunction(mouse_driver_);
     }, &running_);
 

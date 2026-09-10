@@ -658,14 +658,24 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 reset_trigger(mouseThread, trigger);
             }
 
-            // ─── 扳机 FSM ───
+            // ─── 扳机 FSM (精准受击盒约束 + 瞬秒爆发连击) ───
             if (!out.coasting && profile_ptr->trigger_enabled)
             {
-                // trigger_y_percent > 100 = 命中区大于 bbox (预开火)。
-                const double tx_range = out.bbox.width  * profile_ptr->trigger_y_percent / 100.0 * 0.5;
-                const double ty_range = out.bbox.height * profile_ptr->trigger_y_percent / 100.0 * 0.5;
-                const bool in_zone = std::abs(pivot.x - static_cast<double>(out.anchor.x)) <= tx_range &&
-                                     std::abs(pivot.y - static_cast<double>(out.anchor.y)) <= ty_range;
+                const double scale = std::max(0.1, profile_ptr->trigger_y_percent / 100.0);
+                const double tx_range = out.bbox.width * scale * 0.5;
+                const double ty_range = out.bbox.height * scale * 0.5;
+
+                // 1. 水平与垂直容差判定 (以瞄准受击锚点 anchor 为基准)
+                const bool in_tolerance = std::abs(pivot.x - static_cast<double>(out.anchor.x)) <= tx_range &&
+                                         std::abs(pivot.y - static_cast<double>(out.anchor.y)) <= ty_range;
+
+                // 2. 真实人体边界门禁：彻底消除准星瞄准在头顶虚空导致的走火！
+                // 向上不允许超过 bbox 顶部以上 12% 边缘，向下不超过 bbox 底部
+                const double top_limit = static_cast<double>(out.bbox.y) - out.bbox.height * 0.12;
+                const double bottom_limit = static_cast<double>(out.bbox.y + out.bbox.height);
+                const bool inside_body_geometry = (pivot.y >= top_limit) && (pivot.y <= bottom_limit);
+
+                const bool in_zone = in_tolerance && inside_body_geometry;
 
                 const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now.time_since_epoch()).count();
@@ -680,17 +690,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
                         profile_ptr->trigger_duration_jitter_ms);
                 };
 
-                // 转火检测:锁定的 target track_id 变化 → 进 SwitchCooldown。
-                // 首次锁定 (last_fire_track_id == -1) 不算转火,直接走 Idle。
+                // 转火阻滞解除：只要转火后新的目标也在准星容许范围内，直接接力爆发，不产生卡壳死机
                 if (out.current_track_id != trigger.last_fire_track_id &&
                     trigger.last_fire_track_id != -1 &&
                     profile_ptr->trigger_switch_cooldown_ms > 0 &&
-                    trigger.phase != TriggerPhase::SwitchCooldown)
+                    trigger.phase != TriggerPhase::SwitchCooldown &&
+                    !in_zone)
                 {
                     release_trigger_outputs(mouseThread, trigger);
                     trigger.phase = TriggerPhase::SwitchCooldown;
                     trigger.phase_time_ms = now_ms;
-                    // 转火冷却本身可以带抖动(用 delay_jitter,懒得再加参数)。
                     trigger.phase_target_ms = jitter_ms(
                         profile_ptr->trigger_switch_cooldown_ms,
                         profile_ptr->trigger_delay_jitter_ms);
@@ -703,23 +712,30 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 case TriggerPhase::Idle:
                     if (in_zone)
                     {
-                        // 记录 in_zone 起点。已经 in_zone 就沿用旧 stamp,
-                        // 达到累计时长即触发 —— 1ms delay 不再空转一整帧。
-                        if (trigger.in_zone_since_ms < 0)
-                        {
-                            trigger.in_zone_since_ms = now_ms;
-                            trigger.phase_target_ms = jitter_ms(
-                                profile_ptr->trigger_fire_delay,
-                                profile_ptr->trigger_delay_jitter_ms);
-                        }
-                        if (now_ms - trigger.in_zone_since_ms >= trigger.phase_target_ms)
+                        // 零延迟直通模式：当 delay 为 0 时直接击发，实现机械级瞬秒
+                        const int target_delay = jitter_ms(
+                            profile_ptr->trigger_fire_delay,
+                            profile_ptr->trigger_delay_jitter_ms);
+                        if (target_delay <= 0)
                         {
                             begin_fire();
                         }
                         else
                         {
-                            trigger.phase = TriggerPhase::Delay;
-                            trigger.phase_time_ms = trigger.in_zone_since_ms;
+                            if (trigger.in_zone_since_ms < 0)
+                            {
+                                trigger.in_zone_since_ms = now_ms;
+                                trigger.phase_target_ms = target_delay;
+                            }
+                            if (now_ms - trigger.in_zone_since_ms >= trigger.phase_target_ms)
+                            {
+                                begin_fire();
+                            }
+                            else
+                            {
+                                trigger.phase = TriggerPhase::Delay;
+                                trigger.phase_time_ms = trigger.in_zone_since_ms;
+                            }
                         }
                     }
                     else
@@ -755,6 +771,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     {
                         trigger.phase = TriggerPhase::Idle;
                         trigger.in_zone_since_ms = -1;
+                        // 冷却结束瞬间若依然在受击框内，无缝立即衔接下一轮爆发连发
+                        if (in_zone && profile_ptr->trigger_fire_delay <= 0)
+                        {
+                            begin_fire();
+                        }
                     }
                     break;
                 case TriggerPhase::SwitchCooldown:

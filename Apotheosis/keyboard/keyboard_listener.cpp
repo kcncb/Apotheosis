@@ -36,42 +36,36 @@ bool win32_key_pressed(int vk_code)
 
 bool isAnyKeyPressed(const std::vector<std::string>& keys)
 {
+    if (keys.empty())
+        return true; // 空键或“无 (始终活跃)”默认处于激活态
+
     for (const auto& key_name : keys)
     {
-        int key_code = KeyCodes::getKeyCode(key_name);
-        bool pressed = false;
-        bool handled_by_device = false;
+        if (key_name.empty() || key_name.find("始终活跃") != std::string::npos)
+            return true;
 
-        if (!pressed && config.input_method == "MAKCU")
+        bool pressed = false;
+
+        if (config.input_method == "MAKCU")
         {
-            handled_by_device = true;
             if (makcuSerial && makcuSerial->isOpen())
             {
                 if (key_name == "LeftMouseButton")       pressed = makcuSerial->shooting_active;
                 else if (key_name == "RightMouseButton") pressed = makcuSerial->zooming_active;
                 else if (key_name == "X1MouseButton")    pressed = makcuSerial->side2_active; // upper side button
                 else if (key_name == "X2MouseButton")    pressed = makcuSerial->side1_active; // lower side button
-                else handled_by_device = false;
             }
         }
-
-        if (!pressed && config.input_method == "MAKCUNEW")
+        else if (config.input_method == "MAKCUNEW")
         {
-            handled_by_device = true;
             if (makcuNewSerial && makcuNewSerial->isOpen())
             {
-                if (key_name == "LeftMouseButton")       pressed = makcuNewSerial->physicalButtonPressed(1);
-                else if (key_name == "RightMouseButton") pressed = makcuNewSerial->physicalButtonPressed(2);
+                if (key_name == "LeftMouseButton")        pressed = makcuNewSerial->physicalButtonPressed(1);
+                else if (key_name == "RightMouseButton")  pressed = makcuNewSerial->physicalButtonPressed(2);
                 else if (key_name == "MiddleMouseButton") pressed = makcuNewSerial->physicalButtonPressed(3);
-                else if (key_name == "X1MouseButton")    pressed = makcuNewSerial->physicalButtonPressed(4);
-                else if (key_name == "X2MouseButton")    pressed = makcuNewSerial->physicalButtonPressed(5);
-                else handled_by_device = false;
+                else if (key_name == "X1MouseButton")     pressed = makcuNewSerial->physicalButtonPressed(4);
+                else if (key_name == "X2MouseButton")     pressed = makcuNewSerial->physicalButtonPressed(5);
             }
-        }
-
-        if (!pressed && !handled_by_device && key_code != -1)
-        {
-            pressed = win32_key_pressed(key_code);
         }
 
         if (pressed) return true;

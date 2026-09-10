@@ -36,7 +36,6 @@
 #include "pages/CrosshairPage.h"
 #include "pages/FlashlightPage.h"
 #include "pages/GlassFilterPage.h"
-#include "pages/MacroPage.h"
 #include "pages/StatsPage.h"
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
@@ -66,9 +65,9 @@ const QVector<GroupDef>& navGroups() {
           QStringLiteral("cpu"), QStringLiteral("stack-2")}},
         {QString::fromUtf8(u8"控制"),
          {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"自动背闪"), QString::fromUtf8(u8"准星找色"), QString::fromUtf8(u8"寻光"),
-           QString::fromUtf8(u8"玻璃过滤"), QString::fromUtf8(u8"宏脚本"), QString::fromUtf8(u8"事件编排")},
+           QString::fromUtf8(u8"玻璃过滤"), QString::fromUtf8(u8"事件编排")},
          {QStringLiteral("keyboard"), QStringLiteral("rotate-clockwise"), QStringLiteral("color-swatch"), QStringLiteral("world"),
-           QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("history")}},
+           QStringLiteral("layers-intersect"), QStringLiteral("history")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -343,7 +342,6 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
     if (name == QString::fromUtf8(u8"寻光"))       return new FlashlightPage();
     if (name == QString::fromUtf8(u8"玻璃过滤"))   return new GlassFilterPage();
-    if (name == QString::fromUtf8(u8"宏脚本"))     return new MacroPage();
     if (name == QString::fromUtf8(u8"事件编排"))   return new EventPage();
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }

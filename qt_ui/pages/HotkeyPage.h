@@ -13,10 +13,8 @@ class QSlider;
 class QSpinBox;
 class QVBoxLayout;
 
-class BezierEditor;
 class AdaptiveStack;
 class CardWidget;
-class FreehandCurveEditor;
 class QButtonGroup;
 class QRadioButton;
 class QStackedWidget;
@@ -55,7 +53,6 @@ private:
     void buildFovCard();
     void buildCrosshairCard();
     void buildBossAimCard();
-    void buildAimPathCard();
     void buildTriggerCard();
     void buildAimClassCard();
 
@@ -115,6 +112,7 @@ private:
     QSpinBox*       m_triggerDurationJitter{};
     QSpinBox*       m_triggerIntervalJitter{};
     QSpinBox*       m_triggerSwitchCooldown{};
+    class TriggerVisualWidget* m_triggerVisual{};
 
     // Card: 目标选择 (优先级排序列表)
     CardWidget*  m_aimClassCard{};
@@ -122,18 +120,6 @@ private:
     QVBoxLayout* m_aimClassLayout{};     // 行卡片纵向布局, 顺序 = 优先级
     QComboBox*   m_addClassCombo{};   // "+ 添加" 下拉候选 (来源: Target 页 Aim 桶)
     QPushButton* m_addClassBtn{};
-
-    // Card 7: Aim trajectory
-    QButtonGroup*       m_aimPathModeGroup{};
-    QRadioButton*       m_aimPathModeLinear{};
-    QRadioButton*       m_aimPathModeBezier{};
-    QRadioButton*       m_aimPathModeCustom{};
-    QSpinBox*           m_aimPathInfluence{};
-    QStackedWidget*     m_aimPathEditorStack{};
-    BezierEditor*       m_aimPathBezier{};
-    FreehandCurveEditor* m_aimPathFreehand{};
-    bool m_neuralCurveActive = false;
-    std::array<float, 25> m_neuralCurveWeights{};
 
     bool m_loading{false};
 };

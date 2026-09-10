@@ -346,15 +346,33 @@ void process_frame(const cv::Mat& bgrFrame)
 
     PivotSnapshot snap;
     snap.ts = std::chrono::steady_clock::now();
+    static int s_lost_frames = 0;
+    static cv::Point2f s_last_valid_hit(0, 0);
+
     if (hit)
     {
         snap.x = static_cast<double>(hit->x);
         snap.y = static_cast<double>(hit->y);
         snap.valid = true;
+        s_last_valid_hit = *hit;
+        s_lost_frames = 0;
     }
     else
     {
-        snap.valid = false;
+        // 开火火光/烟雾瞬间遮挡的丢帧惯性接力保护：
+        // 如果前几帧有明确命中，在接下来的 1~3 帧内丢失时，保持上一有效准星位置，
+        // 绝不让准星突变断崖式跳回屏幕物理正中心，防止压枪抽搐
+        if (s_lost_frames < 3 && s_last_valid_hit.x > 1.0f)
+        {
+            snap.x = static_cast<double>(s_last_valid_hit.x);
+            snap.y = static_cast<double>(s_last_valid_hit.y);
+            snap.valid = true;
+            s_lost_frames++;
+        }
+        else
+        {
+            snap.valid = false;
+        }
     }
     publish(snap);
 }

@@ -799,6 +799,10 @@ namespace makcu {
             return false;
         }
 
+        // 极限低延迟调优: 分配 4KB 极速驱动发送/接收缓冲区，并清空历史积压
+        SetupComm(m_handle, 4096, 4096);
+        PurgeComm(m_handle, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
         platformUpdateTimeouts();
         return true;
 #else
@@ -874,12 +878,12 @@ namespace makcu {
 
     void SerialPort::platformUpdateTimeouts() {
 #ifdef _WIN32
-        // Gaming-optimized timeouts - much faster than original
-        m_timeouts.ReadIntervalTimeout = 1;          // 1ms between bytes
-        m_timeouts.ReadTotalTimeoutConstant = 10;    // 10ms total read timeout
-        m_timeouts.ReadTotalTimeoutMultiplier = 1;   // 1ms per byte
-        m_timeouts.WriteTotalTimeoutConstant = 10;   // 10ms write timeout
-        m_timeouts.WriteTotalTimeoutMultiplier = 1;  // 1ms per byte
+        // 极低延迟超时配置：写入立即返回，消除任何缓冲阻塞等待
+        m_timeouts.ReadIntervalTimeout = MAXDWORD;
+        m_timeouts.ReadTotalTimeoutConstant = 0;
+        m_timeouts.ReadTotalTimeoutMultiplier = 0;
+        m_timeouts.WriteTotalTimeoutConstant = 0;
+        m_timeouts.WriteTotalTimeoutMultiplier = 0;
 
         SetCommTimeouts(m_handle, &m_timeouts);
 #else

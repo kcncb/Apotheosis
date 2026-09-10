@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.24)
 
 project(Apotheosis LANGUAGES C CXX)
 
@@ -159,10 +159,6 @@ set(APP_SOURCES
     "${SRC_DIR}/detector/trt_detector.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
-    "${SRC_DIR}/macro/macro_keymap.cpp"
-    "${SRC_DIR}/macro/macro_input.cpp"
-    "${SRC_DIR}/macro/lua_runtime.cpp"
-    "${SRC_DIR}/macro/ghub_api.cpp"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
     "${SRC_DIR}/mem/gpu_image.cpp"
     "${SRC_DIR}/mem/gpu_resource_manager.cpp"
@@ -225,8 +221,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/HotkeyPage.h"
     "${QT_UI_DIR}/pages/LogPage.cpp"
     "${QT_UI_DIR}/pages/LogPage.h"
-    "${QT_UI_DIR}/pages/MacroPage.cpp"
-    "${QT_UI_DIR}/pages/MacroPage.h"
     "${QT_UI_DIR}/pages/ModelToolsPage.cpp"
     "${QT_UI_DIR}/pages/ModelToolsPage.h"
     "${QT_UI_DIR}/pages/OverviewPage.cpp"
@@ -238,12 +232,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/TargetPage.cpp"
     "${QT_UI_DIR}/pages/TargetPage.h"
     "${QT_UI_DIR}/widgets/AdaptiveStack.h"
-    "${QT_UI_DIR}/widgets/BezierEditor.cpp"
-    "${QT_UI_DIR}/widgets/BezierEditor.h"
-    "${QT_UI_DIR}/widgets/FreehandCurveEditor.cpp"
-    "${QT_UI_DIR}/widgets/FreehandCurveEditor.h"
-    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.cpp"
-    "${QT_UI_DIR}/widgets/NeuralCurveTrainer.h"
     "${QT_UI_DIR}/widgets/CardWidget.cpp"
     "${QT_UI_DIR}/widgets/CardWidget.h"
     "${QT_UI_DIR}/widgets/FormKit.cpp"
@@ -275,43 +263,6 @@ add_library(serial_embedded STATIC
 
 target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/include")
 target_link_libraries(serial_embedded PUBLIC setupapi)
-
-# ---------------------------------------------------------------------------
-# Lua 5.1.5 static library — used by the macro layer for G HUB-compatible
-# scripting. Sources are vendored under Apotheosis/modules/lua-5.1.5/src/.
-# Run modules/lua-5.1.5/fetch_lua.ps1 once to populate that directory; the
-# script downloads the official tarball from www.lua.org. We pin 5.1 so
-# scripts copy-pasted from G HUB / LGS run unmodified.
-# ---------------------------------------------------------------------------
-set(LUA_VENDOR_DIR "${SRC_DIR}/modules/lua-5.1.5")
-set(LUA_SRC_DIR    "${LUA_VENDOR_DIR}/src")
-
-if(NOT EXISTS "${LUA_SRC_DIR}/lua.h")
-    message(FATAL_ERROR
-        "Lua 5.1.5 sources missing. Run:\n"
-        "  powershell -NoProfile -ExecutionPolicy Bypass -File \"${LUA_VENDOR_DIR}/fetch_lua.ps1\"\n"
-        "and re-configure. The script downloads lua-5.1.5.tar.gz from www.lua.org and extracts the .c/.h files into ${LUA_SRC_DIR}.")
-endif()
-
-file(GLOB LUA_SOURCES CONFIGURE_DEPENDS "${LUA_SRC_DIR}/*.c")
-list(FILTER LUA_SOURCES EXCLUDE REGEX "(lua|luac|print)\\.c$")
-
-add_library(lua_static STATIC ${LUA_SOURCES})
-target_include_directories(lua_static PUBLIC "${LUA_SRC_DIR}")
-set_target_properties(lua_static PROPERTIES
-    C_STANDARD 99
-    C_STANDARD_REQUIRED ON
-    POSITION_INDEPENDENT_CODE ON)
-if(MSVC)
-    set_target_properties(lua_static PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    # Lua 5.1 uses tmpfile/getenv/strcpy/etc. — silence /sdl + secure-CRT
-    # warnings for the vendor sources only. Our own code keeps /sdl.
-    target_compile_definitions(lua_static PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        _CRT_NONSTDC_NO_DEPRECATE)
-    target_compile_options(lua_static PRIVATE /wd4334 /wd4267 /wd4244 /wd4146 /wd4310 /wd4702 /wd4310 /wd4068)
-endif()
 
 add_executable(ai WIN32 ${APP_SOURCES})
 
@@ -374,7 +325,6 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/detector"
     "${SRC_DIR}/include"
     "${SRC_DIR}/keyboard"
-    "${SRC_DIR}/macro"
     "${SRC_DIR}/mem"
     "${SRC_DIR}/mouse"
     "${SRC_DIR}/overlay"
@@ -401,7 +351,6 @@ endif()
 target_link_directories(ai PRIVATE "${TENSORRT_ROOT}/lib")
 target_link_libraries(ai PRIVATE
     serial_embedded
-    lua_static
     Qt6::Widgets
     "${OPENCV_LIB}"
     "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib"

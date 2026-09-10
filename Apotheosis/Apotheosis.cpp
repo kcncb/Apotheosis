@@ -38,7 +38,6 @@
 
 #include "depth/depth_anything_trt.h"
 #include "depth/depth_mask.h"
-#include "macro/lua_runtime.h"
 #include "tensorrt/nvinf.h"
 
 #include "MainWindow.h"
@@ -212,6 +211,7 @@ static QString loadStyleSheet()
 
 int main(int argc, char* argv[])
 {
+    timeBeginPeriod(1); // 锁定全局高精度时钟中断(1ms)，消除线程调度离散抖动
     AppLog::InstallStdStreamCapture();
 
     SetConsoleOutputCP(CP_UTF8);
@@ -435,16 +435,6 @@ int main(int argc, char* argv[])
             session.start(config.backend, std::string("models/") + config.ai_model);
         }
 
-        macro::runtime_start();
-        macro::runtime_set_enabled(config.macro_enabled);
-        macro::runtime_set_primary_button_events_enabled(config.macro_primary_button_events);
-        if (config.macro_enabled && !config.macro_script_path.empty())
-        {
-            std::string macro_err;
-            if (!macro::runtime_load_script(config.macro_script_path, &macro_err))
-                std::cerr << "[Macro] script load failed: " << macro_err << std::endl;
-        }
-
         std::thread keyThread = StartThreadGuarded("KeyboardListener", [] {
             keyboardListener();
         });
@@ -503,8 +493,6 @@ int main(int argc, char* argv[])
 
         PreviewWindow_Stop();
 
-        macro::runtime_stop();
-
         session.stop();
         g_inference_session = nullptr;
 
@@ -513,6 +501,7 @@ int main(int argc, char* argv[])
         delete makcuNewSerial;
         makcuNewSerial = nullptr;
 
+        timeEndPeriod(1);
         return result;
     }
     catch (const std::exception& e)

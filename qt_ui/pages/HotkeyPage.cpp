@@ -3,13 +3,11 @@
 #include "config/ConfigManager.h"
 #include "config/config_bridge.h"
 #include "widgets/AdaptiveStack.h"
-#include "widgets/BezierEditor.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
-#include "widgets/FreehandCurveEditor.h"
-#include "widgets/NeuralCurveTrainer.h"
 #include "widgets/IconFont.h"
 #include "widgets/ToggleSwitch.h"
+#include "widgets/TriggerVisualWidget.h"
 
 #include <QShowEvent>
 #include <QDropEvent>
@@ -201,7 +199,6 @@ void HotkeyPage::buildRightPanel(QWidget* parent)
     buildAimClassCard();
     buildCrosshairCard();
     buildBossAimCard();
-    buildAimPathCard();
 
     m_rightLayout->addStretch();
 
@@ -215,35 +212,12 @@ void HotkeyPage::buildRightPanel(QWidget* parent)
 
 struct KeyEntry { const char* id; const char* label; };
 static const KeyEntry kKeyEntries[] = {
-    // 鼠标
     {"\xe6\x97\xa0 (\xe5\xa7\x8b\xe7\xb5\x82\xe6\xb4\xbb\xe8\xb7\x83)",  ""},           // 无 (始终活跃)
     {"RightMouseButton",   "\xe9\xbc\xa0\xe6\xa0\x87\xe5\x8f\xb3\xe9\x94\xae (RightMouseButton)"},
     {"X1MouseButton",      "\xe9\xbc\xa0\xe6\xa0\x87\xe4\xbe\xa7\xe9\x94\xae" "4 (X1MouseButton)"},
     {"X2MouseButton",      "\xe9\xbc\xa0\xe6\xa0\x87\xe4\xbe\xa7\xe9\x94\xae" "5 (X2MouseButton)"},
     {"MiddleMouseButton",  "\xe9\xbc\xa0\xe6\xa0\x87\xe4\xb8\xad\xe9\x94\xae (MiddleMouseButton)"},
     {"LeftMouseButton",    "\xe9\xbc\xa0\xe6\xa0\x87\xe5\xb7\xa6\xe9\x94\xae (LeftMouseButton)"},
-    // 功能键
-    {"CapsLock",           "CapsLock (\xe5\xa4\xa7\xe5\xb0\x8f\xe5\x86\x99\xe9\x94\xae)"},
-    {"Tab",                "Tab"},
-    {"Escape",             "Escape"},
-    {"Space",              "Space (\xe7\xa9\xba\xe6\xa0\xbc)"},
-    // Shift / Alt / Ctrl
-    {"LeftShift",          "LeftShift"},
-    {"RightShift",         "RightShift"},
-    {"LeftAlt",            "LeftAlt"},
-    {"RightAlt",           "RightAlt"},
-    {"LeftControl",        "LeftControl"},
-    {"RightControl",       "RightControl"},
-    // F 键
-    {"F1","F1"},{"F2","F2"},{"F3","F3"},{"F4","F4"},
-    {"F5","F5"},{"F6","F6"},{"F7","F7"},{"F8","F8"},
-    {"F9","F9"},{"F10","F10"},{"F11","F11"},{"F12","F12"},
-    // 字母
-    {"A","A"},{"B","B"},{"C","C"},{"D","D"},{"E","E"},
-    {"F","F"},{"G","G"},{"H","H"},{"I","I"},{"J","J"},
-    {"K","K"},{"L","L"},{"M","M"},{"N","N"},{"O","O"},
-    {"P","P"},{"Q","Q"},{"R","R"},{"S","S"},{"T","T"},
-    {"U","U"},{"V","V"},{"W","W"},{"X","X"},{"Y","Y"},{"Z","Z"},
     {nullptr, nullptr}
 };
 
@@ -320,12 +294,12 @@ void HotkeyPage::buildFovCard()
 void HotkeyPage::buildTriggerCard()
 {
     auto* card = new CardWidget(
-        QStringLiteral("\xe6\x89\xb3\xe6\x9c\xba"),        // 扳机
+        QStringLiteral("自动扳机"),
         QStringLiteral("crosshair"));
     auto* cl = card->contentLayout();
 
     cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("\xe5\x90\xaf\xe7\x94\xa8"),         // 启用
+        QStringLiteral("启用自动扳机"),
         false, m_triggerEnabled));
 
     auto makeSpin = [](int min, int max, const QString& suffix) {
@@ -336,51 +310,50 @@ void HotkeyPage::buildTriggerCard()
         return sp;
     };
 
-    m_triggerFireDelay      = makeSpin(0,    5000, QStringLiteral(" ms"));
-    m_triggerFireDuration   = makeSpin(1,    5000, QStringLiteral(" ms"));
-    m_triggerFireInterval   = makeSpin(0,    5000, QStringLiteral(" ms"));
-    m_triggerYPercent       = makeSpin(1,     500, QStringLiteral(" %"));   // 上限 500% 支持预开火
-    m_triggerDelayJitter    = makeSpin(0,     500, QStringLiteral(" ms"));
-    m_triggerDurationJitter = makeSpin(0,     500, QStringLiteral(" ms"));
-    m_triggerIntervalJitter = makeSpin(0,     500, QStringLiteral(" ms"));
-    m_triggerSwitchCooldown = makeSpin(0,    5000, QStringLiteral(" ms"));
+    m_triggerFireDelay      = makeSpin(0,    1000, QStringLiteral(" ms"));
+    m_triggerFireDuration   = makeSpin(1,    2000, QStringLiteral(" ms"));
+    m_triggerFireInterval   = makeSpin(0,    2000, QStringLiteral(" ms"));
+    m_triggerYPercent       = makeSpin(10,    300, QStringLiteral(" %"));
+    m_triggerDelayJitter    = makeSpin(0,     100, QStringLiteral(" ms"));
+    m_triggerDurationJitter = makeSpin(0,     100, QStringLiteral(" ms"));
+    m_triggerIntervalJitter = makeSpin(0,     100, QStringLiteral(" ms"));
+    m_triggerSwitchCooldown = makeSpin(0,    1000, QStringLiteral(" ms"));
 
+    // 命中判定范围与可视化受击框
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe5\xbb\xb6\xe8\xbf\x9f"),                   // 延迟
-        m_triggerFireDelay));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe5\xbb\xb6\xe8\xbf\x9f\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 延迟抖动 ±
-        m_triggerDelayJitter));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe6\x8c\x89\xe4\xbd\x8f\xe6\x97\xb6\xe9\x95\xbf"),  // 按住时长
-        m_triggerFireDuration));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe6\x8c\x89\xe4\xbd\x8f\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 按住抖动 ±
-        m_triggerDurationJitter));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe5\x86\xb7\xe5\x8d\xb4"),                   // 冷却
-        m_triggerFireInterval));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe5\x86\xb7\xe5\x8d\xb4\xe6\x8a\x96\xe5\x8a\xa8 \xc2\xb1"),  // 冷却抖动 ±
-        m_triggerIntervalJitter));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe8\xbd\xac\xe7\x81\xab\xe5\xbb\xb6\xe8\xbf\x9f"),           // 转火延迟
-        m_triggerSwitchCooldown));
-    cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("\xe5\x91\xbd\xe4\xb8\xad\xe5\x8c\xba"),       // 命中区
+        QStringLiteral("判定命中范围"),
         m_triggerYPercent));
 
-    m_triggerYPercent->setToolTip(QStringLiteral(
-        "\xe5\x91\xbd\xe4\xb8\xad\xe5\x8c\xba\xe5\x8d\xa0 bbox \xe7\x99\xbe\xe5\x88\x86\xe6\xaf\x94\xef\xbc\x9a\n"
-        "100 = \xe6\x95\xb4\xe6\xa1\x86\xef\xbc\x9b\n"
-        "> 100 = \xe6\x89\xa9\xe5\xa4\xa7\xe5\x88\xb0 bbox \xe5\xa4\x96\xef\xbc\x88\xe9\xa2\x84\xe5\xbc\x80\xe7\x81\xab\xef\xbc\x89\xe3\x80\x82"));
-    m_triggerDelayJitter->setToolTip(QStringLiteral(
-        "\xe4\xb8\xba\xe5\xbb\xb6\xe8\xbf\x9f\xe5\x8a\xa0\xe4\xb8\x80\xe4\xb8\xaa \xc2\xb1N ms \xe7\x9a\x84\xe9\x9a\x8f\xe6\x9c\xba\xe6\x8a\x96\xe5\x8a\xa8\xef\xbc\x8c\xe7\xa0\xb4\xe9\x99\xa4\xe6\x9c\xba\xe6\xa2\xb0\xe6\x84\x9f\xe3\x80\x82"));
-    m_triggerSwitchCooldown->setToolTip(QStringLiteral(
-        "\xe7\x9b\xae\xe6\xa0\x87 track_id \xe5\x8f\x98\xe5\x8c\x96\xe6\x97\xb6\xe7\x9a\x84\xe8\xbd\xac\xe7\x81\xab\xe5\x86\xb7\xe5\x8d\xb4\xef\xbc\x8c\xe6\xb6\x88\xe9\x99\xa4\xe7\x9e\xac\xe5\x88\x87\xe6\x84\x9f\xe3\x80\x82"));
+    m_triggerVisual = new TriggerVisualWidget(card);
+    cl->addWidget(m_triggerVisual);
+
+    // 核心时间参数行
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("开火延迟"),
+        m_triggerFireDelay));
+
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("连击时长 (按住)"),
+        m_triggerFireDuration));
+
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("冷却间隔"),
+        m_triggerFireInterval));
+
+    cl->addWidget(FormKit::fieldRow(
+        QStringLiteral("随机抖动 (防封)"),
+        m_triggerDelayJitter));
+
+    // 动态联动可视化小部件
+    connect(m_triggerYPercent, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int v) {
+                if (m_triggerVisual) m_triggerVisual->setPercent(v);
+                saveUiToCurrentProfile();
+            });
 
     connect(m_triggerEnabled, &ToggleSwitch::toggled,
             this, [this] { saveUiToCurrentProfile(); });
+
     auto wireInt = [this](QSpinBox* sp) {
         connect(sp, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, [this] { saveUiToCurrentProfile(); });
@@ -388,7 +361,6 @@ void HotkeyPage::buildTriggerCard()
     wireInt(m_triggerFireDelay);
     wireInt(m_triggerFireDuration);
     wireInt(m_triggerFireInterval);
-    wireInt(m_triggerYPercent);
     wireInt(m_triggerDelayJitter);
     wireInt(m_triggerDurationJitter);
     wireInt(m_triggerIntervalJitter);
@@ -894,120 +866,6 @@ void HotkeyPage::buildBossAimCard()
     m_rightLayout->addWidget(card);
 }
 
-// Card: 瞄准轨迹（保持现有实现，不改变 AVA 控制链）
-void HotkeyPage::buildAimPathCard()
-{
-    auto* card = new CardWidget(
-        QStringLiteral("\xe7\x9e\x84\xe5\x87\x86\xe8\xbd\xa8\xe8\xbf\xb9"),
-        QStringLiteral("activity"));
-    card->setCollapsible(true);
-    auto* cl = card->contentLayout();
-
-    auto* hint = new QLabel(QStringLiteral(
-        "\xe5\x85\x89\xe6\xa0\x87\xe4\xbb\x8e\xe5\xbd\x93\xe5\x89\x8d\xe4\xbd\x8d\xe7\xbd\xae"
-        "\xe5\x88\xb0\xe7\x9b\xae\xe6\xa0\x87\xe7\x9a\x84\xe8\xbd\xa8\xe8\xbf\xb9\xe3\x80\x82"
-        "X=\xe8\xbf\x9b\xe5\xba\xa6, Y=\xe5\x9e\x82\xe7\x9b\xb4\xe5\x81\x8f\xe7\xa6\xbb"));
-    hint->setProperty("class", "secondary");
-    hint->setWordWrap(true);
-    cl->addWidget(hint);
-
-    // ── Mode selector (radio row) ──
-    auto* modeRow = new QHBoxLayout;
-    modeRow->setSpacing(12);
-    m_aimPathModeLinear = new QRadioButton(QStringLiteral("\xe7\x9b\xb4\xe7\xba\xbf"));
-    m_aimPathModeBezier = new QRadioButton(QStringLiteral("\xe8\xb4\x9d\xe5\xa1\x9e\xe5\xb0\x94"));
-    m_aimPathModeCustom = new QRadioButton(QStringLiteral("\xe8\x87\xaa\xe5\xae\x9a\xe4\xb9\x89"));
-    m_aimPathModeLinear->setChecked(true);
-    m_aimPathModeGroup = new QButtonGroup(this);
-    m_aimPathModeGroup->addButton(m_aimPathModeLinear, 0);
-    m_aimPathModeGroup->addButton(m_aimPathModeBezier, 1);
-    m_aimPathModeGroup->addButton(m_aimPathModeCustom, 2);
-    modeRow->addWidget(m_aimPathModeLinear);
-    modeRow->addWidget(m_aimPathModeBezier);
-    modeRow->addWidget(m_aimPathModeCustom);
-    modeRow->addStretch();
-    cl->addLayout(modeRow);
-
-    m_aimPathInfluence = new QSpinBox;
-    m_aimPathInfluence->setRange(0, 100);
-    m_aimPathInfluence->setValue(25);
-    m_aimPathInfluence->setSuffix(QStringLiteral("%"));
-    m_aimPathInfluence->setToolTip(QString::fromUtf8(
-        u8"曲线只按该比例影响 PIDF 原始方向；不会强制鼠标完全沿曲线行走。"));
-    cl->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"曲线影响"), m_aimPathInfluence));
-
-    // ── Editor stack (only one visible per mode) ──
-    m_aimPathEditorStack = new QStackedWidget;
-
-    // Page 0 — Linear: just a placeholder note.
-    auto* linearNote = new QLabel(QStringLiteral(
-        "\xe7\x9b\xb4\xe7\xba\xbf\xe6\xa8\xa1\xe5\xbc\x8f\xe6\x97\xa0\xe9\x9c\x80"
-        "\xe5\x8f\x82\xe6\x95\xb0\xe3\x80\x82"));
-    linearNote->setProperty("class", "secondary");
-    linearNote->setAlignment(Qt::AlignCenter);
-    linearNote->setMinimumHeight(200);
-    m_aimPathEditorStack->addWidget(linearNote);
-
-    // Page 1 — Bezier editor.
-    m_aimPathBezier = new BezierEditor;
-    m_aimPathEditorStack->addWidget(m_aimPathBezier);
-
-    // Page 2 — Freehand editor.
-    m_aimPathFreehand = new FreehandCurveEditor;
-    m_aimPathEditorStack->addWidget(m_aimPathFreehand);
-
-    cl->addWidget(m_aimPathEditorStack);
-
-    auto* neuralTrainButton = new QPushButton(QString::fromUtf8(u8"神经网络训练曲线"));
-    neuralTrainButton->setToolTip(QString::fromUtf8(
-        u8"通过多轮随机目标鼠标移动，学习你的平均轨迹并生成自定义曲线。"));
-    cl->addWidget(neuralTrainButton);
-
-    // ── Wiring ──
-    auto onModeChanged = [this](int id) {
-        if (id < 0) id = 0;
-        if (id > 2) id = 2;
-        m_aimPathEditorStack->setCurrentIndex(id);
-        saveUiToCurrentProfile();
-    };
-    connect(m_aimPathModeGroup, &QButtonGroup::idClicked, this, onModeChanged);
-    connect(m_aimPathInfluence, qOverload<int>(&QSpinBox::valueChanged),
-            this, [this](int) { saveUiToCurrentProfile(); });
-
-    connect(m_aimPathBezier, &BezierEditor::curveChanged,
-            this, [this](float, float, float, float) {
-                saveUiToCurrentProfile();
-            });
-    connect(m_aimPathFreehand, &FreehandCurveEditor::curveChanged,
-            this, [this](const std::array<float, FreehandCurveEditor::kSampleCount>&) {
-                m_neuralCurveActive = false;
-                m_neuralCurveWeights.fill(0.0f);
-                saveUiToCurrentProfile();
-            });
-    connect(neuralTrainButton, &QPushButton::clicked, this, [this] {
-        auto* trainer = new NeuralCurveTrainerDialog(this);
-        trainer->setAttribute(Qt::WA_DeleteOnClose);
-        connect(trainer, &NeuralCurveTrainerDialog::curveTrained,
-                this, [this](const std::array<float, NeuralCurveTrainerDialog::kSampleCount>& samples,
-                             const std::array<float, 25>& weights) {
-                    std::array<float, FreehandCurveEditor::kSampleCount> curve{};
-                    std::copy(samples.begin(), samples.end(), curve.begin());
-                    m_aimPathFreehand->setSamples(curve);
-                    m_aimPathModeCustom->setChecked(true);
-                    m_aimPathEditorStack->setCurrentIndex(2);
-                    m_neuralCurveActive = true;
-                    m_neuralCurveWeights = weights;
-                    saveUiToCurrentProfile();
-                });
-        trainer->show();
-        trainer->raise();
-        trainer->activateWindow();
-    });
-
-    m_rightLayout->addWidget(card);
-}
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Group / Profile Management
@@ -1184,6 +1042,7 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_triggerFireDuration->setValue(hp.trigger_fire_duration);
     m_triggerFireInterval->setValue(hp.trigger_fire_interval);
     m_triggerYPercent->setValue(hp.trigger_y_percent);
+    if (m_triggerVisual) m_triggerVisual->setPercent(hp.trigger_y_percent);
     m_triggerDelayJitter->setValue(hp.trigger_delay_jitter_ms);
     m_triggerDurationJitter->setValue(hp.trigger_duration_jitter_ms);
     m_triggerIntervalJitter->setValue(hp.trigger_interval_jitter_ms);
@@ -1195,37 +1054,6 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     // 这里直接调没问题。
     rebuildAimClassList();
 
-
-    // 用户 AimPath 配置。
-    if (m_aimPathModeGroup)
-    {
-        int mode = std::clamp(hp.aim_path_mode, 0, 2);
-        if (auto* btn = m_aimPathModeGroup->button(mode))
-            btn->setChecked(true);
-        m_aimPathEditorStack->setCurrentIndex(mode);
-        m_aimPathInfluence->setValue(hp.aim_path_influence);
-        m_aimPathBezier->setCurve(
-            hp.aim_path_bezier_cx1, hp.aim_path_bezier_cy1,
-            hp.aim_path_bezier_cx2, hp.aim_path_bezier_cy2);
-        std::array<float, FreehandCurveEditor::kSampleCount> samples{};
-        samples.fill(0.0f);
-        static const std::vector<float> kEmptyCurve;
-        const auto& source = hp.aim_path_custom_samples
-            ? *hp.aim_path_custom_samples : kEmptyCurve;
-        if (!source.empty()) {
-            for (int i = 0; i < FreehandCurveEditor::kSampleCount; ++i) {
-                const double pos = static_cast<double>(i) * (source.size() - 1)
-                                 / (FreehandCurveEditor::kSampleCount - 1);
-                const size_t i0 = static_cast<size_t>(std::floor(pos));
-                const size_t i1 = std::min(i0 + 1, source.size() - 1);
-                const double f = pos - static_cast<double>(i0);
-                samples[i] = static_cast<float>(source[i0] + (source[i1] - source[i0]) * f);
-            }
-        }
-        m_aimPathFreehand->setSamples(samples);
-        m_neuralCurveActive = hp.aim_path_neural_enabled;
-        m_neuralCurveWeights = hp.aim_path_neural_weights;
-    }
 
     if (m_keyCombo) {
         m_keyCombo->blockSignals(true);
@@ -1284,23 +1112,6 @@ void HotkeyPage::saveUiToCurrentProfile()
     // 目标选择: 每条目的 class_id / y_offset / min_conf 由行内滑条回调直接写入
     // config.hotkeys[ri].aim_classes, 顺序由 ▲▼ 的 moveAimClass 维护
     // (见 rebuildAimClassList / moveAimClass), 此处无需再写。
-
-    // 用户 AimPath 配置。
-    if (m_aimPathModeGroup)
-    {
-        const int mode_id = m_aimPathModeGroup->checkedId();
-        hp.aim_path_mode = (mode_id < 0) ? 0 : std::clamp(mode_id, 0, 2);
-        hp.aim_path_influence = m_aimPathInfluence->value();
-        hp.aim_path_bezier_cx1 = m_aimPathBezier->cx1();
-        hp.aim_path_bezier_cy1 = m_aimPathBezier->cy1();
-        hp.aim_path_bezier_cx2 = m_aimPathBezier->cx2();
-        hp.aim_path_bezier_cy2 = m_aimPathBezier->cy2();
-        const auto& samples = m_aimPathFreehand->samples();
-        hp.aim_path_custom_samples = std::make_shared<const std::vector<float>>(
-            samples.begin(), samples.end());
-        hp.aim_path_neural_enabled = m_neuralCurveActive;
-        hp.aim_path_neural_weights = m_neuralCurveWeights;
-    }
 
     // Key binding
     if (m_keyCombo) {

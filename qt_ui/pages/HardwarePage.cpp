@@ -94,7 +94,7 @@ HardwarePage::HardwarePage(QWidget* parent)
         m_makcuNewPort = new QLineEdit;
         panel->addWidget(FormKit::fieldRow(zh(u8"串口"), m_makcuNewPort));
         m_makcuNewBaud = new QSpinBox;
-        m_makcuNewBaud->setRange(1200, 4000000);
+        m_makcuNewBaud->setRange(1200, 6000000);
         panel->addWidget(FormKit::fieldRow(zh(u8"波特率"), m_makcuNewBaud));
         m_deviceStack->addWidget(page);
     }

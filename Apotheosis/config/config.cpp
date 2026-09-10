@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -341,10 +341,10 @@ bool Config::loadConfig(const std::string& filename)
         input_method = "MAKCU";
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
-    // 只有显式配置为4M时，MAKCUNEW才会发送START_PID并执行自动切速。
+    // 显式配置为高速率时，MAKCUNEW会发送SET_BAUD/START_PID并执行自动切速。
     makcu_new_baudrate = std::clamp(
         static_cast<int>(get_long("", "makcu_new_baudrate", 115200)),
-        1200, 4000000);
+        1200, 6000000);
     makcu_new_port = get_string("", "makcu_new_port", "COM0");
     // ---------- AI ----------
     backend = get_string("", "backend", "TRT");
