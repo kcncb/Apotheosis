@@ -18,9 +18,6 @@
 #include "config/config.h"
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
-#include "crosshair/flashlight_runtime.h"
-#include "crosshair/glass_runtime.h"
-#include "crosshair/laser_detector.h"
 #include "detection_buffer.h"
 #include "i_detector.h"
 #include "preview_window.h"
@@ -91,38 +88,11 @@ struct PreviewConfigSnapshot
     std::vector<crosshair::CrosshairColorBand> crosshair_colors;
     bool   any_color_enabled = false;
 
-    // Laser color-find (independent module). The ROI is always drawn (yellow);
-    // when a beam is found the fitted line is overlaid.
-    int    laser_rect_w = 0;
-    int    laser_rect_h = 0;
-    int    laser_center_x = 0;
-    int    laser_center_y = 0;
-    int    laser_min_pixel_count = 0;
-    int    laser_close_radius = 0;
-    float  laser_min_elongation = 3.0f;
-    int    laser_target_center_x = 0;
-    int    laser_target_center_y = 0;
-    int    laser_target_rect_w = 0;
-    int    laser_target_rect_h = 0;
-    std::vector<crosshair::CrosshairColorBand> laser_colors;
-    bool   any_laser_color_enabled = false;
-
-    // Flashlight halo (debug preview). When `flashlight_show_preview` is on
-    // the preview thread runs the detector against `canvas` directly and
-    // overlays a yellow ring + centre cross + confidence label for every
-    // matching halo (the mouse loop separately consumes the runtime-side
-    // snapshot, so what's drawn here is purely diagnostic).
-    bool   flashlight_show_preview = false;
-    int    flashlight_sensitivity = 50;
-    int    flashlight_reject_strength = 50;
-    int    flashlight_spot_size = 50;
-
     // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
     int    fov_base_y = 0;
     bool   dynamic_fov_enabled = false;
     bool   hotkey_active = false;
-    bool   glass_filter_show_preview = false;
     bool   show_fps = false;
     float  replay_playback_speed = 0.25f;
 };
@@ -150,37 +120,8 @@ PreviewConfigSnapshot snapshot_config()
         s.crosshair_colors.push_back(std::move(b));
     }
 
-    s.laser_rect_w          = config.laser_rect_w;
-    s.laser_rect_h          = config.laser_rect_h;
-    s.laser_center_x        = config.laser_center_x;
-    s.laser_center_y        = config.laser_center_y;
-    s.laser_min_pixel_count = config.laser_min_pixel_count;
-    s.laser_close_radius    = config.laser_close_radius;
-    s.laser_min_elongation  = config.laser_min_elongation;
-    s.laser_target_center_x = config.laser_target_center_x;
-    s.laser_target_center_y = config.laser_target_center_y;
-    s.laser_target_rect_w   = config.laser_target_rect_w;
-    s.laser_target_rect_h   = config.laser_target_rect_h;
-
-    s.flashlight_show_preview      = config.flashlight_show_preview;
-    s.flashlight_sensitivity       = config.flashlight_sensitivity;
-    s.flashlight_reject_strength   = config.flashlight_reject_strength;
-    s.flashlight_spot_size         = config.flashlight_spot_size;
-    s.glass_filter_show_preview    = config.glass_filter_show_preview;
     s.show_fps                     = config.show_fps;
     s.replay_playback_speed        = config.replay_playback_speed;
-    s.laser_colors.reserve(config.laser_colors.size());
-    for (const auto& c : config.laser_colors)
-    {
-        crosshair::CrosshairColorBand b;
-        b.name = c.name;
-        b.enabled = c.enabled;
-        b.h_low = c.h_low; b.h_high = c.h_high;
-        b.s_min = c.s_min; b.s_max = c.s_max;
-        b.v_min = c.v_min; b.v_max = c.v_max;
-        s.any_laser_color_enabled = s.any_laser_color_enabled || b.enabled;
-        s.laser_colors.push_back(std::move(b));
-    }
 
     const int idx_active = runtime::g_active_hotkey_index.load();
     const int idx = (idx_active >= 0 && idx_active < static_cast<int>(config.hotkeys.size()))
@@ -231,34 +172,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
                           textFg, textBg);
     }
 
-    // Glass-filter verdicts are published by the actual aim path after it has
-    // evaluated each detection. Drawing that snapshot keeps preview and runtime
-    // decisions identical and adds no extra image processing on this thread.
-    if (cfg.glass_filter_show_preview)
-    {
-        const auto glass = glass_runtime::read();
-        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - glass.ts).count();
-        if (age_ms >= 0 && age_ms <= glass_runtime::kFreshnessMs)
-        {
-            for (const auto& judgement : glass.judgements)
-            {
-                const cv::Rect clipped = judgement.box & cv::Rect(0, 0, canvas.cols, canvas.rows);
-                if (clipped.area() <= 0) continue;
-                const cv::Scalar color = !judgement.evaluated
-                    ? bgr(150, 150, 150)
-                    : (judgement.is_glass ? bgr(60, 60, 255) : bgr(70, 210, 255));
-                cv::rectangle(canvas, clipped, color, judgement.is_glass ? 3 : 2, cv::LINE_AA);
-                char label[64];
-                std::snprintf(label, sizeof(label), judgement.evaluated
-                    ? (judgement.is_glass ? "GLASS %.0f%%" : "PASS %.0f%%")
-                    : "SKIP", judgement.coverage * 100.0f);
-                draw_text_with_bg(canvas, label,
-                                  cv::Point(clipped.x, std::max(12, clipped.y + clipped.height)),
-                                  color, bgr(0, 0, 0));
-            }
-        }
-    }
 
     // 2. FOV ellipses (base + dynamic gate).
     if (cfg.fov_base_x > 0 && cfg.fov_base_y > 0)
@@ -321,91 +234,6 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
         }
     }
 
-    // 4b. Laser color-find ROI (YELLOW, always drawn so the user can see /
-    //     position the detection region) + the detected beam line on top.
-    if (cfg.laser_rect_w > 0 && cfg.laser_rect_h > 0)
-    {
-        const cv::Scalar laserCol = bgr(0, 255, 255); // yellow
-        const int rw = std::max(4, cfg.laser_rect_w);
-        const int rh = std::max(4, cfg.laser_rect_h);
-        const cv::Rect roi(cfg.laser_center_x - rw / 2, cfg.laser_center_y - rh / 2, rw, rh);
-        const cv::Rect clipped = roi & cv::Rect(0, 0, canvas.cols, canvas.rows);
-        if (clipped.area() > 0)
-        {
-            cv::rectangle(canvas, clipped, laserCol, 1, cv::LINE_AA);
-            draw_text_with_bg(canvas, "Laser ROI",
-                              cv::Point(clipped.x, std::max(12, clipped.y)),
-                              laserCol, bgr(0, 0, 0));
-        }
-
-        // Target box (BROWN): where the fitted line is projected to estimate
-        // the endpoint. Always drawn so the user can position it near centre.
-        if (cfg.laser_target_rect_w > 0 && cfg.laser_target_rect_h > 0)
-        {
-            const cv::Scalar brown = bgr(40, 100, 170); // B,G,R -> brown/orange
-            const int tw = std::max(4, cfg.laser_target_rect_w);
-            const int th = std::max(4, cfg.laser_target_rect_h);
-            const cv::Rect troi(cfg.laser_target_center_x - tw / 2,
-                                cfg.laser_target_center_y - th / 2, tw, th);
-            const cv::Rect tclip = troi & cv::Rect(0, 0, canvas.cols, canvas.rows);
-            if (tclip.area() > 0)
-            {
-                cv::rectangle(canvas, tclip, brown, 1, cv::LINE_AA);
-                draw_text_with_bg(canvas, "Laser tip zone",
-                                  cv::Point(tclip.x, std::max(12, tclip.y)),
-                                  brown, bgr(0, 0, 0));
-            }
-        }
-
-        // Detected beam: overlay a yellow line on the laser, dot at the tip.
-        if (cfg.any_laser_color_enabled && canvas.type() == CV_8UC3)
-        {
-            crosshair::LaserDetectorSettings ls;
-            ls.enabled = true;
-            ls.rect_w = cfg.laser_rect_w;
-            ls.rect_h = cfg.laser_rect_h;
-            ls.center_x = cfg.laser_center_x;
-            ls.center_y = cfg.laser_center_y;
-            ls.min_pixel_count = cfg.laser_min_pixel_count;
-            ls.close_radius = cfg.laser_close_radius;
-            ls.min_elongation = cfg.laser_min_elongation;
-            ls.target_center_x = cfg.laser_target_center_x;
-            ls.target_center_y = cfg.laser_target_center_y;
-            ls.target_rect_w = cfg.laser_target_rect_w;
-            ls.target_rect_h = cfg.laser_target_rect_h;
-            ls.colors = cfg.laser_colors;
-
-            static crosshair::LaserDetector laser_detector;
-            const crosshair::LaserResult lr = laser_detector.detectLine(canvas, ls);
-            if (lr.found)
-            {
-                const cv::Point m(static_cast<int>(lr.muzzle.x), static_cast<int>(lr.muzzle.y));
-                const cv::Point t(static_cast<int>(lr.tip.x), static_cast<int>(lr.tip.y));
-                // Beam line (muzzle -> extended tip), dark underlay for contrast.
-                cv::line(canvas, m, t, bgr(0, 0, 0), 4, cv::LINE_AA);
-                cv::line(canvas, m, t, laserCol, 2, cv::LINE_AA);
-                // Tip marker.
-                cv::circle(canvas, t, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
-                cv::circle(canvas, t, 5, laserCol, 1, cv::LINE_AA);
-            }
-        }
-    }
-
-    // 4c. 寻光预览只画运行时最终认定的那个白核。候选、拒绝原因、文字和
-    //     中心十字全部不显示，避免“单帧外观通过”与真正可瞄结果混在一起。
-    if (cfg.flashlight_show_preview && canvas.type() == CV_8UC3)
-    {
-        const auto fs = flashlight_runtime::read();
-        if (fs.valid && !fs.spots.empty())
-        {
-            const auto& spot = fs.spots.front();
-            const cv::Point c(static_cast<int>(std::lround(spot.center.x)),
-                              static_cast<int>(std::lround(spot.center.y)));
-            const int r = std::max(2, static_cast<int>(std::lround(spot.radius)));
-            cv::circle(canvas, c, r, bgr(0, 0, 0), 3, cv::LINE_AA);
-            cv::circle(canvas, c, r, bgr(0, 255, 0), 1, cv::LINE_AA);
-        }
-    }
 
     // 5. Optional top-left status banner with inference FPS + latency.
     if (!cfg.show_fps)

@@ -19,7 +19,6 @@
 #include "Apotheosis.h"
 #include "capture/capture.h"
 #include "config/config.h"
-#include "crosshair/flashlight_runtime.h"
 #include "detector/detection_buffer.h"
 #include "keyboard/keyboard_listener.h"
 
@@ -182,30 +181,12 @@ void auto_capture_thread()
         int v = -1;
         detectionBuffer.get(boxes, classes, confidences, v);
 
-        // 寻光触发源:独立于 YOLO,只看 flashlight_runtime 是否本轮命中。
-        bool flashlight_hit = false;
-        if (cfg.use_flashlight)
-        {
-            const auto snap = flashlight_runtime::read();
-            if (snap.valid && !snap.spots.empty())
-            {
-                // 新鲜度:snap 时间戳与 detection publish 时间同一量级 →
-                // 用 kFreshnessMs 判定即可。
-                const auto ageMs = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - snap.ts).count();
-                if (ageMs <= flashlight_runtime::kFreshnessMs)
-                    flashlight_hit = true;
-            }
-        }
-
-        // No detections AND no force-hold AND no flashlight → nothing to record.
-        if (boxes.empty() && !force_held && !flashlight_hit) continue;
+        // No detections AND no force-hold → nothing to record.
+        if (boxes.empty() && !force_held) continue;
 
         // Decide save.
         bool should_save = false;
         if (force_held)
-            should_save = true;
-        else if (flashlight_hit)
             should_save = true;
         else if (!boxes.empty())
         {

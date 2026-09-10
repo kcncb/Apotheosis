@@ -19,7 +19,7 @@ private slots:
 private:
     void browseModel();
 
-    // ── Depth inference (only powers the 寻光/flashlight depth gate) ──
+    // ── Depth inference ──
     ToggleSwitch* m_depthEnabled{};
     QLineEdit* m_modelPath{};
     QSpinBox* m_optInputSize{};

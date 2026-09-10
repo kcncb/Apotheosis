@@ -762,20 +762,7 @@ void HotkeyPage::buildCrosshairCard()
     cl->addWidget(FormKit::toggleRow(
         QStringLiteral("\xe5\x90\xaf\xe7\x94\xa8\xe5\x87\x86\xe6\x98\x9f\xe6\x89\xbe\xe8\x89\xb2 (\xe6\xad\xa4\xe7\x83\xad\xe9\x94\xae)"),
         false, m_crosshairDetect));
-    cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("\xe5\x90\xaf\xe7\x94\xa8\xe9\x95\xad\xe5\xb0\x84\xe6\x89\xbe\xe8\x89\xb2 (\xe6\xad\xa4\xe7\x83\xad\xe9\x94\xae)"),
-        false, m_laserDetect));
-    cl->addWidget(FormKit::toggleRow(
-        QString::fromUtf8(u8"启用寻光检测（此热键）"),
-        false, m_flashlightDetect));
-    cl->addWidget(FormKit::toggleRow(
-        QString::fromUtf8(u8"启用玻璃过滤（此热键）"),
-        false, m_glassFilter));
-
     connect(m_crosshairDetect,  &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_laserDetect,      &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_flashlightDetect, &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_glassFilter,      &ToggleSwitch::toggled, this, &HotkeyPage::saveUiToCurrentProfile);
 
     m_rightLayout->addWidget(card);
 }
@@ -1023,9 +1010,6 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_dynamicFovMargin->setValue(static_cast<double>(hp.dynamic_fov_strength));
 
     m_crosshairDetect->setChecked(hp.crosshair_detect_enabled);
-    m_laserDetect->setChecked(hp.laser_detect_enabled);
-    m_flashlightDetect->setChecked(hp.flashlight_detect_enabled);
-    m_glassFilter->setChecked(hp.glass_filter_enabled);
 
     const float pg[10] = {hp.pidf_kp_x,hp.pidf_kp_y,0.0f,0.0f,hp.pidf_kd_x,
                           hp.pidf_kd_y,hp.pidf_kf_x,hp.pidf_kf_y,hp.pidf_lr_x,hp.pidf_lr_y};
@@ -1084,9 +1068,6 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.dynamic_fov_enabled = m_dynamicFov->isChecked();
     hp.dynamic_fov_strength = static_cast<float>(m_dynamicFovMargin->value());
     hp.crosshair_detect_enabled  = m_crosshairDetect->isChecked();
-    hp.laser_detect_enabled      = m_laserDetect->isChecked();
-    hp.flashlight_detect_enabled = m_flashlightDetect->isChecked();
-    hp.glass_filter_enabled      = m_glassFilter->isChecked();
     hp.pidf_kp_x=m_pidfGain[0]->value(); hp.pidf_kp_y=m_pidfGain[1]->value();
     hp.pidf_ki_x=0.0f; hp.pidf_ki_y=0.0f;
     hp.pidf_kd_x=m_pidfGain[4]->value(); hp.pidf_kd_y=m_pidfGain[5]->value();

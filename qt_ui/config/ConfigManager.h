@@ -147,56 +147,6 @@ public:
     QList<ColorProfile> crosshairColors() const;
     void setCrosshairColors(const QList<ColorProfile>& colors);
 
-    // Laser
-    int laserRectW() const;
-    void setLaserRectW(int v);
-    int laserRectH() const;
-    void setLaserRectH(int v);
-    int laserCenterX() const;
-    void setLaserCenterX(int v);
-    int laserCenterY() const;
-    void setLaserCenterY(int v);
-    int laserTargetCenterX() const;
-    void setLaserTargetCenterX(int v);
-    int laserTargetCenterY() const;
-    void setLaserTargetCenterY(int v);
-    int laserTargetRectW() const;
-    void setLaserTargetRectW(int v);
-    int laserTargetRectH() const;
-    void setLaserTargetRectH(int v);
-    float laserMinElongation() const;
-    void setLaserMinElongation(float v);
-    int laserMinPixelCount() const;
-    void setLaserMinPixelCount(int v);
-    int laserCloseRadius() const;
-    void setLaserCloseRadius(int v);
-    float laserSmooth() const;
-    void setLaserSmooth(float v);
-
-    // Laser color profiles
-    QList<ColorProfile> laserColors() const;
-    void setLaserColors(const QList<ColorProfile>& colors);
-
-    // Flashlight halo (寻光). Three macro knobs (0..100); all internals derived
-    // by crosshair::flashlight_derive_tuning().
-    bool flashlightShowPreview() const;
-    void setFlashlightShowPreview(bool v);
-    int flashlightSensitivity() const;       // 灵敏度
-    void setFlashlightSensitivity(int v);
-    int flashlightRejectStrength() const;    // 抗误锁
-    void setFlashlightRejectStrength(int v);
-    int flashlightSpotSize() const;          // 光斑大小
-    void setFlashlightSpotSize(int v);
-
-    // Glass filter (玻璃后目标抑制)
-    bool glassFilterShowPreview() const;
-    void setGlassFilterShowPreview(bool v);
-    int glassFilterStrength() const;        // 过滤强度 0..100 (replaces ring/coverage/min-box)
-    void setGlassFilterStrength(int v);
-
-    // Glass film color profiles (reuses ColorProfile struct)
-    QList<ColorProfile> glassColors() const;
-    void setGlassColors(const QList<ColorProfile>& colors);
 
     // Debug
     bool showFps() const;
@@ -240,10 +190,7 @@ public:
         int triggerSwitchCooldownMs = 0;
         // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
         QString aimClasses;
-        bool laserDetectEnabled = false;
         bool crosshairDetectEnabled = false;
-        bool flashlightDetectEnabled = false;
-        bool glassFilterEnabled = false;
         bool dynamicFovEnabled = false;
         float dynamicFovStrength = 0.60f;
         // Aim trajectory curve. 0=Linear, 1=Bezier, 2=Custom.

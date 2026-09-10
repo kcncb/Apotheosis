@@ -42,7 +42,6 @@ private:
     ToggleSwitch*   m_useLow{};
     QDoubleSpinBox* m_lowConf{};
     ToggleSwitch*   m_anyDetection{};    // 忽略阈值,任意检测触发
-    ToggleSwitch*   m_useFlashlight{};   // 寻光命中触发
     QSpinBox*       m_cooldownMs{};
 
     // ── Force key ──

@@ -93,10 +93,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
                        " (\xe5\xbf\xbd\xe7\x95\xa5\xe9\x98\x88\xe5\x80\xbc)"),
         false, m_anyDetection));
 
-    // 寻光命中触发(独立于 YOLO)。
-    thcl->addWidget(FormKit::toggleRow(
-        QStringLiteral("\xe5\xaf\xbb\xe5\x85\x89\xe8\xa7\xa6\xe5\x8f\x91"),  // 寻光触发
-        false, m_useFlashlight));
 
     QSlider* cdSl = nullptr;
     thcl->addWidget(FormKit::sliderRow(
@@ -181,7 +177,6 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
     wire_save(m_useHigh,       &ToggleSwitch::toggled);
     wire_save(m_useLow,        &ToggleSwitch::toggled);
     wire_save(m_anyDetection,  &ToggleSwitch::toggled);
-    wire_save(m_useFlashlight, &ToggleSwitch::toggled);
     wire_save(m_saveLabel,     &ToggleSwitch::toggled);
     connect(m_highConf,   QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &AutoCapturePage::saveToConfig);
@@ -230,7 +225,6 @@ void AutoCapturePage::onLoadConfig()
     m_useLow->setChecked(config.auto_capture_use_low);
     m_lowConf->setValue(static_cast<double>(config.auto_capture_low_conf));
     m_anyDetection->setChecked(config.auto_capture_any_detection);
-    m_useFlashlight->setChecked(config.auto_capture_use_flashlight);
     m_cooldownMs->setValue(config.auto_capture_cooldown_ms);
     m_forceKeys->setText(joinKeys(config.auto_capture_force_keys));
     m_outputDir->setText(QString::fromStdString(config.auto_capture_output_dir));
@@ -251,7 +245,6 @@ void AutoCapturePage::saveToConfig()
         config.auto_capture_use_low     = m_useLow->isChecked();
         config.auto_capture_low_conf    = static_cast<float>(m_lowConf->value());
         config.auto_capture_any_detection  = m_anyDetection->isChecked();
-        config.auto_capture_use_flashlight = m_useFlashlight->isChecked();
         config.auto_capture_cooldown_ms = m_cooldownMs->value();
         config.auto_capture_force_keys  = splitKeysQ(m_forceKeys->text());
         config.auto_capture_output_dir  = m_outputDir->text().trimmed().toStdString();

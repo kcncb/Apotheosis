@@ -91,11 +91,8 @@ private:
     QDoubleSpinBox* m_dynamicFovMargin{};
     QWidget* m_dynamicFovContainer{};
 
-    // Card 3: Crosshair / Laser / Flashlight detect + Glass filter
+    // Card 3: Crosshair detect
     ToggleSwitch* m_crosshairDetect{};
-    ToggleSwitch* m_laserDetect{};
-    ToggleSwitch* m_flashlightDetect{};
-    ToggleSwitch* m_glassFilter{};
 
     // AVA PIDF Mode 1：Kp/Ki/Kd/Kf/Lr 各 XY，及移动死区/限幅。
     std::array<QDoubleSpinBox*, 10> m_pidfGain{};

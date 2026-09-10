@@ -16,15 +16,10 @@
 #include "boss_aim.h"
 #include "capture.h"
 #include "crosshair/crosshair_runtime.h"
-#include "crosshair/flashlight_runtime.h"
-#include "crosshair/glass_filter.h"
-#include "crosshair/glass_runtime.h"
-#include "crosshair/glass_tuning.h"
 #include "mouse.h"
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
 #include "runtime/auto_backflash.h"
-#include "runtime/event_orchestrator.h"
 #include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 
@@ -36,7 +31,7 @@
 // form P + velocity-feedforward controller. This file is now a thin shim:
 //
 //   1. wait for detection / hotkey change
-//   2. snapshot hotkey + crosshair pivot (crosshair-color / laser if enabled)
+//   2. snapshot hotkey + crosshair pivot (crosshair-color if enabled)
 //   3. BossAimEngine.tick()  →  (dx, dy, fire)
 //   4. MouseThread.sendRawMove() + pressLeftButton/releaseLeftButton
 //   5. publish boss tracks to g_trackerDebugTracks for the overlay
@@ -81,8 +76,7 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     out.y = centre;
     // 扳机只负责开火判定，不能隐式启用准星找色。否则枪口闪光或准星动画
     // 会在开火时移动 PID 参考点，表现为锁定后抖动。
-    if (!profile || !(profile->crosshair_detect_enabled
-                      || profile->laser_detect_enabled))
+    if (!profile || !profile->crosshair_detect_enabled)
         return out;
 
     const auto snap = crosshair_runtime::read();
@@ -238,9 +232,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
     TriggerState trigger;
     auto_backflash::Controller backflash;
 
-    // 事件编排状态:跨帧追踪 target 锁定 id 与鼠标 fire 状态。
-    int  ev_last_track_id = -1;   // -1 = 无锁定
-    bool ev_fire_pressed  = false;
 
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
@@ -296,119 +287,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         g_mouse_send_failures.store(movement_feedback.failed);
         const auto config_snapshot = runtime_config::read();
 
-        // Glass filter — drop boxes whose edge ring is dominated by glass-
-        // film colour (the打不穿玻璃后面识别到的人形)。Runs BEFORE flashlight
-        // injection so the synthesized halo never goes through this gate
-        // (its edges are by definition all white). Per-hotkey opt-in;
-        // colour palette + thresholds are global. Latency: O(perimeter)
-        // per box on CPU, all 20 boxes < 1 ms.
-        if (hasNewDetection && !boxes.empty())
-        {
-            int filter_active_idx = runtime::g_active_hotkey_index.load();
-            bool glass_on = false;
-            crosshair::GlassFilterSettings gs;
-            if (filter_active_idx >= 0)
-            {
-                if (filter_active_idx < static_cast<int>(config_snapshot->hotkeys.size())
-                    && config_snapshot->hotkeys[filter_active_idx].glass_filter_enabled)
-                {
-                    glass_on = true;
-                    gs.enabled              = true;
-                    // Single macro knob → concrete params (ring fixed, min-box
-                    // auto-scaled to detection resolution). See glass_tuning.h.
-                    const auto gd = crosshair::glass_derive_settings(
-                        config_snapshot->glass_filter_strength,
-                        cv::Size(config_snapshot->detection_resolution, config_snapshot->detection_resolution));
-                    gs.edge_ring_frac       = gd.edge_ring_frac;
-                    gs.coverage_threshold   = gd.coverage_threshold;
-                    gs.min_box_short_side   = gd.min_box_short_side;
-                    gs.colors.reserve(config_snapshot->glass_colors.size());
-                    for (const auto& c : config_snapshot->glass_colors)
-                    {
-                        crosshair::CrosshairColorBand b;
-                        b.name = c.name; b.enabled = c.enabled;
-                        b.h_low = c.h_low; b.h_high = c.h_high;
-                        b.s_min = c.s_min; b.s_max = c.s_max;
-                        b.v_min = c.v_min; b.v_max = c.v_max;
-                        gs.colors.push_back(std::move(b));
-                    }
-                }
-            }
-
-            if (glass_on)
-            {
-                cv::Mat frame;
-                {
-                    std::lock_guard<std::mutex> lk(frameMutex);
-                    frame = latestFrame;
-                }
-                if (!frame.empty() && frame.type() == CV_8UC3)
-                {
-                    static crosshair::GlassFilter s_filter;
-                    glass_runtime::Snapshot snap;
-                    snap.judgements.reserve(boxes.size());
-                    std::vector<size_t> kill;
-                    for (size_t i = 0; i < boxes.size(); ++i)
-                    {
-                        const auto r = s_filter.check(frame, boxes[i], gs);
-                        glass_runtime::BoxJudgement bj;
-                        bj.box = boxes[i] & cv::Rect(0, 0, frame.cols, frame.rows);
-                        bj.coverage  = r.coverage;
-                        bj.is_glass  = r.is_behind_glass;
-                        bj.evaluated = r.evaluated;
-                        snap.judgements.push_back(bj);
-                        if (r.is_behind_glass) kill.push_back(i);
-                    }
-                    // Reverse erase 避免索引漂移。
-                    for (auto it = kill.rbegin(); it != kill.rend(); ++it)
-                    {
-                        const size_t i = *it;
-                        boxes.erase(boxes.begin() + i);
-                        precise_boxes.erase(precise_boxes.begin() + i);
-                        classes.erase(classes.begin() + i);
-                        confidences.erase(confidences.begin() + i);
-                    }
-                    snap.ts = std::chrono::steady_clock::now();
-                    glass_runtime::publish(std::move(snap));
-                }
-                else
-                {
-                    glass_runtime::publish(glass_runtime::Snapshot{});
-                }
-            }
-            else
-            {
-                glass_runtime::publish(glass_runtime::Snapshot{});
-            }
-        }
-
-        // 寻光与 YOLO 发布严格同频：每个新推理结果只处理一次当前检测画面。
-        // 若光核与模型框关联，只发布预览圆圈，原模型框原样进入瞄准管线，因而
-        // 类别优先级、锁点偏移和置信度规则完全不被寻光篡改。只有没有关联框、
-        // 且连续三次推理都通过严格判别的光核，才注入 shoudiantong 独立目标。
-        if (hasNewDetection)
-        {
-            cv::Mat flashlight_frame;
-            {
-                std::lock_guard<std::mutex> lk(frameMutex);
-                flashlight_frame = latestFrame;
-            }
-            flashlight_runtime::process_inference_frame(flashlight_frame, boxes);
-            const auto fs = flashlight_runtime::read();
-            if (fs.valid && !fs.spots.empty())
-            {
-                const auto& sp = fs.spots.front();
-                if (sp.independent_aimable && sp.box.area() > 0)
-                {
-                    boxes.push_back(sp.box);
-                    precise_boxes.emplace_back(
-                        static_cast<float>(sp.box.x), static_cast<float>(sp.box.y),
-                        static_cast<float>(sp.box.width), static_cast<float>(sp.box.height));
-                    classes.push_back(kFlashlightClassId);
-                    confidences.push_back(sp.confidence);
-                }
-            }
-        }
 
         if (input_method_changed.load())
         {
@@ -442,12 +320,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (resolution_changed || hotkey_changed)
             {
-                if (ev_last_track_id != -1)
-                    event_orch::publish(event_orch::EventType::TargetLost);
-                if (ev_fire_pressed)
-                    event_orch::publish(event_orch::EventType::FireReleased);
-                ev_last_track_id = -1;
-                ev_fire_pressed = false;
                 engine.reset();
                 aim_path_driver.reset();
                 reset_trigger(mouseThread, trigger);
@@ -488,12 +360,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
             engine.reset();
             aim_path_driver.reset();
             reset_trigger(mouseThread, trigger);
-            if (ev_last_track_id != -1)
-                event_orch::publish(event_orch::EventType::TargetLost);
-            if (ev_fire_pressed)
-                event_orch::publish(event_orch::EventType::FireReleased);
-            ev_last_track_id = -1;
-            ev_fire_pressed = false;
             publish_boss_debug(engine);
         }
 
@@ -537,17 +403,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 : (1000.0 / 60.0);
             const double cache_timeout_ms = cadence_ms
                 * static_cast<double>(std::max(1, profile_ptr->lost_target_cache_frames + 1));
-            if (ev_last_track_id != -1 && detection_age_ms > cache_timeout_ms)
+            if (detection_age_ms > cache_timeout_ms)
             {
                 engine.reset();
                 publish_boss_debug(engine);
                 mouseThread.clearQueuedMoves();
                 reset_trigger(mouseThread, trigger);
-                event_orch::publish(event_orch::EventType::TargetLost);
-                if (ev_fire_pressed)
-                    event_orch::publish(event_orch::EventType::FireReleased);
-                ev_last_track_id = -1;
-                ev_fire_pressed = false;
                 g_pid_last_err_px.store(0.0f);
             }
             continue;
@@ -617,13 +478,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // ─── Drive mouse ───
         if (out.have_target)
         {
-            // ─── 事件编排:target 锁定/切换事件 ───
-            if (ev_last_track_id == -1)
-                event_orch::publish(event_orch::EventType::TargetLocked);
-            else if (ev_last_track_id != out.current_track_id)
-                event_orch::publish(event_orch::EventType::TargetSwitched);
-            ev_last_track_id = out.current_track_id;
-
             int drive_dx = out.dx;
             int drive_dy = out.dy;
             boss::AimPathDriver::Params path;
@@ -804,20 +658,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
             mouseThread.clearQueuedMoves();
             g_pid_last_err_px.store(0.0f);
 
-            // ─── 事件编排:target 丢失事件 ───
-            if (ev_last_track_id != -1)
-                event_orch::publish(event_orch::EventType::TargetLost);
-            ev_last_track_id = -1;
-        }
-
-        // ─── 事件编排:扳机 Fire 状态 diff → FirePressed / FireReleased ───
-        {
-            const bool now_pressed = (trigger.phase == TriggerPhase::Pressed);
-            if (now_pressed && !ev_fire_pressed)
-                event_orch::publish(event_orch::EventType::FirePressed);
-            else if (!now_pressed && ev_fire_pressed)
-                event_orch::publish(event_orch::EventType::FireReleased);
-            ev_fire_pressed = now_pressed;
         }
 
         // ─── Replay buffer (one snapshot per detection) ─────────────────
@@ -879,8 +719,4 @@ void mouseThreadFunction(MouseThread& mouseThread)
     if (emergency_return != 0)
         mouseThread.sendPriorityRawMove(emergency_return, 0);
 
-    if (ev_last_track_id != -1)
-        event_orch::publish(event_orch::EventType::TargetLost);
-    if (ev_fire_pressed)
-        event_orch::publish(event_orch::EventType::FireReleased);
 }

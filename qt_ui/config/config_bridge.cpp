@@ -145,64 +145,6 @@ void ConfigBridge::syncToRuntime() {
         }
     }
 
-    // --- Laser ---
-    config.laser_rect_w         = cm.laserRectW();
-    config.laser_rect_h         = cm.laserRectH();
-    config.laser_center_x       = cm.laserCenterX();
-    config.laser_center_y       = cm.laserCenterY();
-    config.laser_target_center_x = cm.laserTargetCenterX();
-    config.laser_target_center_y = cm.laserTargetCenterY();
-    config.laser_target_rect_w  = cm.laserTargetRectW();
-    config.laser_target_rect_h  = cm.laserTargetRectH();
-    config.laser_min_elongation = cm.laserMinElongation();
-    config.laser_min_pixel_count = cm.laserMinPixelCount();
-    config.laser_close_radius   = cm.laserCloseRadius();
-    config.laser_smooth         = cm.laserSmooth();
-
-    // --- Flashlight halo ---
-    config.flashlight_show_preview     = cm.flashlightShowPreview();
-    config.flashlight_sensitivity      = cm.flashlightSensitivity();
-    config.flashlight_reject_strength  = cm.flashlightRejectStrength();
-    config.flashlight_spot_size        = cm.flashlightSpotSize();
-
-    // --- Glass filter ---
-    config.glass_filter_show_preview = cm.glassFilterShowPreview();
-    config.glass_filter_strength     = cm.glassFilterStrength();
-
-    {
-        auto qcolors = cm.glassColors();
-        config.glass_colors.clear();
-        for (const auto& qc : qcolors) {
-            CrosshairColorProfileConfig c;
-            c.name    = qs(qc.name);
-            c.enabled = qc.enabled;
-            c.h_low   = qc.hLow;
-            c.h_high  = qc.hHigh;
-            c.s_min   = qc.sMin;
-            c.s_max   = qc.sMax;
-            c.v_min   = qc.vMin;
-            c.v_max   = qc.vMax;
-            config.glass_colors.push_back(c);
-        }
-    }
-
-    {
-        auto qcolors = cm.laserColors();
-        config.laser_colors.clear();
-        for (const auto& qc : qcolors) {
-            CrosshairColorProfileConfig c;
-            c.name    = qs(qc.name);
-            c.enabled = qc.enabled;
-            c.h_low   = qc.hLow;
-            c.h_high  = qc.hHigh;
-            c.s_min   = qc.sMin;
-            c.s_max   = qc.sMax;
-            c.v_min   = qc.vMin;
-            c.v_max   = qc.vMax;
-            config.laser_colors.push_back(c);
-        }
-    }
-
     // --- Debug ---
     config.show_fps   = cm.showFps();
     config.verbose    = cm.verbose();
@@ -330,64 +272,6 @@ void ConfigBridge::syncFromRuntime()
         }
         cm.setCrosshairColors(qcolors);
     }
-
-    // --- Laser ---
-    cm.setLaserRectW(config.laser_rect_w);
-    cm.setLaserRectH(config.laser_rect_h);
-    cm.setLaserCenterX(config.laser_center_x);
-    cm.setLaserCenterY(config.laser_center_y);
-    cm.setLaserTargetCenterX(config.laser_target_center_x);
-    cm.setLaserTargetCenterY(config.laser_target_center_y);
-    cm.setLaserTargetRectW(config.laser_target_rect_w);
-    cm.setLaserTargetRectH(config.laser_target_rect_h);
-    cm.setLaserMinElongation(config.laser_min_elongation);
-    cm.setLaserMinPixelCount(config.laser_min_pixel_count);
-    cm.setLaserCloseRadius(config.laser_close_radius);
-    cm.setLaserSmooth(config.laser_smooth);
-    {
-        QList<ConfigManager::ColorProfile> qcolors;
-        for (const auto& c : config.laser_colors) {
-            ConfigManager::ColorProfile qc;
-            qc.name    = qstr(c.name);
-            qc.enabled = c.enabled;
-            qc.hLow    = c.h_low;
-            qc.hHigh   = c.h_high;
-            qc.sMin    = c.s_min;
-            qc.sMax    = c.s_max;
-            qc.vMin    = c.v_min;
-            qc.vMax    = c.v_max;
-            qcolors.append(qc);
-        }
-        cm.setLaserColors(qcolors);
-    }
-
-    // --- Flashlight halo ---
-    cm.setFlashlightShowPreview(config.flashlight_show_preview);
-    cm.setFlashlightSensitivity(config.flashlight_sensitivity);
-    cm.setFlashlightRejectStrength(config.flashlight_reject_strength);
-    cm.setFlashlightSpotSize(config.flashlight_spot_size);
-
-    // --- Glass filter ---
-    cm.setGlassFilterShowPreview(config.glass_filter_show_preview);
-    cm.setGlassFilterStrength(config.glass_filter_strength);
-    {
-        QList<ConfigManager::ColorProfile> qcolors;
-        for (const auto& c : config.glass_colors) {
-            ConfigManager::ColorProfile qc;
-            qc.name    = qstr(c.name);
-            qc.enabled = c.enabled;
-            qc.hLow    = c.h_low;
-            qc.hHigh   = c.h_high;
-            qc.sMin    = c.s_min;
-            qc.sMax    = c.s_max;
-            qc.vMin    = c.v_min;
-            qc.vMax    = c.v_max;
-            qcolors.append(qc);
-        }
-        cm.setGlassColors(qcolors);
-    }
-
-    // --- Debug ---
     cm.setShowFps(config.show_fps);
     cm.setVerbose(config.verbose);
     cm.setScreenshotDelay(config.screenshot_delay);
@@ -440,10 +324,7 @@ void ConfigBridge::syncFromRuntime()
             }
             hd.aimClasses = joined;
         }
-        hd.laserDetectEnabled      = hp.laser_detect_enabled;
         hd.crosshairDetectEnabled  = hp.crosshair_detect_enabled;
-        hd.flashlightDetectEnabled = hp.flashlight_detect_enabled;
-        hd.glassFilterEnabled      = hp.glass_filter_enabled;
         hd.dynamicFovEnabled  = hp.dynamic_fov_enabled;
         hd.dynamicFovStrength = hp.dynamic_fov_strength;
         hd.aimPathMode        = hp.aim_path_mode;

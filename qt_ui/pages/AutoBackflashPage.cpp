@@ -175,7 +175,6 @@ std::size_t AutoBackflashPage::classFingerprint() const
     std::size_t hash = 0;
     for (const auto& entry : config.class_filters)
     {
-        if (entry.class_id == kFlashlightClassId) continue;
         hash ^= std::hash<int>{}(entry.class_id)
             + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<std::string>{}(entry.class_name)
@@ -190,11 +189,7 @@ void AutoBackflashPage::refreshClasses()
     std::size_t fingerprint = 0;
     {
         std::lock_guard<std::recursive_mutex> lock(configMutex);
-        count = static_cast<int>(std::count_if(
-            config.class_filters.begin(), config.class_filters.end(),
-            [](const ClassFilterState& entry) {
-                return entry.class_id != kFlashlightClassId;
-            }));
+        count = static_cast<int>(config.class_filters.size());
         fingerprint = classFingerprint();
     }
     if (count != m_lastClassCount || fingerprint != m_lastFingerprint)
@@ -212,10 +207,6 @@ void AutoBackflashPage::rebuildClassList()
                         config.auto_backflash_classes.end());
         m_lastFingerprint = classFingerprint();
     }
-    classes.erase(std::remove_if(classes.begin(), classes.end(),
-        [](const ClassFilterState& entry) {
-            return entry.class_id == kFlashlightClassId;
-        }), classes.end());
     m_lastClassCount = static_cast<int>(classes.size());
 
     m_rebuilding = true;

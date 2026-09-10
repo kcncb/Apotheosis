@@ -37,8 +37,8 @@ DepthPage::DepthPage(QWidget* parent)
 
     // ── Page intro ──
     auto* intro = new QLabel(QStringLiteral(
-        "深度推理现在只用于「寻光」的深度门(判断光斑远近、剔除天空/太阳)。\n"
-        "这里只保留让深度推理跑起来所需的几个开关。"));
+        "深度推理用于运行 Depth-Anything 模型估计画面深度图。\n"
+        "这里配置深度推理跑起来所需的几个开关。"));
     intro->setWordWrap(true);
     intro->setObjectName(QStringLiteral("pageIntro"));
     layout->addWidget(intro);
@@ -53,9 +53,8 @@ DepthPage::DepthPage(QWidget* parent)
     inferCard->contentLayout()->addWidget(
         FormKit::toggleRow(QStringLiteral("启用深度推理"), true, m_depthEnabled));
     m_depthEnabled->setToolTip(tr(
-        "开启后会运行 Depth-Anything 模型估计画面深度图,供「寻光」的深度门使用,\n"
-        "用来判断光斑远近、剔除天空/太阳等远景误检。\n"
-        "代价:占额外 GPU 资源,关闭后深度功能(含寻光深度门)都不生效。"));
+        "开启后会运行 Depth-Anything 模型估计画面深度图。\n"
+        "代价:占额外 GPU 资源,关闭后深度功能都不生效。"));
     connect(m_depthEnabled, &ToggleSwitch::toggled,
             this, [](bool v) { ConfigManager::instance().setDepthInferenceEnabled(v); });
 
@@ -101,7 +100,7 @@ DepthPage::DepthPage(QWidget* parent)
                            maskFpsSlider, m_maskFpsRuntime));
     maskFpsSlider->setToolTip(tr(
         "深度推理每秒运行次数(限流)。深度图变化慢,一般 5~10 即可;\n"
-        "供「寻光」深度门使用,频率高只是更跟手,过高会和检测争 GPU。"));
+        "频率高只是更跟手,过高会和检测争 GPU。"));
     m_maskFpsRuntime->setToolTip(maskFpsSlider->toolTip());
     connect(m_maskFpsRuntime, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setDepthMaskFps(v); });

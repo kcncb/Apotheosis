@@ -34,13 +34,10 @@
 #include "pages/HotkeyPage.h"
 #include "pages/AutoBackflashPage.h"
 #include "pages/CrosshairPage.h"
-#include "pages/FlashlightPage.h"
-#include "pages/GlassFilterPage.h"
 #include "pages/StatsPage.h"
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
-#include "pages/EventPage.h"
 #include "capture/auto_capture.h"
 
 namespace {
@@ -60,14 +57,12 @@ const QVector<GroupDef>& navGroups() {
          {QStringLiteral("player-play"), QStringLiteral("settings")}},
         {QString::fromUtf8(u8"配置"),
          {QString::fromUtf8(u8"画面采集"), QString::fromUtf8(u8"目标"), QString::fromUtf8(u8"硬件"),
-          QString::fromUtf8(u8"AI 模型"), QString::fromUtf8(u8"深度模型")},
+          QString::fromUtf8(u8"AI 模型")},
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
-          QStringLiteral("cpu"), QStringLiteral("stack-2")}},
+          QStringLiteral("cpu")}},
         {QString::fromUtf8(u8"控制"),
-         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"自动背闪"), QString::fromUtf8(u8"准星找色"), QString::fromUtf8(u8"寻光"),
-           QString::fromUtf8(u8"玻璃过滤"), QString::fromUtf8(u8"事件编排")},
-         {QStringLiteral("keyboard"), QStringLiteral("rotate-clockwise"), QStringLiteral("color-swatch"), QStringLiteral("world"),
-           QStringLiteral("layers-intersect"), QStringLiteral("history")}},
+         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"自动背闪"), QString::fromUtf8(u8"准星找色")},
+         {QStringLiteral("keyboard"), QStringLiteral("rotate-clockwise"), QStringLiteral("color-swatch")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -340,9 +335,6 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"自动背闪"))   return new AutoBackflashPage();
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
-    if (name == QString::fromUtf8(u8"寻光"))       return new FlashlightPage();
-    if (name == QString::fromUtf8(u8"玻璃过滤"))   return new GlassFilterPage();
-    if (name == QString::fromUtf8(u8"事件编排"))   return new EventPage();
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }

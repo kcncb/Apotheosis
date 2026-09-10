@@ -10,7 +10,6 @@
 #include "Apotheosis.h"
 #include "config.h"
 #include "runtime/config_snapshot.h"
-#include "laser_detector.h"
 #include "runtime/active_hotkey.h"
 #include "capture/gpu_color_ops.h"
 #include "mem/gpu_image.h"
@@ -27,7 +26,6 @@ std::mutex g_mtx;
 PivotSnapshot g_snap{};
 
 crosshair::CrosshairDetector  g_detector;
-crosshair::LaserDetector      g_laser_detector;
 
 // --- Anti-jitter: adaptive (One-Euro) low-pass on the pivot --------------
 // Heavy smoothing when the point is nearly still (kills detection jitter),
@@ -97,7 +95,6 @@ struct OneEuro2D
 };
 
 OneEuro2D g_cross_filter;
-OneEuro2D g_laser_filter;
 std::mutex g_filter_mtx;
 
 constexpr int kMaxGpuBands = 16;
@@ -201,17 +198,11 @@ void process_frame(const cv::Mat& bgrFrame)
         }
     }
 
-    // Crosshair-colour and laser-colour are INDEPENDENT and may both be on.
-    // Read each hotkey's two toggles + the two separate palettes/params here.
     bool cross_enabled = false;
-    bool laser_enabled = false;
     bool cross_has_color = false;
-    bool laser_has_color = false;
     float cross_smooth = 0.0f;
-    float laser_smooth = 0.0f;
 
     crosshair::CrosshairDetectorSettings cross_settings;
-    crosshair::LaserDetectorSettings     laser_settings;
 
     {
         const auto snapshot = runtime_config::read();
@@ -223,16 +214,13 @@ void process_frame(const cv::Mat& bgrFrame)
         }
         const auto& hk = cfg.hotkeys[active_idx];
         cross_enabled = hk.crosshair_detect_enabled;
-        laser_enabled = hk.laser_detect_enabled;
-        if (!cross_enabled && !laser_enabled)
+        if (!cross_enabled)
         {
-            // This hotkey opted into neither colour mode.
             publish(PivotSnapshot{});
             return;
         }
 
         cross_smooth = cfg.crosshair_smooth;
-        laser_smooth = cfg.laser_smooth;
 
         cross_settings.enabled         = true;
         cross_settings.rect_w          = cfg.crosshair_rect_w;
@@ -250,87 +238,19 @@ void process_frame(const cv::Mat& bgrFrame)
             cross_has_color = cross_has_color || b.enabled;
             cross_settings.colors.push_back(std::move(b));
         }
-
-        laser_settings.enabled         = true;
-        laser_settings.rect_w          = cfg.laser_rect_w;
-        laser_settings.rect_h          = cfg.laser_rect_h;
-        laser_settings.center_x        = cfg.laser_center_x;
-        laser_settings.center_y        = cfg.laser_center_y;
-        laser_settings.min_pixel_count = cfg.laser_min_pixel_count;
-        laser_settings.close_radius    = cfg.laser_close_radius;
-        laser_settings.min_elongation  = cfg.laser_min_elongation;
-        laser_settings.target_center_x = cfg.laser_target_center_x;
-        laser_settings.target_center_y = cfg.laser_target_center_y;
-        laser_settings.target_rect_w   = cfg.laser_target_rect_w;
-        laser_settings.target_rect_h   = cfg.laser_target_rect_h;
-        laser_settings.colors.reserve(cfg.laser_colors.size());
-        for (const auto& c : cfg.laser_colors)
-        {
-            crosshair::CrosshairColorBand b;
-            b.name = c.name; b.enabled = c.enabled;
-            b.h_low = c.h_low; b.h_high = c.h_high;
-            b.s_min = c.s_min; b.s_max = c.s_max;
-            b.v_min = c.v_min; b.v_max = c.v_max;
-            laser_has_color = laser_has_color || b.enabled;
-            laser_settings.colors.push_back(std::move(b));
-        }
     }
 
-    // Wall-clock seconds for the adaptive filters.
     const double tsec = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 
-    // Detection order:
-    //   1. Run crosshair-colour first (cheap centroid).  Its (unsmoothed)
-    //      raw hit becomes the LASER "snap hint" when both are enabled.
-    //   2. Run the laser fit.  When both detectors are on AND the laser
-    //      line passes through the crosshair-colour point, the laser tip
-    //      snaps to that exact point — best of both: stable line direction
-    //      from the beam + precise reticle location from the crosshair colour.
-    //   3. Publication priority when BOTH on:  laser tip → crosshair point.
-    //      When only one is on it stays the sole source.
-    //
-    // Each source is smoothed by its OWN adaptive filter; the unused
-    // source's filter is reset so it never carries a stale position into a
-    // later hand-off (no glide on switch).
-
-    std::optional<cv::Point2f> raw_cross;   // pre-smoothing — used as laser hint
-    if (cross_enabled && cross_has_color)
-        raw_cross = g_detector.detect(bgrFrame, cross_settings);
-
     std::optional<cv::Point2f> hit;
-
-    bool laser_used = false;
-    if (laser_enabled && laser_has_color)
-    {
-        if (raw_cross)
-        {
-            laser_settings.use_crosshair_hint  = true;
-            laser_settings.crosshair_hint_x    = raw_cross->x;
-            laser_settings.crosshair_hint_y    = raw_cross->y;
-        }
-
-        auto lh = g_laser_detector.detect(bgrFrame, laser_settings);
-        if (lh)
-        {
-            if (laser_smooth > 0.001f)
-            {
-                g_laser_filter.configure(laser_smooth);
-                *lh = g_laser_filter.filter(*lh, tsec);
-            }
-            hit = lh;
-            laser_used = true;
-        }
-    }
-    if (!laser_used)
-        g_laser_filter.reset();
-
     bool cross_used = false;
-    if (!hit && raw_cross)
+    if (cross_enabled && cross_has_color)
     {
-        hit = raw_cross;
-        cross_used = true;
+        hit = g_detector.detect(bgrFrame, cross_settings);
+        cross_used = hit.has_value();
     }
+
     {
         std::lock_guard<std::mutex> filter_lock(g_filter_mtx);
         if (cross_used && cross_smooth > 0.001f)
@@ -383,19 +303,12 @@ bool gpu_path_active()
     if (active_idx < 0) return false;
     const auto snapshot = runtime_config::read();
     if (active_idx >= static_cast<int>(snapshot->hotkeys.size())) return false;
-    const auto& hk = snapshot->hotkeys[active_idx];
-    // When laser is also enabled, keep the established CPU combined path so
-    // its line fitter can consume the ordinary crosshair hit as a snap hint.
-    return hk.crosshair_detect_enabled && !hk.laser_detect_enabled;
+    return snapshot->hotkeys[active_idx].crosshair_detect_enabled;
 }
 
 bool cpu_path_active()
 {
-    const int active_idx = runtime::g_active_hotkey_index.load();
-    if (active_idx < 0) return false;
-    const auto snapshot = runtime_config::read();
-    if (active_idx >= static_cast<int>(snapshot->hotkeys.size())) return false;
-    return snapshot->hotkeys[active_idx].laser_detect_enabled;
+    return false;
 }
 
 void process_gpu_frame(const GpuImage& frame)

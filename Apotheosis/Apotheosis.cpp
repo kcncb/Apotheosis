@@ -30,7 +30,6 @@
 #include "mem/gpu_resource_manager.h"
 #include "mem/cpu_affinity_manager.h"
 #include "runtime/cuda_availability.h"
-#include "runtime/event_orchestrator.h"
 #include "runtime/inference_session.h"
 #include "runtime/thread_loops.h"
 #include "detector/dml_detector.h"
@@ -443,19 +442,6 @@ int main(int argc, char* argv[])
             AutoCapture::auto_capture_thread();
         });
 
-        // 事件编排:启动后台执行线程,把 config 里的规则灌入引擎。
-        event_orch::start();
-        {
-            std::vector<event_orch::Rule> rules;
-            {
-                std::lock_guard<std::recursive_mutex> lk(configMutex);
-                rules.reserve(config.event_rules_serialized.size());
-                for (const auto& s : config.event_rules_serialized)
-                    rules.push_back(event_orch::deserialize_rule(s));
-            }
-            event_orch::set_rules(std::move(rules));
-        }
-
         PreviewWindow_Start();
 
         welcome_message();
@@ -487,7 +473,6 @@ int main(int argc, char* argv[])
         int result = app.exec();
 
         shouldExit = true;
-        event_orch::stop();
         keyThread.join();
         if (autoCapThread.joinable()) autoCapThread.join();
 

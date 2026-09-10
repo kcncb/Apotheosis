@@ -940,12 +940,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             cv::Mat screenshotCpu;
             cv::Mat detectionFrame;
 
-            // Depth inference now serves only the flashlight feature, which
-            // consumes the normalized depth map. It stays alive iff depth
-            // inference is enabled AND the flashlight gate requests depth.
-            const bool flashlightDepthRequired = g_flashlight_depth_required.load();
-            const bool depthNeeded =
-                currentCfg.depth_inference_enabled && flashlightDepthRequired;
+            const bool depthNeeded = currentCfg.depth_inference_enabled;
 
             static bool lastDepthInferenceEnabled = true;
             if (!depthNeeded)
@@ -1089,7 +1084,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 depth_anything::DepthMaskOptions maskOptions;
                 maskOptions.fps = currentCfg.depth_mask_fps;
                 maskOptions.opt_input_size = currentCfg.depth_opt_input_size;
-                maskOptions.produce_normalized = flashlightDepthRequired;
+                maskOptions.produce_normalized = false;
                 maskOptions.norm_low_pct  = currentCfg.depth_norm_clip_low_pct;
                 maskOptions.norm_high_pct = currentCfg.depth_norm_clip_high_pct;
 

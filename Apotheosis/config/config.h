@@ -38,15 +38,6 @@ struct HotkeyAimClass
     float min_conf = 0.0f;
 };
 
-// Reserved synthetic class id for the flashlight halo "detection". Kept far
-// above any real model class count so it can never collide, and it only ever
-// flows into the engine's eligible-class set / priority map (hash lookups) and
-// the preview's "#id" label — never an array index — so the large value is
-// safe. The fixed name lets the user route it from the aim-class UI exactly
-// like a model class: Config::ensure_flashlight_class() seeds a class_filters
-// row {kFlashlightClassId, "shoudiantong", Aim} that survives model reloads.
-inline constexpr int         kFlashlightClassId   = 9000;
-inline constexpr const char* kFlashlightClassName = "shoudiantong";
 
 // A single aim hotkey. Multiple HotkeyProfiles can exist; whichever one has
 // any of its keys pressed wins. If several are pressed simultaneously, the
@@ -129,27 +120,6 @@ struct HotkeyProfile
     // the ROI size / color palette / area filters; each hotkey just opts in.
     bool crosshair_detect_enabled = false;
 
-    // Per-hotkey laser color detection toggle. INDEPENDENT of crosshair
-    // detection: both may be on at once. When both produce a pivot the
-    // crosshair (centroid) result WINS — the laser tip is only used as a
-    // fallback when crosshair-colour found nothing this frame. Global config
-    // owns the laser ROI / palette / params (separate from the crosshair set).
-    bool laser_detect_enabled = false;
-
-    // Per-hotkey flashlight halo detection toggle. INDEPENDENT of crosshair /
-    // laser: all three may be on at once. Detects an enemy flashlight glare
-    // anywhere on screen (hue-agnostic, brightness + circularity) so the user
-    // can flick onto / shoot at the over-exposed halo. Lowest priority of the
-    // three colour sources — only published as the pivot when both
-    // crosshair-colour and laser came up empty. Global config owns the
-    // threshold / radius / circularity gates.
-    bool flashlight_detect_enabled = false;
-
-    // Per-hotkey 玻璃过滤开关。开启后,锁敌之前对每个 detection box 的边
-    // 缘环做玻璃色覆盖率检测,被判玻璃的框直接从候选里剔除(不进
-    // tracker、不出现在 aim 候选)。全局色带 / 环厚度 / 阈值在 Config 上,
-    // 这里只是热键级 opt-in。
-    bool glass_filter_enabled = false;
 
     // Dynamic FOV — applied live every frame. `fovX`/`fovY` above become
     // the BASE (max) aim-region diameters in detection pixels around the
@@ -294,9 +264,6 @@ public:
     // "任意检测" 触发:忽略 high/low 阈值,只要该帧有一个 YOLO 检测就采集。
     // 用于快速积累样本(适合刚训完模型或新场景数据启动阶段)。
     bool   auto_capture_any_detection = false;
-    // "寻光" 触发:当 flashlight_runtime 本帧有 valid 命中时采集
-    // (跟 YOLO detection 独立)。适合专门收集光晕样本。
-    bool   auto_capture_use_flashlight = false;
     int    auto_capture_cooldown_ms = 200;
     std::vector<std::string> auto_capture_force_keys;
     std::string auto_capture_output_dir = "screenshots/auto";
@@ -313,10 +280,6 @@ public:
     int auto_backflash_return_delay_ms = 800;
     int auto_backflash_return_speed = 100;
     int auto_backflash_cooldown_ms = 1500;
-
-    // 事件编排规则(每行一条,单行序列化,见 event_orchestrator::serialize_rule)。
-    // 引擎启动时反序列化并 event_orch::set_rules;UI 修改后重新序列化写回。
-    std::vector<std::string> event_rules_serialized;
 
     // Class filter table (one entry per class_id the user has seen). New
     // classes discovered after a model change start in Delete and the user
@@ -342,66 +305,6 @@ public:
 
     std::vector<CrosshairColorProfileConfig> crosshair_colors; // defaults to red double-band
 
-    // ---- Laser-sight color find (independent module) ----------------------
-    // Fully separate from the crosshair centroid detector above: its own
-    // enable (HotkeyProfile::laser_detect_enabled), its own colour palette,
-    // ROI and params. Both can run at once; crosshair has priority and the
-    // laser tip is only the fallback. The beam is found as a line and its AIM
-    // END (tip near centre) is reported, optionally extrapolated a few px along
-    // the beam to recover the faint gradient end. See crosshair/laser_detector.h
-    // for the geometry-based, background-robust selection (elongation gate +
-    // muzzle-below-tip orientation).
-    std::vector<CrosshairColorProfileConfig> laser_colors; // separate palette
-    // Laser sampling rectangle, freely positionable: width/height + explicit
-    // CENTRE point (x,y) in detection-image pixels. Lets the user drag the
-    // laser ROI anywhere (the beam body sits below the crosshair, often
-    // off-centre). Clamped to the frame at use time.
-    int   laser_rect_w = 160;          // detect rect width  (det px)
-    int   laser_rect_h = 240;          // detect rect height (det px)
-    int   laser_center_x = 160;        // detect ROI centre X (det px)
-    int   laser_center_y = 200;        // detect ROI centre Y (det px)
-    int   laser_min_pixel_count = 10;  // min matched pixels for a beam component
-    int   laser_close_radius = 1;      // MORPH_CLOSE radius to bridge the beam (0=off)
-    float laser_min_elongation = 3.0f; // line-likeness gate (rejects red blobs)
-    float laser_smooth = 0.5f;         // anti-jitter adaptive smoothing of the tip [0,1], 0=off
-    // Target region (the 2nd box, drawn brown) near the static screen centre
-    // where the true beam endpoint lies. The fitted line (from the reliable
-    // front segment) is projected into this box to estimate the tip — this
-    // REPLACES a fixed pixel extension, so a fuzzy/flickering visible end no
-    // longer makes the reported tip jump. The tip is clamped inside this box,
-    // which bounds over/under-extension.
-    int   laser_target_center_x = 160; // target box centre X (det px)
-    int   laser_target_center_y = 160; // target box centre Y (det px)
-    int   laser_target_rect_w = 60;    // target box width  (det px)
-    int   laser_target_rect_h = 60;    // target box height (det px)
-
-    // ---- Flashlight halo detector (whole-frame, brightness-based) ----------
-    // 寻光 / 手电筒检测。提取近白过曝核心，并用圆度、局部对比与多方向
-    // 径向衰减拒绝 UI/灯牌/反光；连续确认与人物框关联见 runtime。
-    // Per-hotkey opt-in lives on
-    // HotkeyProfile::flashlight_detect_enabled.
-    bool  flashlight_show_preview = false;     // overlay debug toggle
-    // Three behaviour-level macro knobs (each 0..100). ALL internal detection /
-    // discrimination constants (brightness, radius band, circularity, contrast,
-    // depth-gate, temporal tracker, colocation) are derived from these by
-    // crosshair::flashlight_derive_tuning() — the seven old raw parameters no
-    // longer exist as config. See crosshair/flashlight_tuning.h.
-    int   flashlight_sensitivity     = 50; // 灵敏度: 锁得勤 ↔ 锁得稳 (外观轴)
-    int   flashlight_reject_strength = 50; // 抗误锁: 信外观 ↔ 信判别 (深度/时间/联动)
-    int   flashlight_spot_size       = 50; // 光斑大小: 可接受半径档 (按分辨率自动)
-
-    // ---- Glass filter (穿不透玻璃后的人形抑制) ----------------------------
-    // 三角洲里有打不穿的玻璃,模型只看轮廓也会识别出后面的人,锁过去白浪
-    // 费子弹。本模块在 mouse 循环里、tracker 之前,对每个 detection box
-    // 的"边缘环"采样玻璃膜特征色,命中率超过阈值的 box 直接抹掉。所有
-    // 工作在 CPU 完成、对每框 < 0.2 ms,延迟开销可忽略。
-    //
-    // 全局色带 + 一个宏观旋钮「过滤强度」,启用与否在 HotkeyProfile::glass_filter_enabled。
-    // 旧的环厚 / 命中阈值 / 最小框三个原始参数已收进单旋钮,环厚固定 0.15、最小框
-    // 按分辨率自动,命中阈值由强度反推。映射唯一来源:crosshair/glass_tuning.h。
-    bool  glass_filter_show_preview = false;     // 预览叠图(框边缘画环)
-    int   glass_filter_strength     = 50;        // 过滤强度 0..100: 保守 ↔ 激进
-    std::vector<CrosshairColorProfileConfig> glass_colors; // 默认浅蓝 + 浅绿薄膜双带
 
     // Aim hotkeys. Must contain at least one entry so the UI always has
     // something to show; defaultConfig() populates a single "Aim" hotkey
@@ -430,12 +333,6 @@ public:
     void sync_class_filters_from_model(int class_count,
                                        const std::vector<std::string>& class_names);
 
-    // Guarantee the synthetic flashlight aim class ({kFlashlightClassId,
-    // "shoudiantong", Aim}) exists in class_filters. Idempotent. Called after
-    // loadConfig() and after sync_class_filters_from_model() (which otherwise
-    // rebuilds the table from 0..class_count-1 and would drop it), so the
-    // flashlight stays routable in the aim-class UI across model reloads.
-    void ensure_flashlight_class();
 
     // Return the first hotkey whose keys list includes any currently-pressed
     // physical key. Caller owns the pressed-test predicate (keyboard_listener

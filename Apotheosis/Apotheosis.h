@@ -40,12 +40,6 @@ extern std::atomic<float> g_pid_last_err_px;
 // Flick/Track telemetry: false = Flick gains active, true = Track gains active.
 extern std::atomic<bool>  g_pid_mode_track;
 
-// Set by flashlight_runtime each frame: true when the 寻光 depth-gate is active
-// (an active hotkey has flashlight detection on AND 抗误锁 is high enough that
-// depth.mode > 0). The capture thread ORs it into depthNeeded / produce_normalized
-// so the normalized depth map exists for the gate to sample. Still gated by the
-// master depth_inference_enabled switch.
-extern std::atomic<bool>  g_flashlight_depth_required;
 
 void createInputDevices();
 void assignInputDevices();

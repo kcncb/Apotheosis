@@ -400,7 +400,6 @@ bool Config::loadConfig(const std::string& filename)
     auto_capture_low_conf   = std::clamp(
         static_cast<float>(get_double("", "auto_capture_low_conf", 0.30)), 0.0f, 1.0f);
     auto_capture_any_detection   = get_bool("", "auto_capture_any_detection",   false);
-    auto_capture_use_flashlight  = get_bool("", "auto_capture_use_flashlight",  false);
     auto_capture_cooldown_ms = std::max(0,
         static_cast<int>(get_long("", "auto_capture_cooldown_ms", 200)));
     auto_capture_force_keys = splitString(
@@ -436,18 +435,6 @@ bool Config::loadConfig(const std::string& filename)
     auto_backflash_cooldown_ms = std::clamp(
         get_long("", "auto_backflash_cooldown_ms", 1500), 0, 10000);
 
-    // ---------- Event orchestrator rules ----------
-    event_rules_serialized.clear();
-    {
-        const int n = std::clamp(static_cast<int>(get_long("", "event_rule_count", 0)), 0, 256);
-        event_rules_serialized.reserve(n);
-        for (int i = 0; i < n; ++i)
-        {
-            const std::string key = "event_rule_" + std::to_string(i);
-            std::string line = get_string("", key.c_str(), "");
-            if (!line.empty()) event_rules_serialized.push_back(std::move(line));
-        }
-    }
 
     // ---------- Crosshair color detector (palette + rect + area) ----------
     crosshair_rect_w           = std::clamp(get_long("", "crosshair_rect_w",  40), 4, 512);
@@ -455,28 +442,6 @@ bool Config::loadConfig(const std::string& filename)
     crosshair_min_pixel_count  = std::clamp(get_long("", "crosshair_min_pixel_count", 4), 1, 10000);
     crosshair_close_radius     = std::clamp(get_long("", "crosshair_close_radius",    1), 0, 7);
     crosshair_smooth           = std::clamp(static_cast<float>(get_double("", "crosshair_smooth", 0.5)), 0.0f, 1.0f);
-    laser_rect_w               = std::clamp(get_long("", "laser_rect_w",  160), 4, 4096);
-    laser_rect_h               = std::clamp(get_long("", "laser_rect_h",  240), 4, 4096);
-    laser_center_x             = std::clamp(get_long("", "laser_center_x", 160), 0, 8192);
-    laser_center_y             = std::clamp(get_long("", "laser_center_y", 200), 0, 8192);
-    laser_min_pixel_count      = std::clamp(get_long("", "laser_min_pixel_count", 10), 1, 10000);
-    laser_close_radius         = std::clamp(get_long("", "laser_close_radius",     1), 0, 9);
-    laser_min_elongation       = std::clamp(static_cast<float>(get_double("", "laser_min_elongation", 3.0)), 1.0f, 30.0f);
-    laser_smooth               = std::clamp(static_cast<float>(get_double("", "laser_smooth", 0.5)), 0.0f, 1.0f);
-    laser_target_center_x      = std::clamp(get_long("", "laser_target_center_x", 160), 0, 8192);
-    laser_target_center_y      = std::clamp(get_long("", "laser_target_center_y", 160), 0, 8192);
-    laser_target_rect_w        = std::clamp(get_long("", "laser_target_rect_w",    60), 4, 4096);
-    laser_target_rect_h        = std::clamp(get_long("", "laser_target_rect_h",    60), 4, 4096);
-
-    // ---- Flashlight halo detector ----
-    flashlight_show_preview      = get_bool("",   "flashlight_show_preview", false);
-    flashlight_sensitivity       = std::clamp(get_long("", "flashlight_sensitivity",     50), 0, 100);
-    flashlight_reject_strength   = std::clamp(get_long("", "flashlight_reject_strength", 50), 0, 100);
-    flashlight_spot_size         = std::clamp(get_long("", "flashlight_spot_size",       50), 0, 100);
-
-    // ---- Glass filter ----
-    glass_filter_show_preview  = get_bool("",   "glass_filter_show_preview", false);
-    glass_filter_strength      = std::clamp(static_cast<int>(get_long("", "glass_filter_strength", 50)), 0, 100);
 
     crosshair_colors.clear();
     {
@@ -523,105 +488,6 @@ bool Config::loadConfig(const std::string& filename)
         }
     }
 
-    laser_colors.clear();
-    {
-        // Each [laser_color.N] section = one HSV band in the laser palette
-        // (independent from crosshair_color.*).
-        CSimpleIniA::TNamesDepend sections;
-        ini.GetAllSections(sections);
-        std::vector<std::pair<int, std::string>> lc_sections;
-        const std::string prefix = "laser_color.";
-        for (const auto& s : sections)
-        {
-            std::string sname = s.pItem;
-            if (sname.rfind(prefix, 0) != 0) continue;
-            int idx = 0;
-            try { idx = std::stoi(sname.substr(prefix.size())); }
-            catch (...) { continue; }
-            lc_sections.emplace_back(idx, std::move(sname));
-        }
-        std::sort(lc_sections.begin(), lc_sections.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (const auto& entry : lc_sections)
-        {
-            const char* sec = entry.second.c_str();
-            CrosshairColorProfileConfig c;
-            c.name    = get_string(sec, "name", "Color");
-            c.enabled = get_bool(sec, "enabled", true);
-            c.h_low   = std::clamp(get_long(sec, "h_low",   0),   0, 179);
-            c.h_high  = std::clamp(get_long(sec, "h_high",  10),  0, 179);
-            c.s_min   = std::clamp(get_long(sec, "s_min",   45),  0, 255);
-            c.s_max   = std::clamp(get_long(sec, "s_max",   255), 0, 255);
-            c.v_min   = std::clamp(get_long(sec, "v_min",   50),  0, 255);
-            c.v_max   = std::clamp(get_long(sec, "v_max",   255), 0, 255);
-            laser_colors.push_back(std::move(c));
-        }
-        if (laser_colors.empty())
-        {
-            // Seed with a red double-band (laser sights are usually red); the
-            // user can recolour / add bands on the laser panel.
-            CrosshairColorProfileConfig low;
-            low.name = "Laser-Red-Low";  low.h_low = 0;   low.h_high = 10;
-            low.s_min = 45; low.v_min = 50;
-            CrosshairColorProfileConfig hi;
-            hi.name  = "Laser-Red-High"; hi.h_low  = 160; hi.h_high  = 179;
-            hi.s_min = 45; hi.v_min = 50;
-            laser_colors.push_back(std::move(low));
-            laser_colors.push_back(std::move(hi));
-        }
-    }
-
-    glass_colors.clear();
-    {
-        // Each [glass_color.N] section = one HSV band in the glass-film
-        // palette (独立于 crosshair / laser palette)。
-        CSimpleIniA::TNamesDepend sections;
-        ini.GetAllSections(sections);
-        std::vector<std::pair<int, std::string>> gc_sections;
-        const std::string prefix = "glass_color.";
-        for (const auto& s : sections)
-        {
-            std::string sname = s.pItem;
-            if (sname.rfind(prefix, 0) != 0) continue;
-            int idx = 0;
-            try { idx = std::stoi(sname.substr(prefix.size())); }
-            catch (...) { continue; }
-            gc_sections.emplace_back(idx, std::move(sname));
-        }
-        std::sort(gc_sections.begin(), gc_sections.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (const auto& entry : gc_sections)
-        {
-            const char* sec = entry.second.c_str();
-            CrosshairColorProfileConfig c;
-            c.name    = get_string(sec, "name", "Glass");
-            c.enabled = get_bool(sec, "enabled", true);
-            c.h_low   = std::clamp(get_long(sec, "h_low",   90),  0, 179);
-            c.h_high  = std::clamp(get_long(sec, "h_high",  115), 0, 179);
-            c.s_min   = std::clamp(get_long(sec, "s_min",   5),   0, 255);
-            c.s_max   = std::clamp(get_long(sec, "s_max",   90),  0, 255);
-            c.v_min   = std::clamp(get_long(sec, "v_min",   170), 0, 255);
-            c.v_max   = std::clamp(get_long(sec, "v_max",   255), 0, 255);
-            glass_colors.push_back(std::move(c));
-        }
-        if (glass_colors.empty())
-        {
-            // 默认双带:浅蓝 + 浅绿薄膜。低 S 高 V 是玻璃膜区别于人物 /
-            // 背景物体的关键特征。
-            CrosshairColorProfileConfig blue;
-            blue.name = "Glass-Blue";
-            blue.h_low = 90; blue.h_high = 115;
-            blue.s_min = 5;  blue.s_max  = 90;
-            blue.v_min = 170;blue.v_max  = 255;
-            CrosshairColorProfileConfig green;
-            green.name = "Glass-Green";
-            green.h_low = 55; green.h_high = 85;
-            green.s_min = 5;  green.s_max  = 90;
-            green.v_min = 170;green.v_max  = 255;
-            glass_colors.push_back(std::move(blue));
-            glass_colors.push_back(std::move(green));
-        }
-    }
 
     // ---------- Macro (Lua / G HUB-compatible) ----------
     macro_enabled = get_bool("", "macro_enabled", false);
@@ -654,9 +520,6 @@ bool Config::loadConfig(const std::string& filename)
                 return a.class_id < b.class_id;
             });
     }
-    // Synthetic flashlight aim class — keep it present even on a fresh config
-    // or one saved before this feature existed.
-    ensure_flashlight_class();
 
     // ---------- Hotkeys ----------
     hotkeys.clear();
@@ -778,9 +641,6 @@ bool Config::loadConfig(const std::string& filename)
             }
 
             hk.crosshair_detect_enabled  = get_bool(sec, "crosshair_detect_enabled", false);
-            hk.laser_detect_enabled      = get_bool(sec, "laser_detect_enabled", false);
-            hk.flashlight_detect_enabled = get_bool(sec, "flashlight_detect_enabled", false);
-            hk.glass_filter_enabled      = get_bool(sec, "glass_filter_enabled",      false);
 
             // 动态 FOV:优先读 strength;否则从旧 margin_frac 反推算。
             {
@@ -1058,25 +918,7 @@ bool Config::saveConfig(const std::string& filename)
         << "crosshair_rect_h = "          << crosshair_rect_h          << "\n"
         << "crosshair_min_pixel_count = " << crosshair_min_pixel_count << "\n"
         << "crosshair_close_radius = "    << crosshair_close_radius    << "\n"
-        << "crosshair_smooth = "          << crosshair_smooth          << "\n"
-        << "laser_rect_w = "              << laser_rect_w              << "\n"
-        << "laser_rect_h = "              << laser_rect_h              << "\n"
-        << "laser_center_x = "            << laser_center_x            << "\n"
-        << "laser_center_y = "            << laser_center_y            << "\n"
-        << "laser_min_pixel_count = "     << laser_min_pixel_count     << "\n"
-        << "laser_close_radius = "        << laser_close_radius        << "\n"
-        << "laser_min_elongation = "      << laser_min_elongation      << "\n"
-        << "laser_smooth = "              << laser_smooth              << "\n"
-        << "laser_target_center_x = "     << laser_target_center_x     << "\n"
-        << "laser_target_center_y = "     << laser_target_center_y     << "\n"
-        << "laser_target_rect_w = "       << laser_target_rect_w       << "\n"
-        << "laser_target_rect_h = "       << laser_target_rect_h       << "\n"
-        << "flashlight_show_preview = "    << to_bool_str(flashlight_show_preview) << "\n"
-        << "flashlight_sensitivity = "     << flashlight_sensitivity               << "\n"
-        << "flashlight_reject_strength = " << flashlight_reject_strength           << "\n"
-        << "flashlight_spot_size = "       << flashlight_spot_size                 << "\n"
-        << "glass_filter_show_preview = "       << to_bool_str(glass_filter_show_preview)       << "\n"
-        << "glass_filter_strength = "           << glass_filter_strength                        << "\n\n";
+        << "crosshair_smooth = "          << crosshair_smooth          << "\n\n";
 
     file << "# Debug\n"
         << "show_window = " << to_bool_str(show_window) << "\n"
@@ -1092,7 +934,6 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_capture_use_low = "    << to_bool_str(auto_capture_use_low) << "\n"
         << "auto_capture_low_conf = "   << auto_capture_low_conf << "\n"
         << "auto_capture_any_detection = "  << to_bool_str(auto_capture_any_detection)  << "\n"
-        << "auto_capture_use_flashlight = " << to_bool_str(auto_capture_use_flashlight) << "\n"
         << "auto_capture_cooldown_ms = " << auto_capture_cooldown_ms << "\n"
         << "auto_capture_force_keys = " << joinStrings(auto_capture_force_keys) << "\n"
         << "auto_capture_output_dir = " << auto_capture_output_dir << "\n"
@@ -1112,12 +953,6 @@ bool Config::saveConfig(const std::string& filename)
         << "auto_backflash_return_speed = " << auto_backflash_return_speed << "\n"
         << "auto_backflash_cooldown_ms = " << auto_backflash_cooldown_ms << "\n\n";
 
-    file << "# Event orchestrator (rule per line, format:\n"
-            "#   v2|name|enabled|event|mode|count|interval|cooldown|type,a,b|...)\n"
-        << "event_rule_count = " << event_rules_serialized.size() << "\n";
-    for (size_t i = 0; i < event_rules_serialized.size(); ++i)
-        file << "event_rule_" << i << " = " << event_rules_serialized[i] << "\n";
-    file << "\n";
 
     file << "# Macro (G HUB-compatible Lua). Drop a .lua script path into\n"
             "# macro_script_path; runtime loads it on startup when macro_enabled\n"
@@ -1175,9 +1010,6 @@ bool Config::saveConfig(const std::string& filename)
               << "aim_classes = "       << serialize_aim_classes(hk.aim_classes) << "\n"
              << std::setprecision(0)
              << "crosshair_detect_enabled = "  << to_bool_str(hk.crosshair_detect_enabled)  << "\n"
-             << "laser_detect_enabled = "      << to_bool_str(hk.laser_detect_enabled)      << "\n"
-             << "flashlight_detect_enabled = " << to_bool_str(hk.flashlight_detect_enabled) << "\n"
-             << "glass_filter_enabled = "      << to_bool_str(hk.glass_filter_enabled)      << "\n"
              << "dynamic_fov_enabled = " << to_bool_str(hk.dynamic_fov_enabled) << "\n"
              << std::fixed << std::setprecision(3)
              << "dynamic_fov_strength = " << hk.dynamic_fov_strength << "\n"
@@ -1242,35 +1074,6 @@ bool Config::saveConfig(const std::string& filename)
              << "v_max = "   << c.v_max   << "\n\n";
     }
 
-    // Laser color palette: independent from the crosshair palette above.
-    for (size_t i = 0; i < laser_colors.size(); ++i)
-    {
-        const auto& c = laser_colors[i];
-        file << "[laser_color." << i << "]\n"
-             << "name = "    << c.name    << "\n"
-             << "enabled = " << to_bool_str(c.enabled) << "\n"
-             << "h_low = "   << c.h_low   << "\n"
-             << "h_high = "  << c.h_high  << "\n"
-             << "s_min = "   << c.s_min   << "\n"
-             << "s_max = "   << c.s_max   << "\n"
-             << "v_min = "   << c.v_min   << "\n"
-             << "v_max = "   << c.v_max   << "\n\n";
-    }
-
-    // Glass-film color palette: 独立调色板,用于玻璃过滤的边缘环命中判定。
-    for (size_t i = 0; i < glass_colors.size(); ++i)
-    {
-        const auto& c = glass_colors[i];
-        file << "[glass_color." << i << "]\n"
-             << "name = "    << c.name    << "\n"
-             << "enabled = " << to_bool_str(c.enabled) << "\n"
-             << "h_low = "   << c.h_low   << "\n"
-             << "h_high = "  << c.h_high  << "\n"
-             << "s_min = "   << c.s_min   << "\n"
-             << "s_max = "   << c.s_max   << "\n"
-             << "v_min = "   << c.v_min   << "\n"
-             << "v_max = "   << c.v_max   << "\n\n";
-    }
 
     file.close();
     return true;
@@ -1303,20 +1106,4 @@ void Config::sync_class_filters_from_model(int class_count,
         class_filters.push_back(std::move(st));
     }
 
-    // The rebuild above only emits 0..class_count-1, so re-add the synthetic
-    // flashlight class it just dropped.
-    ensure_flashlight_class();
-}
-
-void Config::ensure_flashlight_class()
-{
-    for (const auto& cf : class_filters)
-        if (cf.class_id == kFlashlightClassId)
-            return; // already present (incl. a user-chosen bucket) — leave it
-
-    ClassFilterState st;
-    st.class_id   = kFlashlightClassId;
-    st.class_name = kFlashlightClassName;
-    st.bucket     = ClassBucket::Aim; // default routable; user may rebucket later
-    class_filters.push_back(std::move(st));
 }
