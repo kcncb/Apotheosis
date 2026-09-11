@@ -25,6 +25,7 @@
 // 采集卡能力表 (数据模型 + 三级联动查询) 见 capture_card_caps.h。
 // 单独成文件是为了让 Qt UI 与单元测试不必拖进 CUDA / TensorRT 头文件。
 #include "capture_card_caps.h"
+#include "device_frame_age.h"
 
 // Self-written capture-card backend talking to the device directly through
 // Media Foundation (IMFSourceReader). No cv::VideoCapture involved.
@@ -70,6 +71,11 @@ public:
     cv::Mat GetNextFrameCpu() override;
     GpuImage GetNextFrameGpu() override;
     int GetSourceFpsEstimate() const override { return source_fps_.load(); }
+
+    // 驱动时间戳到 OnReadSample 回调入口的 EMA; 超过两秒未更新即失效。
+    int GetDeviceFrameAgeUs() const override;
+    bool HasStopped() const override { return receive_finished_.load(); }
+    int64_t GetLastFrameCaptureNs() const override { return last_dequeued_capture_ns_; }
     bool WaitFrame(int timeoutMs) override;
     bool SupportsEventWait() const override { return true; }
     void SetTargetFps(int fps) override;
@@ -104,20 +110,19 @@ private:
     bool EnsureGpuContext();
     void TickFps();
 
-    // IMFSourceReader is synchronous: doing conversion in ReceiveThread delays
-    // the next ReadSample call. Keep that thread device-facing only and move
-    // all non-parallel-MJPG work to a bounded latest-frame worker.
+    // The async reader callback only hands off samples. Conversion remains in
+    // bounded workers so it cannot delay the next device request.
     void StartProcessWorker();
     void StopProcessWorker();
     void ProcessWorkerLoop();
-    void EnqueueProcessJob(const uint8_t* data, size_t size);
+    void EnqueueProcessJob(const uint8_t* data, size_t size, int64_t capture_ns);
 
     // MJPG-GPU 并行解码 worker 池(说明见下方 DecodeJob 成员处)。
     void StartDecodeWorkers();
     void StopDecodeWorkers();
     void DecodeWorkerLoop();
-    void EnqueueJpegJob(const uint8_t* data, size_t size);
-    bool EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq);
+    void EnqueueJpegJob(const uint8_t* data, size_t size, int64_t capture_ns);
+    bool EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq, int64_t capture_ns);
     bool ShouldDispatchFrame();   // 按 target_fps_ 节流:返回 false 表示这帧应丢弃(不解码)
 
     // GPU decode paths (output BGR GpuImage on gpu_stream_). On a PCIe Gen1 card
@@ -174,6 +179,10 @@ private:
     double source_fps_smoothed_{ 0.0 };
     std::chrono::steady_clock::time_point source_fps_start_;
 
+    capture::DeviceFrameAge device_age_;
+    bool device_age_missing_logged_ = false; // receiver only
+    std::atomic<bool> receive_finished_{false};
+
     int frame_width_{ 0 };
     int frame_height_{ 0 };
     int frame_stride_{ 0 };
@@ -181,12 +190,17 @@ private:
     std::thread receive_thread_;
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;   // 产帧入队后唤醒等待的消费线程
-    std::queue<cv::Mat> cpu_frame_queue_;
-    std::queue<GpuImage> gpu_frame_queue_;
+    struct CpuFrame { cv::Mat image; int64_t capture_ns = 0; };
+    struct DeviceFrame { GpuImage image; int64_t capture_ns = 0; };
+    std::queue<CpuFrame> cpu_frame_queue_;
+    std::queue<DeviceFrame> gpu_frame_queue_;
+    int64_t last_dequeued_capture_ns_ = 0; // capture consumer only
+    int64_t process_capture_ns_ = 0;       // process worker only
 
     struct ProcessJob
     {
         std::vector<uint8_t> bytes;
+        int64_t capture_ns = 0;
         int width = 0;
         int height = 0;
         int stride = 0;
@@ -212,7 +226,7 @@ private:
     // per-thread)并行解中心 ROI,吞吐随 worker 数翻倍。每帧带单调序号,
     // EnqueueGpuOrdered 只接受比已入队最大序号更新的帧,保住"队列容量 1 = 最新帧"
     // 不被乱序的旧帧覆盖。仅在 crop_enabled 的 MJPG-GPU 模式启用。
-    struct DecodeJob { std::vector<uint8_t> jpeg; uint64_t seq = 0; };
+    struct DecodeJob { std::vector<uint8_t> jpeg; uint64_t seq = 0; int64_t capture_ns = 0; };
     static constexpr int DECODE_WORKERS = 2;
     static constexpr int MAX_JOB_QUEUE = 3;
     std::mutex job_mutex_;
@@ -249,7 +263,7 @@ private:
     // the capture/processing thread.
     static constexpr int OUT_POOL_SIZE = 8;
     std::array<GpuImage, OUT_POOL_SIZE> out_pool_;
-    std::array<cudaEvent_t, OUT_POOL_SIZE> out_events_{};
+    GpuReadyEventPool<OUT_POOL_SIZE> out_events_;
     size_t out_pool_idx_{ 0 };
     size_t current_out_idx_{ 0 };  // slot index returned by the last nextOutSlot()
 

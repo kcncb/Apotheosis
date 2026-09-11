@@ -538,6 +538,16 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     // 链路延迟补偿: 把 meas_lat 帧之前的测量推算回"当前", 供比例/微分/前馈共用。
     // 延迟为 0 时这里是恒等变换(与原行为逐位一致)。
     if (delay.measure_latency_sec > 0.0) {
+        // Initialize BOTH axes before either call changes the shared flag.
+        if (!delay.initialized) {
+            delay.model_x_state = s.corrected_error_x;
+            delay.model_y_state = s.corrected_error_y;
+            delay.model_x.fill(s.corrected_error_x);
+            delay.model_y.fill(s.corrected_error_y);
+            delay.command_x.fill(0.0);
+            delay.command_y.fill(0.0);
+            delay.initialized = true;
+        }
         s.corrected_error_x = delay_compensate(
             delay.model_x.data(), delay.command_x.data(), delay.model_x_state,
             delay.initialized, delay.step, s.corrected_error_x, s.ff_state_x, dt,

@@ -65,6 +65,8 @@ uint64_t GpuImage::allocationBytes() noexcept
 void GpuImage::release() noexcept
 {
     storage_.reset();
+    ready_event_.reset();
+    capture_ns_ = 0;
     data_ = nullptr;
     rows_ = cols_ = channels_ = 0;
     step_ = 0;
@@ -116,9 +118,9 @@ void GpuImage::download(cv::Mat& dst, cudaStream_t stream) const
     if (ready_event_)
     {
         if (stream)
-            cudaStreamWaitEvent(stream, ready_event_, 0);
+            cudaStreamWaitEvent(stream, readyEvent(), 0);
         else
-            cudaEventSynchronize(ready_event_);
+            cudaEventSynchronize(readyEvent());
     }
 
     const size_t widthBytes = static_cast<size_t>(cols_) * static_cast<size_t>(channels_);
@@ -149,6 +151,8 @@ GpuImage GpuImage::subRect(int x, int y, int w, int h) const
         return out;
 
     out.storage_ = storage_;
+    out.ready_event_ = ready_event_;
+    out.capture_ns_ = capture_ns_;
     out.data_ = data_ + static_cast<size_t>(y) * step_
               + static_cast<size_t>(x) * static_cast<size_t>(channels_);
     out.rows_ = h;

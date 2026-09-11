@@ -304,17 +304,8 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     // 5. Optional top-left status banner with inference FPS + latency.
     if (!cfg.show_fps)
         return;
-    runtime::InferenceSession* session = g_inference_session;
-    float infer_ms = 0.0f;
-    if (session && session->detector())
-    {
-        infer_ms = static_cast<float>(
-            session->detector()->lastPreprocessTime().count()
-            + session->detector()->lastInferenceTime().count()
-            + session->detector()->lastCopyTime().count()
-            + session->detector()->lastPostprocessTime().count()
-            + session->detector()->lastNmsTime().count());
-    }
+    const auto timing = runtime::latency::snapshot();
+    const float infer_ms = static_cast<float>(timing.engine_inference_ms);
 
     static int    s_last_version  = -1;
     static int    s_frames_seen   = 0;
@@ -347,11 +338,9 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 
     // 端到端延迟分解面板。
     //
-    // 这里显示的 E2E 是【像素被采集 -> 位移写出】的真实耗时, 与上面那行
-    // "Lat"(仅推理耗时)完全是两回事 —— 后者只是整条链路中的一段。
-    // T0->T3 是控制环消费检测的时刻, 也就是决定"准星落后移动目标多少"
-    // (v × L) 的那个 L。数值不含采集卡内部 HDMI->USB 的固有延迟 (PC 侧
-    // 不可观测, 典型 +20~60ms), 因此是【下界】。
+    // E2E pairs the sample callback timestamp with this command's completed
+    // driver send. No send sample means unavailable, not a zero-latency write.
+    // It does not acknowledge physical HID execution or the display response.
     int y = 34;
     for (const auto& line : runtime::latency::formatLinesAscii(true))
     {

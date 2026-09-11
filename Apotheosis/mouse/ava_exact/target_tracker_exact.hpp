@@ -36,6 +36,7 @@ struct TargetKalman4x2Exact {
 struct TargetTrackerExact {
     bool active{};
     SelectedTarget104Abi target{};
+    SelectedTarget104Abi last_measurement{}; // raw observed geometry, never predicted
     std::int32_t lost_frames{};
     std::int32_t max_lost_frames{3};
     float search_radius{0.5f};

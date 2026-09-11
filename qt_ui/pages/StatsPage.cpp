@@ -134,7 +134,7 @@ StatsPage::StatsPage(QWidget* parent)
     scroll->setWidget(content);
 
     // ── Card 1: 实时性能 (metric grid) ──
-    auto* perfCard = new CardWidget(QStringLiteral("实时性能"), QStringLiteral("gauge"));
+    auto* perfCard = new CardWidget(QString::fromUtf8(u8"实时性能"), QStringLiteral("gauge"));
 
     auto* metricGrid = new QGridLayout;
     metricGrid->setHorizontalSpacing(12);
@@ -163,11 +163,11 @@ StatsPage::StatsPage(QWidget* parent)
     // "采集 FPS" = 消费循环每秒迭代数(captureFps);"产帧 FPS" = receive 线程
     // 每秒真正解码+入队的帧数(captureSourceFps,wire+NVDEC 的真实速度)。两个
     // 数字分开看能立刻判断瓶颈在采集线程还是产帧侧。
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("采集 FPS"), m_fpsValue),         0, 0);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("产帧 FPS"), m_sourceFpsValue),   0, 1);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("采集延迟"), m_captureLatency),   1, 0);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("推理延迟"), m_inferenceLatency), 1, 1);
-    metricGrid->addWidget(makeMetricCell(QStringLiteral("总延迟"),   m_totalLatency),     2, 0);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集 FPS"), m_fpsValue),         0, 0);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"产帧 FPS"), m_sourceFpsValue),   0, 1);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"采集延迟"), m_captureLatency),   1, 0);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"推理延迟"), m_inferenceLatency), 1, 1);
+    metricGrid->addWidget(makeMetricCell(QString::fromUtf8(u8"总延迟"),   m_totalLatency),     2, 0);
     metricGrid->setColumnStretch(0, 1);
     metricGrid->setColumnStretch(1, 1);
 
@@ -175,25 +175,17 @@ StatsPage::StatsPage(QWidget* parent)
     layout->addWidget(perfCard);
 
     // ── Card 2: 性能图表 ──
-    auto* graphCard = new CardWidget(QStringLiteral("性能图表"), QStringLiteral("chart-line"));
+    auto* graphCard = new CardWidget(QString::fromUtf8(u8"性能图表"), QStringLiteral("chart-line"));
     m_graph = new FpsGraphWidget;
     graphCard->contentLayout()->addWidget(m_graph);
     layout->addWidget(graphCard);
 
-    // ── Card 3: 接收诊断 (collapsible) ──
-    // 把"产帧 FPS 为什么上不去"拆成五项互不重叠的桶,直接定位损失发生在哪一层:
-    //   发包速率 — sender 真实发出的帧数(理论 = sender FPS,接收端通过 frameId
-    //              跨度反推。低于 sender 设定 = sender 自己没发够)。
-    //   网络丢帧 — sender 发了但一个 fragment 都没到的帧(senderSpan - started)。
-    //              基本就是 wire/pcap kernel ring 满前 drop 整组包,以及网线/
-    //              交换机抖动。
-    //   重组失败 — 收到 fragment 但凑不齐整帧(started - decoded)。某个分片晚
-    //              到/丢了,无法拼。
-    //   pcap内核丢 — pcap_stats 的 ps_drop:内核 ring buffer 满后 drop。如果这
-    //              个非 0,说明缓冲不够或 receive thread 抢不到 CPU。
-    //   NIC驱动丢 — pcap_stats 的 ps_ifdrop:NIC/驱动层 drop,通常意味着 RX 描
-    //              述符不足/中断处理慢,要去网卡设置里调 RSS / 增大 Rx buffer。
-    auto* rxCard = new CardWidget(QStringLiteral("接收诊断 (eth_capture, 每秒)"), QStringLiteral("activity"));
+    // ── Card 3: 采集诊断 (collapsible) ──
+    // 采集卡路径的延迟分段(原先这里是 eth_capture 的网络接收诊断 —— 网络后端已
+    // 删除, 五项恒为 0, 只会把排查延迟的人带偏)。
+    //
+    // 设备帧龄与回调后的软件耗时分开显示, 不据此单独判断卡芯片快慢。
+    auto* rxCard = new CardWidget(QString::fromUtf8(u8"采集诊断 (采集卡)"), QStringLiteral("activity"));
     rxCard->setCollapsible(true);
 
     auto addRxRow = [rxCard](const QString& caption, QLabel*& outLabel) {
@@ -201,11 +193,11 @@ StatsPage::StatsPage(QWidget* parent)
         outLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         rxCard->contentLayout()->addWidget(FormKit::fieldRow(caption, outLabel));
     };
-    addRxRow(QStringLiteral("发包速率"),    m_rxSenderSpan);
-    addRxRow(QStringLiteral("网络丢帧"),    m_rxWireLost);
-    addRxRow(QStringLiteral("重组失败"),    m_rxPartialLost);
-    addRxRow(QStringLiteral("pcap 内核丢"), m_rxPcapKernelDrop);
-    addRxRow(QStringLiteral("NIC 驱动丢"),  m_rxPcapIfDrop);
+    addRxRow(QString::fromUtf8(u8"设备帧龄 (驱动/MF)"), m_diagDeviceAge);
+    addRxRow(QString::fromUtf8(u8"接收→取帧"),          m_diagCapToDetect);
+    addRxRow(QString::fromUtf8(u8"推理 (含前后处理)"),  m_diagInfer);
+    addRxRow(QString::fromUtf8(u8"发布→消费"),          m_diagPublishToAim);
+    addRxRow(QString::fromUtf8(u8"全链路 (下界)"),      m_diagEndToEnd);
 
     layout->addWidget(rxCard);
 
@@ -232,16 +224,16 @@ StatsPage::StatsPage(QWidget* parent)
     mouseTimer->start();
 
     // ── Card 4: 系统资源 (collapsible) ──
-    auto* sysCard = new CardWidget(QStringLiteral("系统资源"), QStringLiteral("cpu"));
+    auto* sysCard = new CardWidget(QString::fromUtf8(u8"系统资源"), QStringLiteral("cpu"));
     sysCard->setCollapsible(true);
 
     m_gpuMemory = new QLabel(QStringLiteral("--"));
     m_gpuMemory->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    sysCard->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("GPU 显存预留"), m_gpuMemory));
+    sysCard->contentLayout()->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"GPU 显存预留"), m_gpuMemory));
 
     m_cpuCores = new QLabel(QStringLiteral("--"));
     m_cpuCores->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    sysCard->contentLayout()->addWidget(FormKit::fieldRow(QStringLiteral("CPU 核心预留"), m_cpuCores));
+    sysCard->contentLayout()->addWidget(FormKit::fieldRow(QString::fromUtf8(u8"CPU 核心预留"), m_cpuCores));
 
     layout->addWidget(sysCard);
     layout->addStretch();
@@ -260,16 +252,23 @@ void StatsPage::setSourceFps(double fps) {
         m_sourceFpsValue->setText(QStringLiteral("--"));
 }
 
+// 延迟数值统一格式化: 负数 = 尚无数据(探针还没结算过一帧), 显示 "--"。
+// 不能用 0 当"没有数据": 0 ms 是一个合法测量值, 混在一起会让人以为链路变快了。
+static QString fmtLatencyMs(double ms) {
+    if (ms < 0.0) return QStringLiteral("--");
+    return QStringLiteral("%1 ms").arg(ms, 0, 'f', 1);
+}
+
 void StatsPage::setCaptureLatency(double ms) {
-    m_captureLatency->setText(QStringLiteral("%1 ms").arg(ms, 0, 'f', 1));
+    if (m_captureLatency) m_captureLatency->setText(fmtLatencyMs(ms));
 }
 
 void StatsPage::setInferenceLatency(double ms) {
-    m_inferenceLatency->setText(QStringLiteral("%1 ms").arg(ms, 0, 'f', 1));
+    if (m_inferenceLatency) m_inferenceLatency->setText(fmtLatencyMs(ms));
 }
 
 void StatsPage::setTotalLatency(double ms) {
-    m_totalLatency->setText(QStringLiteral("%1 ms").arg(ms, 0, 'f', 1));
+    if (m_totalLatency) m_totalLatency->setText(fmtLatencyMs(ms));
 }
 
 void StatsPage::setGpuMemory(const QString& text) {
@@ -280,17 +279,20 @@ void StatsPage::setCpuCores(const QString& text) {
     m_cpuCores->setText(text);
 }
 
-void StatsPage::setReceiverDiagnostics(int senderSpanFps,
-                                       int wireLostFps,
-                                       int partialLostFps,
-                                       int pcapKernelDroppedFps,
-                                       int pcapIfDroppedFps) {
-    auto fmt = [](int v) {
-        return (v > 0) ? QString::number(v) : QStringLiteral("0");
+void StatsPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs, double inferMs,
+                                           double publishToAimMs, double endToEndMs) {
+    auto setMs = [](QLabel* lbl, double ms) {
+        if (lbl) lbl->setText(fmtLatencyMs(ms));
     };
-    if (m_rxSenderSpan)     m_rxSenderSpan->setText(fmt(senderSpanFps));
-    if (m_rxWireLost)       m_rxWireLost->setText(fmt(wireLostFps));
-    if (m_rxPartialLost)    m_rxPartialLost->setText(fmt(partialLostFps));
-    if (m_rxPcapKernelDrop) m_rxPcapKernelDrop->setText(fmt(pcapKernelDroppedFps));
-    if (m_rxPcapIfDrop)     m_rxPcapIfDrop->setText(fmt(pcapIfDroppedFps));
+    // 设备帧龄用微秒精度: 对接侧正常时它经常只有零点几毫秒, 取整到 1 位小数会看
+    // 不出差别, 而"有没有排队"正是靠这个小数区分的。
+    if (m_diagDeviceAge) {
+        m_diagDeviceAge->setText(deviceAgeUs < 0
+            ? QStringLiteral("--")
+            : QStringLiteral("%1 ms").arg(deviceAgeUs / 1000.0, 0, 'f', 2));
+    }
+    setMs(m_diagCapToDetect, capToDetectMs);
+    setMs(m_diagInfer, inferMs);
+    setMs(m_diagPublishToAim, publishToAimMs);
+    setMs(m_diagEndToEnd, endToEndMs);
 }

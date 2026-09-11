@@ -102,6 +102,8 @@ public:
         std::array<float, 2> relation_origin,
         std::array<float, 2> output_origin_offset);
 
+    void shift_camera_origin(double dx, double dy) noexcept;
+
     const TargetSelectorRuntimeConfig& config() const noexcept { return config_; }
     const TargetTrackerExact& tracker() const noexcept { return tracker_; }
     TargetTrackerExact& tracker() noexcept { return tracker_; }

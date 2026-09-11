@@ -8,6 +8,7 @@
 #include "Apotheosis.h"
 #include "Makcu.h"
 #include "MakcuNew.h"
+#include "runtime/latency_probe.h"
 
 namespace
 {
@@ -75,7 +76,7 @@ void MouseThread::updateParams(const MouseRuntimeParams& in)
     params_ = sanitized;
 }
 
-void MouseThread::queueMove(int dx, int dy)
+void MouseThread::queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns, uint64_t command_id)
 {
     if (dx == 0 && dy == 0)
         return;
@@ -89,7 +90,9 @@ void MouseThread::queueMove(int dx, int dy)
 
     std::lock_guard<std::mutex> lg(queueMtx_);
     // latest-only：新检测帧直接覆盖尚未消费的旧移动，并提升 generation。
-    moveSlot_.replace(dx, dy, std::chrono::steady_clock::now());
+    journal_->cancel(pendingCommandId_);
+    pendingCommandId_ = command_id;
+    moveSlot_.replace(dx, dy, std::chrono::steady_clock::now(), capture_ns, aim_ns, command_id);
     queueCv_.notify_one();
 }
 
@@ -109,15 +112,21 @@ void MouseThread::moveWorkerLoop()
             mouse_async::PendingMove move;
             if (!moveSlot_.take(move))
                 continue;
+            pendingCommandId_ = 0;
             ul.unlock();
 
             // 每个 movement pair 发送前检查 generation。新帧到达后，
             // 已取出的旧批次立即作废，不再沿旧方向继续发送。
             if (!moveSlot_.isCurrent(move.generation))
+            {
+                journal_->cancel(move.command_id);
                 continue;
+            }
 
             const bool sent = sendMovementToDriver(move.dx, move.dy);
+            journal_->complete(move.command_id, sent, runtime::latency::nowNs());
             if (sent) {
+                runtime::latency::markMoveSent(move.capture_ns, move.aim_ns);
                 appliedDx_.fetch_add(move.dx, std::memory_order_release);
                 appliedDy_.fetch_add(move.dy, std::memory_order_release);
             } else {
@@ -138,8 +147,23 @@ void MouseThread::moveWorkerLoop()
     }
 }
 
-void MouseThread::sendRawMove(int dx, int dy)
+void MouseThread::sendPixelMove(double dx, double dy, motion::Calibration calibration,
+                               int limit_x, int limit_y, int64_t capture_ns, int64_t aim_ns)
 {
+    std::array<int, 2> counts;
+    {
+        std::lock_guard<std::mutex> lock(outputMtx_);
+        counts = mapper_.map({dx, dy}, calibration, limit_x, limit_y);
+    }
+    if (counts[0] == 0 && counts[1] == 0) return;
+    const auto id = journal_->queued(counts[0], counts[1], calibration, runtime::latency::nowNs());
+    sendRawMove(counts[0], counts[1], capture_ns, aim_ns, id);
+}
+
+void MouseThread::sendRawMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns, uint64_t command_id)
+{
+    if (dx == 0 && dy == 0) return;
+    if (!command_id) command_id = journal_->queued(dx, dy, {}, runtime::latency::nowNs());
     {
         std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
         if (makcu_new_)
@@ -151,12 +175,14 @@ void MouseThread::sendRawMove(int dx, int dy)
             // 让遥测对这条路径同样成立(语义与队列路径一致: 决策→写出完成)。
             const auto t0 = std::chrono::steady_clock::now();
             const bool ok = makcu_new_->move(dx, dy);
+            journal_->complete(command_id, ok, runtime::latency::nowNs());
             const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count();
             lastLatencyUs_.store(static_cast<long long>(elapsed_us),
                                  std::memory_order_release);
             if (ok)
             {
+                if (dx != 0 || dy != 0) runtime::latency::markMoveSent(capture_ns, aim_ns);
                 appliedDx_.fetch_add(dx, std::memory_order_release);
                 appliedDy_.fetch_add(dy, std::memory_order_release);
             }
@@ -167,7 +193,7 @@ void MouseThread::sendRawMove(int dx, int dy)
             return;
         }
     }
-    queueMove(dx, dy);
+    queueMove(dx, dy, capture_ns, aim_ns, command_id);
 }
 
 void MouseThread::pressLeftButton()
@@ -188,8 +214,9 @@ bool MouseThread::sendMovementToDriver(int dx, int dy)
     std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
     if (makcu_)
     {
+        if (!makcu_->isOpen()) return false;
         makcu_->move(dx, dy);
-        return true;
+        return makcu_->isOpen();
     }
     return false;
 }
@@ -199,6 +226,12 @@ void MouseThread::clearQueuedMoves()
     std::lock_guard<std::mutex> lock(queueMtx_);
     // generation 同步提升，可抢占 worker 已取出但尚未发送的旧移动。
     moveSlot_.clear();
+    pendingCommandId_ = 0;
+    journal_->cancelQueued();
+    {
+        std::lock_guard<std::mutex> outputLock(outputMtx_);
+        mapper_.reset();
+    }
     std::lock_guard<std::recursive_mutex> inputLock(input_method_mutex);
     if (makcu_new_) makcu_new_->cancelMove();
 }

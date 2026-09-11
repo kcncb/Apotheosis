@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "gpu_ready_event.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -78,13 +79,12 @@ public:
         return GpuFrame{ data_, rows_, cols_, channels_, step_ };
     }
 
-    // Non-owning "this frame's GPU writes are complete" marker. The producer
-    // (e.g. capture's decode stream) records it; a consumer on a different
-    // stream waits via cudaStreamWaitEvent instead of a CPU-blocking
-    // cudaStreamSynchronize. The event is owned by the producer's pool, not by
-    // GpuImage — copies share it, matching the buffer's shared_ptr semantics.
-    void setReadyEvent(cudaEvent_t e) noexcept { ready_event_ = e; }
-    cudaEvent_t readyEvent() const noexcept { return ready_event_; }
+    // Ownership follows copies/sub-views of the frame across capture restarts.
+    void setReadyEvent(std::shared_ptr<GpuReadyEvent> event) noexcept { ready_event_ = std::move(event); }
+    cudaEvent_t readyEvent() const noexcept { return ready_event_ ? ready_event_->handle : nullptr; }
+
+    void setCaptureNs(int64_t ns) { capture_ns_ = ns; }
+    int64_t captureNs() const { return capture_ns_; }
 
     static uint64_t allocationCount() noexcept;
     static uint64_t allocationBytes() noexcept;
@@ -97,11 +97,12 @@ private:
         ~Storage();
     };
 
+    int64_t capture_ns_ = 0;
     std::shared_ptr<Storage> storage_;
     unsigned char* data_ = nullptr;
     int rows_ = 0;
     int cols_ = 0;
     int channels_ = 0;
     size_t step_ = 0;
-    cudaEvent_t ready_event_ = nullptr;
+    std::shared_ptr<GpuReadyEvent> ready_event_;
 };

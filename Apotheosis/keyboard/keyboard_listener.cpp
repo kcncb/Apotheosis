@@ -18,6 +18,7 @@
 #include "mouse.h"
 #include "runtime/active_hotkey.h"
 #include "Apotheosis.h"
+#include "runtime/config_snapshot.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> aiming;
@@ -36,17 +37,19 @@ bool win32_key_pressed(int vk_code)
 
 bool isAnyKeyPressed(const std::vector<std::string>& keys)
 {
+    const auto cfg = runtime_config::read();
+    std::lock_guard<std::mutex> deviceLock(inputDeviceMutex);
     if (keys.empty())
         return true; // 空键或“无 (始终活跃)”默认处于激活态
 
     for (const auto& key_name : keys)
     {
-        if (key_name.empty() || key_name.find("始终活跃") != std::string::npos)
+        if (key_name.empty() || key_name.find(u8"始终活跃") != std::string::npos)
             return true;
 
         bool pressed = false;
 
-        if (config.input_method == "MAKCU")
+        if (cfg->input_method == "MAKCU")
         {
             if (makcuSerial && makcuSerial->isOpen())
             {
@@ -59,7 +62,7 @@ bool isAnyKeyPressed(const std::vector<std::string>& keys)
                 else if (key_name == "X2MouseButton")     pressed = makcuSerial->side2_active;
             }
         }
-        else if (config.input_method == "MAKCUNEW")
+        else if (cfg->input_method == "MAKCUNEW")
         {
             if (makcuNewSerial && makcuNewSerial->isOpen())
             {

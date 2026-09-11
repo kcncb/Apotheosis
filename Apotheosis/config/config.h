@@ -189,6 +189,11 @@ public:
 
     // Hardware
     std::string input_method = "MAKCU"; // MAKCU | MAKCUNEW
+    // Physical mapping and delay estimates used by the execution model.
+    double mouse_pixels_per_count_x = 1.0, mouse_pixels_per_count_y = 1.0;
+    double mouse_effect_delay_ms = 8.333333;
+    double mouse_effect_uncertainty_ms = 2.0;
+    double capture_age_offset_ms = 0.0; // unknown pre-callback age, not a measured zero
     int makcu_baudrate = 115200;
     std::string makcu_port = "COM0";
     int makcu_new_baudrate = 6000000; // 固件上限; 协商失败自动退回 115200

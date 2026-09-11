@@ -10,6 +10,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "postProcess.h"
+#include "runtime/frame_context.h"
 #include "../mem/gpu_image.h"
 
 enum class DetectorBackend
@@ -28,11 +29,11 @@ public:
 
     virtual bool initialize(const std::string& model_path) = 0;
 
-    virtual void processFrame(const cv::Mat& frame) = 0;
+    virtual void processFrame(const cv::Mat& frame, runtime::FrameContext context = runtime::FrameContext{}) = 0;
     // Zero-copy GPU entry used by the nvJPEG capture path. Default no-op so
     // backends without a GPU path (DirectML today) fall through to the CPU
     // processFrame call at the call site.
-    virtual void processFrameGpu(GpuImage /*frame*/) {}
+    virtual void processFrameGpu(GpuImage /*frame*/, runtime::FrameContext /*context*/ = runtime::FrameContext{}) {}
     virtual void inferenceThread() = 0;
 
     virtual int numberOfClasses() const = 0;

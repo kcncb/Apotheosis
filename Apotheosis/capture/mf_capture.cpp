@@ -1,5 +1,8 @@
 #include "mf_capture.h"
 #include "capture_card_probe.h"
+#include "runtime/interruptible_slot.h"
+#include "raw_frame_layout.h"
+#include "runtime/latency_probe.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
@@ -147,7 +150,7 @@ bool SelectExactMediaType(IMFSourceReader* reader,
             continue;
 
         UINT32 w = 0, h = 0;
-        if (FAILED(MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0)
+        if (FAILED(MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0 || w > INT_MAX / 4 || h > INT_MAX)
             continue;
 
         TypeInfo info;
@@ -267,13 +270,13 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         os << "device refused to switch to " << wantName << " " << wantW << "x" << wantH
            << " @ " << wantFps << "fps (SetCurrentMediaType failed, hr=" << hrText << ")";
         if (setHr == static_cast<HRESULT>(0x80070005))
-            os << " [E_ACCESSDENIED: 设备正被另一个进程独占]";
+            os << u8" [E_ACCESSDENIED: 设备正被另一个进程独占]";
         else if (setHr == static_cast<HRESULT>(0xC00D3704))
-            os << " [MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED: 设备被拔出或重置]";
+            os << u8" [MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED: 设备被拔出或重置]";
         else if (setHr == static_cast<HRESULT>(0xC00D3E85))
-            os << " [MF_E_SHUTDOWN: 设备对象已被关闭]";
+            os << u8" [MF_E_SHUTDOWN: 设备对象已被关闭]";
         else if (setHr == static_cast<HRESULT>(0xC00D36B4))
-            os << " [MF_E_INVALIDMEDIATYPE: 驱动不接受该媒体类型]";
+            os << u8" [MF_E_INVALIDMEDIATYPE: 驱动不接受该媒体类型]";
         out_error = os.str();
         return false;
     }
@@ -293,7 +296,7 @@ bool QueryCurrentFrameGeometry(IMFSourceReader* reader, int& width, int& height,
         return false;
 
     UINT32 w = 0, h = 0;
-    if (FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0)
+    if (FAILED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0 || w > INT_MAX / 4 || h > INT_MAX)
         return false;
     width = static_cast<int>(w);
     height = static_cast<int>(h);
@@ -302,9 +305,102 @@ bool QueryCurrentFrameGeometry(IMFSourceReader* reader, int& width, int& height,
     if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &declaredStride)) && declaredStride > 0)
         stride = static_cast<int>(declaredStride);
     else
-        stride = width;
+    {
+        GUID subtype{};
+        LONG defaultStride = 0;
+        if (SUCCEEDED(current->GetGUID(MF_MT_SUBTYPE, &subtype)) &&
+            SUCCEEDED(MFGetStrideForBitmapInfoHeader(subtype.Data1, width, &defaultStride)))
+            stride = defaultStride;
+        else
+            stride = width * (subtype == MFVideoFormat_RGB32 ? 4
+                            : subtype == MFVideoFormat_YUY2 ? 2 : 1);
+    }
     return true;
 }
+
+// Device timestamps use 100ns units. Read QPC and FILETIME candidates at the
+// callback boundary; DeviceFrameAge validates the epoch and sample freshness.
+double QpcNow100ns()
+{
+    LARGE_INTEGER counter{}, freq{};
+    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&freq)
+        || freq.QuadPart <= 0)
+        return -1.0;
+    return static_cast<double>(counter.QuadPart) * 1.0e7 / static_cast<double>(freq.QuadPart);
+}
+
+double FileTimeNow100ns()
+{
+    FILETIME ft{};
+    // GetSystemTimePreciseAsFileTime 是 Win8+ 的 API。真要走这条分支说明驱动把
+    // 时间戳填成了系统时间纪元, 此时精度只是次要问题; 老 SDK 头文件下退回毫秒级
+    // 的 GetSystemTimeAsFileTime, 保证能编过而不是整条测量编不出来。
+#if defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0602)
+    GetSystemTimePreciseAsFileTime(&ft);
+#else
+    GetSystemTimeAsFileTime(&ft);
+#endif
+    ULARGE_INTEGER u{};
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return static_cast<double>(u.QuadPart);
+}
+// The reader owns this COM callback. It carries samples/timestamps only, so a
+// late callback after cancellation cannot access a destroyed MFCapture.
+struct SampleResult
+{
+    HRESULT status = S_OK;
+    DWORD flags = 0;
+    ComPtr<IMFSample> sample;
+    int64_t capture_ns = 0;
+    uint64_t device_timestamp = 0;
+    double qpc100ns = -1;
+    double file100ns = -1;
+};
+
+class SampleCallback final : public IMFSourceReaderCallback
+{
+public:
+    runtime::InterruptibleSlot<SampleResult> slot;
+    STDMETHODIMP QueryInterface(REFIID iid, void** output) override
+    {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IMFSourceReaderCallback))
+        {
+            *output = static_cast<IMFSourceReaderCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        const ULONG left = --refs_;
+        if (!left) delete this;
+        return left;
+    }
+    STDMETHODIMP OnReadSample(HRESULT status, DWORD, DWORD flags,
+                             LONGLONG, IMFSample* sample) override
+    {
+        SampleResult result;
+        result.capture_ns = runtime::latency::nowNs();
+        result.qpc100ns = QpcNow100ns();
+        result.file100ns = FileTimeNow100ns();
+        result.status = status;
+        result.flags = flags;
+        result.sample = sample;
+        if (sample)
+            sample->GetUINT64(MFSampleExtension_DeviceTimestamp, &result.device_timestamp);
+        slot.publish(std::move(result));
+        return S_OK;
+    }
+    STDMETHODIMP OnFlush(DWORD) override { slot.close(); return S_OK; }
+    STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override { return S_OK; }
+private:
+    std::atomic<ULONG> refs_{1};
+};
 } // namespace
 
 MFCapture::Format MFCapture::ParseFormat(const std::string& s)
@@ -366,12 +462,7 @@ MFCapture::~MFCapture()
         pinned_jpeg_buffer_ = nullptr;
         pinned_jpeg_capacity_ = 0;
     }
-    for (auto& e : out_events_)
-    {
-        if (e)
-            cudaEventDestroy(e);
-        e = nullptr;
-    }
+
     if (gpu_stream_)
     {
         cudaStreamDestroy(gpu_stream_);
@@ -661,7 +752,8 @@ cv::Mat MFCapture::GetNextFrameCpu()
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (cpu_frame_queue_.empty())
         return cv::Mat();
-    cv::Mat frame = std::move(cpu_frame_queue_.front());
+    last_dequeued_capture_ns_ = cpu_frame_queue_.front().capture_ns;
+    cv::Mat frame = std::move(cpu_frame_queue_.front().image);
     cpu_frame_queue_.pop();
     return frame;
 }
@@ -671,7 +763,8 @@ GpuImage MFCapture::GetNextFrameGpu()
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (gpu_frame_queue_.empty())
         return GpuImage();
-    GpuImage frame = std::move(gpu_frame_queue_.front());
+    last_dequeued_capture_ns_ = gpu_frame_queue_.front().capture_ns;
+    GpuImage frame = std::move(gpu_frame_queue_.front().image);
     gpu_frame_queue_.pop();
     return frame;
 }
@@ -700,11 +793,6 @@ bool MFCapture::EnsureGpuContext()
     npp_ctx_.nCudaDevAttrComputeCapabilityMinor = props.minor;
     cudaStreamGetFlags(gpu_stream_, &npp_ctx_.nStreamFlags);
 
-    // One timing-free event per out slot. The MJPG path records it (no per-frame
-    // sync) and hands it to the consumer; failure leaves a null event and that
-    // path falls back to a CPU sync, so correctness never depends on these.
-    for (auto& e : out_events_)
-        cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
     return true;
 }
 
@@ -717,11 +805,14 @@ void MFCapture::ReceiveThread()
         std::cerr << "[MFCapture] MFStartup failed." << std::endl;
         if (shouldUninit)
             CoUninitialize();
+        receive_finished_.store(true);
         return;
     }
 
     ComPtr<IMFMediaSource> source;
     ComPtr<IMFSourceReader> reader;
+    ComPtr<SampleCallback> callback;
+    callback.Attach(new SampleCallback());
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
     double negotiatedFps = 0.0;  // declared before any goto so cleanup stays in scope
@@ -751,26 +842,43 @@ void MFCapture::ReceiveThread()
     }
 
     {
+        // Request low latency from both the source and reader. Attribute
+        // readback confirms only that the store accepted it, not driver behavior.
+        bool sourceAccepts = false;
+        ComPtr<IMFMediaSourceEx> sourceEx;
+        if (SUCCEEDED(source->QueryInterface(IID_PPV_ARGS(&sourceEx))) && sourceEx)
+        {
+            ComPtr<IMFAttributes> sourceAttrs;
+            if (SUCCEEDED(sourceEx->GetSourceAttributes(&sourceAttrs)) && sourceAttrs)
+            {
+                sourceAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                UINT32 flag = 0;
+                sourceAccepts = SUCCEEDED(sourceAttrs->GetUINT32(MF_LOW_LATENCY, &flag)) && flag != 0;
+            }
+        }
+        std::cout << "[MFCapture] MF_LOW_LATENCY: media source attributes "
+                  << (sourceAccepts ? "set" : "not accessible on this source")
+                  << "; source reader: set" << std::endl;
+    }
+
+    {
         // 禁用 MF 内置 converter, 要求设备直送原生帧格式。这是【唯一】路径 ——
         // 启用 converter 意味着 source reader 会在 CPU 上把帧偷偷转一手,
         // 帧率 / 带宽 / 延迟全部不可控, 正是要杜绝的那类"看不见的回退"。
         reader.Reset();
         ComPtr<IMFAttributes> readerAttrs;
-        MFCreateAttributes(&readerAttrs, 3);
+        MFCreateAttributes(&readerAttrs, 4);
+        if (!readerAttrs || FAILED(readerAttrs->SetUnknown(
+                MF_SOURCE_READER_ASYNC_CALLBACK, callback.Get())))
+        {
+            open_error_ = "failed to configure asynchronous Media Foundation reader";
+            goto cleanup;
+        }
         if (readerAttrs)
         {
             readerAttrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
             readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
-            // MF_LOW_LATENCY: 要求采集管线按最小延迟投递。
-            //
-            // 不设这一项时默认是 FALSE, MF 会走"抗抖动优先"的缓冲策略: 帧在
-            // 框架/驱动内部多排一段才交给 ReadSample。那几帧的等待发生在本进程
-            // 之外, 端到端延迟探针的 T0 打点在其【之后】, 所以探针完全看不到它 ——
-            // 现象就是"每帧都拿到了, 但每帧都已经旧了", 而日志上 cap2det 依然是
-            // 零点几毫秒, 看起来一切正常。
-            //
-            // 设为 TRUE 只改变投递时机: 不改变格式/分辨率/帧率的协商结果, 也不
-            // 引入任何 CPU 侧转换(上面的 converter 仍然禁用)。这是纯收益项。
+            // Keep native formats and request low-latency delivery.
             readerAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
         }
         if (FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttrs.Get(), &reader)))
@@ -858,20 +966,48 @@ void MFCapture::ReceiveThread()
     StartProcessWorker();
     while (!should_stop_.load())
     {
-        DWORD streamIndex = 0, flags = 0;
-        LONGLONG timestamp = 0;
-        ComPtr<IMFSample> sample;
-        const HRESULT hr = reader->ReadSample(
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags, &timestamp, &sample);
-        if (FAILED(hr))
+        // Async ReadSample returns immediately. Waiting for a sample is
+        // cancellable even if an unplugged/stalled device never calls back.
+        const HRESULT requested = reader->ReadSample(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
+        if (FAILED(requested))
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            continue;
-        }
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
+            open_error_ = "Media Foundation sample request failed";
             break;
-        if (!sample)
-            continue;
+        }
+        SampleResult result;
+        if (!callback->slot.wait(result, should_stop_)) break;
+        if (FAILED(result.status) || (result.flags & MF_SOURCE_READERF_ERROR))
+        {
+            open_error_ = "Media Foundation sample delivery failed";
+            break;
+        }
+        if (result.flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+        if (result.flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)
+        {
+            ComPtr<IMFMediaType> changedType;
+            GUID subtype{};
+            UINT32 width = 0, height = 0;
+            if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &changedType))
+                || FAILED(changedType->GetGUID(MF_MT_SUBTYPE, &subtype))
+                || FAILED(MFGetAttributeSize(changedType.Get(), MF_MT_FRAME_SIZE, &width, &height))
+                || subtype != SubtypeFor(format_) || width != src_width_ || height != src_height_
+                || !QueryCurrentFrameGeometry(reader.Get(), frame_width_, frame_height_, frame_stride_))
+            {
+                open_error_ = "capture media type changed unexpectedly; reopening selected mode";
+                break;
+            }
+        }
+        auto sample = std::move(result.sample);
+        if (!sample) continue;
+        device_age_.update(result.device_timestamp, result.qpc100ns,
+                           result.file100ns, result.capture_ns);
+        if (!result.device_timestamp && !device_age_missing_logged_)
+        {
+            device_age_missing_logged_ = true;
+            std::cout << "[MFCapture] no device timestamp; driver frame age unavailable."
+                      << std::endl;
+        }
 
         ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer)
@@ -896,9 +1032,9 @@ void MFCapture::ReceiveThread()
             {
                 if (format_ == Format::Mjpg && gpu_decode_
                     && !mjpg_cpu_fallback_ && crop_enabled_)
-                    EnqueueJpegJob(data, static_cast<size_t>(currentLen));
+                    EnqueueJpegJob(data, static_cast<size_t>(currentLen), result.capture_ns);
                 else
-                    EnqueueProcessJob(data, static_cast<size_t>(currentLen));
+                    EnqueueProcessJob(data, static_cast<size_t>(currentLen), result.capture_ns);
             }
         }
 
@@ -906,6 +1042,9 @@ void MFCapture::ReceiveThread()
     }
 
 cleanup:
+    if (!open_error_.empty()) std::cerr << "[MFCapture] " << open_error_ << std::endl;
+    callback->slot.close();
+    if (reader) reader->Flush(MF_SOURCE_READER_ALL_STREAMS);
     StopProcessWorker();
     StopDecodeWorkers();    // 幂等:未启动时直接返回
     is_open_.store(false);
@@ -917,6 +1056,10 @@ cleanup:
     }
     if (source)
         source->Shutdown();
+    reader.Reset();
+    source.Reset();
+    device_age_.invalidate();
+    receive_finished_.store(true);
     MFShutdown();
     if (shouldUninit)
         CoUninitialize();
@@ -940,11 +1083,19 @@ void MFCapture::StopProcessWorker()
     process_free_buffers_.clear();
 }
 
-void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size)
+void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size, int64_t capture_ns)
 {
     if (!data || size == 0)
         return;
+    const int channels = format_ == Format::Rgb32 ? 4 : format_ == Format::Yuy2 ? 2 : 1;
+    if (format_ != Format::Mjpg && !capture::rawFrameFits(size, frame_width_, frame_height_,
+            frame_stride_, channels, format_ == Format::Nv12))
+    {
+        std::cerr << "[MFCapture] Dropped truncated or invalid raw sample." << std::endl;
+        return;
+    }
     ProcessJob job;
+    job.capture_ns = capture_ns;
     {
         std::lock_guard<std::mutex> lock(process_mutex_);
         if (!process_free_buffers_.empty())
@@ -962,11 +1113,10 @@ void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size)
     {
         int left = 0, top = 0, roiW = 0, roiH = 0;
         ResolveRoi(frame_width_, frame_height_, left, top, roiW, roiH);
-        const int srcStride = frame_stride_ > 0 ? frame_stride_
-            : frame_width_ * (format_ == Format::Rgb32 ? 4
-                            : format_ == Format::Yuy2 ? 2 : 1);
-        const int channels = format_ == Format::Rgb32 ? 4
-                           : format_ == Format::Yuy2 ? 2 : 1;
+        const bool bottomUp = frame_stride_ < 0;
+        const int srcStride = bottomUp ? -frame_stride_ : frame_stride_;
+        if (format_ == Format::Nv12) { roiW &= ~1; roiH &= ~1; }
+        else if (format_ == Format::Yuy2) roiW &= ~1;
         const size_t rowBytes = static_cast<size_t>(roiW) * channels;
         const size_t yEnd = static_cast<size_t>(top + roiH - 1) * srcStride
                           + static_cast<size_t>(left) * channels + rowBytes;
@@ -979,7 +1129,7 @@ void MFCapture::EnqueueProcessJob(const uint8_t* data, size_t size)
             job.bytes.resize(total);
             for (int row = 0; row < roiH; ++row)
                 std::memcpy(job.bytes.data() + static_cast<size_t>(row) * rowBytes,
-                            data + static_cast<size_t>(top + row) * srcStride
+                            data + static_cast<size_t>(bottomUp ? frame_height_ - 1 - (top + row) : top + row) * srcStride
                                  + static_cast<size_t>(left) * channels,
                             rowBytes);
 
@@ -1084,6 +1234,7 @@ void MFCapture::ProcessWorkerLoop()
             data = hostRing[rawSlot].bytes.data();
         }
         const ProcessJob& activeJob = rawGpu ? hostRing[rawSlot] : job;
+        process_capture_ns_ = activeJob.capture_ns;
         switch (format_)
         {
         case Format::Nv12:
@@ -1154,6 +1305,11 @@ void MFCapture::TickFps()
     }
 }
 
+int MFCapture::GetDeviceFrameAgeUs() const
+{
+    return device_age_.read(runtime::latency::nowNs());
+}
+
 void MFCapture::EnqueueCpu(cv::Mat&& frame)
 {
     if (frame.empty())
@@ -1162,7 +1318,7 @@ void MFCapture::EnqueueCpu(cv::Mat&& frame)
         std::lock_guard<std::mutex> lock(frame_mutex_);
         while (static_cast<int>(cpu_frame_queue_.size()) >= MAX_QUEUE_SIZE)
             cpu_frame_queue_.pop();
-        cpu_frame_queue_.push(std::move(frame));
+        cpu_frame_queue_.push({std::move(frame), process_capture_ns_});
     }
     frame_cv_.notify_one();
 }
@@ -1175,7 +1331,7 @@ void MFCapture::EnqueueGpu(GpuImage&& frame)
         std::lock_guard<std::mutex> lock(frame_mutex_);
         while (static_cast<int>(gpu_frame_queue_.size()) >= MAX_QUEUE_SIZE)
             gpu_frame_queue_.pop();
-        gpu_frame_queue_.push(std::move(frame));
+        gpu_frame_queue_.push({std::move(frame), process_capture_ns_});
     }
     frame_cv_.notify_one();
 }
@@ -1221,11 +1377,12 @@ void MFCapture::StopDecodeWorkers()
     job_queue_.swap(empty);
 }
 
-void MFCapture::EnqueueJpegJob(const uint8_t* data, size_t size)
+void MFCapture::EnqueueJpegJob(const uint8_t* data, size_t size, int64_t capture_ns)
 {
     if (!data || size == 0)
         return;
     DecodeJob job;
+    job.capture_ns = capture_ns;
     job.jpeg.assign(data, data + size);
     job.seq = ++job_seq_;   // ReceiveThread 单线程,普通递增即可
     {
@@ -1280,7 +1437,7 @@ void MFCapture::DecodeWorkerLoop()
     capture::GpuJpegDecoder decoder;
     if (!decoder.init())
     {
-        std::cerr << "[MFCapture] decode worker: GpuJpegDecoder init 失败" << std::endl;
+        std::cerr << u8"[MFCapture] decode worker: GpuJpegDecoder init 失败" << std::endl;
         return;
     }
     cudaStream_t stream = nullptr;
@@ -1289,9 +1446,7 @@ void MFCapture::DecodeWorkerLoop()
 
     constexpr int RING = 3;
     std::array<GpuImage, RING> outRing;
-    std::array<cudaEvent_t, RING> evRing{};
-    for (auto& e : evRing)
-        cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+    GpuReadyEventPool<RING> evRing;
     size_t ringIdx = 0;
 
     for (;;)
@@ -1313,20 +1468,18 @@ void MFCapture::DecodeWorkerLoop()
         if (!decoder.decodeCropped(job.jpeg.data(), job.jpeg.size(), out_side_, out_side_, dst, stream))
             continue;   // ROI 解码失败(罕见),丢弃该帧
 
-        cudaEvent_t e = evRing[slot];
-        cudaEventRecord(e, stream);
-        GpuImage out = dst;          // 引用计数共享;slot 保留以便消费者释放后复用
-        out.setReadyEvent(e);
-        EnqueueGpuOrdered(std::move(out), job.seq);
+        auto event = evRing.record(stream);
+        if (!event && cudaStreamSynchronize(stream) != cudaSuccess) continue;
+        GpuImage out = dst;
+        out.setReadyEvent(std::move(event));
+        EnqueueGpuOrdered(std::move(out), job.seq, job.capture_ns);
     }
 
     cudaStreamSynchronize(stream);
-    for (auto& e : evRing)
-        if (e) cudaEventDestroy(e);
     cudaStreamDestroy(stream);
 }
 
-bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq)
+bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq, int64_t capture_ns)
 {
     if (frame.empty())
         return false;
@@ -1338,7 +1491,7 @@ bool MFCapture::EnqueueGpuOrdered(GpuImage&& frame, uint64_t seq)
         enqueued_seq_.store(seq, std::memory_order_relaxed);
         while (static_cast<int>(gpu_frame_queue_.size()) >= MAX_QUEUE_SIZE)
             gpu_frame_queue_.pop();
-        gpu_frame_queue_.push(std::move(frame));
+        gpu_frame_queue_.push({std::move(frame), capture_ns});
 
     }
     frame_cv_.notify_one();
@@ -1442,9 +1595,9 @@ bool MFCapture::PushNv12Gpu(const uint8_t* data, int width, int height, int stri
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
     if (out.empty())
         return false;
-    cudaEvent_t e = out_events_[current_out_idx_];
-    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
-    else cudaStreamSynchronize(gpu_stream_);
+    auto event = out_events_.record(gpu_stream_);
+    if (!event && cudaStreamSynchronize(gpu_stream_) != cudaSuccess) return false;
+    out.setReadyEvent(std::move(event));
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -1476,9 +1629,9 @@ bool MFCapture::PushYuy2Gpu(const uint8_t* data, int width, int height, int stri
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
     if (out.empty())
         return false;
-    cudaEvent_t e = out_events_[current_out_idx_];
-    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
-    else cudaStreamSynchronize(gpu_stream_);
+    auto event = out_events_.record(gpu_stream_);
+    if (!event && cudaStreamSynchronize(gpu_stream_) != cudaSuccess) return false;
+    out.setReadyEvent(std::move(event));
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -1507,9 +1660,9 @@ bool MFCapture::PushRgb32Gpu(const uint8_t* data, int width, int height, int str
     GpuImage out = direct ? dst : ResizeToOut(scratch_full_);
     if (out.empty())
         return false;
-    cudaEvent_t e = out_events_[current_out_idx_];
-    if (e) { cudaEventRecord(e, gpu_stream_); out.setReadyEvent(e); }
-    else cudaStreamSynchronize(gpu_stream_);
+    auto event = out_events_.record(gpu_stream_);
+    if (!event && cudaStreamSynchronize(gpu_stream_) != cudaSuccess) return false;
+    out.setReadyEvent(std::move(event));
     EnqueueGpu(std::move(out));
     return true;
 }
@@ -1580,16 +1733,9 @@ bool MFCapture::PushMjpgGpu(const uint8_t* data, size_t size)
     // host-side entropy decode overlap this frame's GPU reconstruction. Fall
     // back to a sync if the event is missing so a consumer never reads an
     // incomplete frame.
-    cudaEvent_t e = out_events_[current_out_idx_];
-    if (e)
-    {
-        cudaEventRecord(e, gpu_stream_);
-        out.setReadyEvent(e);
-    }
-    else
-    {
-        cudaStreamSynchronize(gpu_stream_);
-    }
+    auto event = out_events_.record(gpu_stream_);
+    if (!event && cudaStreamSynchronize(gpu_stream_) != cudaSuccess) return false;
+    out.setReadyEvent(std::move(event));
     EnqueueGpu(std::move(out));
     return true;
 }

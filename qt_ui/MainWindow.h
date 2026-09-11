@@ -6,6 +6,8 @@
 #include <QVector>
 
 #include <chrono>
+#include <future>
+#include <string>
 
 class QStackedWidget;
 class QTimer;
@@ -15,6 +17,7 @@ class StatusBar;
 class TopNavBar;
 class SideNav;
 class OverviewPage;
+class QCloseEvent;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -22,7 +25,12 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
 
+    ~MainWindow() override;
+
     void selectPage(int primary, int secondary);
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onPrimaryChanged(int index);
@@ -32,6 +40,12 @@ private slots:
     void pollMonitorTelemetry();
 
 private:
+    void beginSessionOperation(bool start);
+    void pollSessionOperation();
+    std::future<std::string> m_sessionOperation;
+    bool m_starting = false;
+    bool m_closeRequested = false;
+    bool m_cleanupRequested = false;
     void setupPages();
     QWidget* createPage(const QString& name);
     void switchPage(int index);

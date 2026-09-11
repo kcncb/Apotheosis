@@ -1145,7 +1145,7 @@ void TrtDetector::loadEngine(const std::string& modelFile)
     {
         if (!fs::exists(modelPath, ec) || !fs::is_regular_file(modelPath, ec))
         {
-            std::cerr << "[Detector] oliver 模型文件不存在: " << modelPath.u8string() << std::endl;
+            std::cerr << u8"[Detector] oliver 模型文件不存在: " << modelPath.u8string() << std::endl;
             return;
         }
 
@@ -1204,12 +1204,12 @@ void TrtDetector::loadEngine(const std::string& modelFile)
         error.clear();
         if (!oliver::decrypt_file(modelPath.u8string(), modelPayload, error))
         {
-            std::cerr << "[Detector] oliver 模型解密失败: " << error << std::endl;
+            std::cerr << u8"[Detector] oliver 模型解密失败: " << error << std::endl;
             return;
         }
         if (modelPayload.type != oliver::PayloadType::Onnx)
         {
-            std::cerr << "[Detector] oliver 文件不是 ONNX 模型，无法从 TRT 构建。" << std::endl;
+            std::cerr << u8"[Detector] oliver 文件不是 ONNX 模型，无法从 TRT 构建。" << std::endl;
             return;
         }
 
@@ -1320,17 +1320,16 @@ void TrtDetector::loadEngine(const std::string& modelFile)
     engine.reset(loadEngineFromFile(engineFilePath.u8string(), runtime.get()));
 }
 
-void TrtDetector::processFrame(const cv::Mat& frame)
+void TrtDetector::processFrame(const cv::Mat& frame, runtime::FrameContext context)
 {
     if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
+    if (shouldExit.load()) return;
     // 延迟探针: 记下 detector 取走该帧的 (采集时刻 T0, 取帧时刻 T1)。
     // 这一对戳必须随帧一路走到发布端, 不能在发布时再去读探针的全局槽 ——
-    // 详见 trt_detector.h 里 pendingCaptureNs 的注释。
-    const auto stamp = runtime::latency::markSubmitStamp();
-    pendingCaptureNs = stamp.capture_ns;
-    pendingSubmitNs  = stamp.submit_ns;
+    // 详见 trt_detector.h 里 pendingContext 的注释。
+    pendingContext = context;
     currentFrame = frame;
     currentFrameGpu.release();
     pendingFrameType = PendingFrameType::Cpu;
@@ -1338,14 +1337,13 @@ void TrtDetector::processFrame(const cv::Mat& frame)
     inferenceCV.notify_one();
 }
 
-void TrtDetector::processFrameGpu(GpuImage frame)
+void TrtDetector::processFrameGpu(GpuImage frame, runtime::FrameContext context)
 {
     if (runtime_config::read()->backend == "DML") return;
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
-    const auto stamp = runtime::latency::markSubmitStamp();
-    pendingCaptureNs = stamp.capture_ns;
-    pendingSubmitNs  = stamp.submit_ns;
+    if (shouldExit.load()) return;
+    pendingContext = context;
     currentFrame.release();
     currentFrameGpu = std::move(frame);
     pendingFrameType = PendingFrameType::Gpu;
@@ -1363,6 +1361,7 @@ void TrtDetector::inferenceThread()
     // 每个槽记住"自己那一帧"的 T0/T1: 取帧时写本槽, 发布时读本槽。
     // 双缓冲下正在推理的帧与正在发布的帧是两个不同的槽, 共用一个全局单槽会串味。
     int64_t slotCaptureNs[2] = {0, 0};
+    runtime::FrameContext slotContexts[2]{};
     int64_t slotSubmitNs[2]  = {0, 0};
 
     // Latches true if CUDA graph capture fails this session. Without it a
@@ -1436,8 +1435,11 @@ void TrtDetector::inferenceThread()
             {
                 // 该帧的 T0/T1 随它一起按槽保存。必须在"取走这一帧"的同一临界区
                 // 内读: 出了这里, 采集线程随时可能提交下一帧并覆盖 pending*。
-                slotCaptureNs[curr_slot] = pendingCaptureNs;
-                slotSubmitNs[curr_slot]  = pendingSubmitNs;
+                slotContexts[curr_slot] = pendingContext;
+                slotCaptureNs[curr_slot] = pendingContext.captured_ns;
+                runtime::latency::SubmitStamp consumed{pendingContext.captured_ns, 0, pendingContext.sequence};
+                runtime::latency::markDetectorConsume(consumed);
+                slotSubmitNs[curr_slot] = consumed.submit_ns;
 
                 frameType = pendingFrameType;
                 if (frameType == PendingFrameType::Gpu)
@@ -1646,6 +1648,7 @@ void TrtDetector::inferenceThread()
                 // 本次发布的这一帧自己的 T0/T1 —— 不是"最新的"那一帧的。
                 // 旧实现在发布时读全局槽, 读到的已经是下一帧的戳, 于是 total
                 // 恒定少算一个帧间隔(双缓冲下必然如此)。
+                publishContext = do_post ? slotContexts[post_slot] : runtime::FrameContext{};
                 publishCaptureNs = do_post ? slotCaptureNs[post_slot] : 0;
                 publishSubmitNs  = do_post ? slotSubmitNs[post_slot]  : 0;
 
@@ -1707,7 +1710,7 @@ void TrtDetector::inferenceThread()
                                     detectionBuffer.confidences.push_back(det.confidence);
                                 }
                                 runtime::latency::markInferenceDone(publishSubmitNs);
-                                detectionBuffer.bumpVersionLocked(publishCaptureNs);
+                                detectionBuffer.bumpVersionLocked(publishContext);
                                 detectionBuffer.cv.notify_all();
                             }
                             continue;
@@ -1761,6 +1764,7 @@ void TrtDetector::inferenceThread()
 
                 lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(preprocessMs);
                 lastInferenceTimeValue = std::chrono::duration<double, std::milli>(inferenceMs);
+                if (post_slot >= 0) runtime::latency::noteEngineInferenceMs(inferenceMs);
                 lastCopyTimeValue = std::chrono::duration<double, std::milli>(copyMs);
                 lastPostprocessTimeValue = t_post_end - t_post_start;
             }
@@ -1875,7 +1879,7 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
         // 用本帧自己的 T1/T0(见 inferenceThread 里 publish* 的赋值与
         // trt_detector.h 的注释), 不能用探针的"只存最新"全局槽。
         runtime::latency::markInferenceDone(publishSubmitNs);
-        detectionBuffer.bumpVersionLocked(publishCaptureNs);
+        detectionBuffer.bumpVersionLocked(publishContext);
         detectionBuffer.cv.notify_all();
     }
 }

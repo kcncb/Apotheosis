@@ -15,6 +15,9 @@ struct PendingMove
     int dy = 0;
     std::chrono::steady_clock::time_point queued_at{};
     std::uint64_t generation = 0;
+    int64_t capture_ns = 0;
+    int64_t aim_ns = 0;
+    uint64_t command_id = 0;
 };
 
 // 调用方用自己的互斥量保护 replace/take/clear/hasPending。
@@ -23,11 +26,12 @@ class LatestMoveSlot
 {
 public:
     std::uint64_t replace(int dx, int dy,
-                          std::chrono::steady_clock::time_point queued_at) noexcept
+                          std::chrono::steady_clock::time_point queued_at,
+                          int64_t capture_ns = 0, int64_t aim_ns = 0, uint64_t command_id = 0) noexcept
     {
         const std::uint64_t generation =
             generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
-        pending_ = { dx, dy, queued_at, generation };
+        pending_ = { dx, dy, queued_at, generation, capture_ns, aim_ns, command_id };
         has_pending_ = true;
         return generation;
     }

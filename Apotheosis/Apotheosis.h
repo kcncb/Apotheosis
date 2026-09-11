@@ -34,6 +34,7 @@ extern std::atomic<bool> aiming;
 // app (which is the role of the global shouldExit flag).
 extern std::atomic<bool> session_stop_requested;
 extern std::recursive_mutex configMutex;
+extern std::mutex inputDeviceMutex;
 
 // Aim telemetry: latest crosshair-to-target error (in detection pixels).
 extern std::atomic<float> g_pid_last_err_px;

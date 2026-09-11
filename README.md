@@ -1,137 +1,48 @@
-<div align="center">
+# Apotheosis
 
-# Apotheosis (C++)
+Windows x64 实时视觉检测与鼠标控制程序，使用中文 Qt6 Widgets 界面。
 
-[![C++](https://img.shields.io/badge/C%2B%2B-17-blue)](https://github.com/Apotheosis/Apotheosis)
-[![GitHub stars](https://img.shields.io/github/stars/Apotheosis/Apotheosis?color=ffb500)](https://github.com/Apotheosis/Apotheosis)
-[![CUDA 13.1](https://img.shields.io/badge/CUDA-13.1-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-downloads)
-[![Discord server](https://badgen.net/discord/online-members/37WVp6sNEh)](https://discord.gg/37WVp6sNEh)
+当前主链路：采集卡（Media Foundation）→ 解码/转色/中心裁切 → TensorRT 或 DirectML 检测 → 目标关联 → 时间一致的状态估计与阶段控制 → 浮点 AimPath / 计数换算 → MAKCU 或 MAKCUNEW。
 
-  <p>
-    <a href="https://github.com/Apotheosis/Apotheosis/releases" target="_blank">
-      <img width="75%" src="https://github.com/Apotheosis/apotheosis_aimbot/blob/main/media/one.gif">
-    </a>
-  </p>
-</div>
+## 使用
 
----
+1. 从完整运行目录启动 `ai.exe`，模型放在程序旁的 `models/`。
+2. 在「配置 → 画面采集」选择采集卡及它实际支持的格式、分辨率和帧率。当前支持 NV12、MJPG、YUY2、RGB32；不支持的组合会报错，不会静默切换设备或格式。
+3. 选择模型、推理后端、输入硬件和瞄准热键。采集中心裁切尺寸跟随模型输入尺寸。
+4. 在「概览」启动或停止推理。启停在后台执行，过程中暂时禁用配置修改；关闭窗口会先停止会话。
+5. 查看性能统计、日志和独立检测预览。默认配置位于程序旁的 `config.ini`，延迟日志位于 `logs/`。
 
-# Ready-to-Use Builds (Recommended)
+当前不再使用旧版 ImGui 启动界面，也没有 README 旧版提到的 F2/F3/F4/Home 全局快捷键；瞄准使用已配置的热键。
 
-**You do NOT need to compile anything if you just want to use the aimbot!**
-Precompiled `.exe` builds are provided for both CUDA (NVIDIA only) and DirectML (all GPUs).
+## 构建与验证
 
-* **Download**
-	* Pre-built binaries can be downloaded from the [Discord server](https://discord.gg/37WVp6sNEh) in the **pre-releases** channel.
+- [构建说明](docs/build.md)：VS 2026、x64、Release、`ai` 目标；产物 `build/cuda/Release/ai.exe`。
+- 一个 portable 主程序同时包含 TensorRT 和 DirectML。选择 DirectML 不代表可以省略这个构建所需的 CUDA 依赖。
+- OpenCV 使用普通预编译包；GPU 图像处理由项目自有 CUDA/NPP/nvJPEG 代码负责，不要求重新编译 OpenCV CUDA 模块。
+- 独立逻辑回归可在 macOS/Linux/Windows 上运行，不需要 CUDA、Qt 或采集卡：
 
----
+```sh
+cmake -S . -B build/logic-tests -DAPOTHEOSIS_LOGIC_TESTS_ONLY=ON
+cmake --build build/logic-tests --config Release
+ctest --test-dir build/logic-tests -C Release --output-on-failure
+```
 
+逻辑测试覆盖采集能力校验、逐帧延迟与丢帧统计、设备帧龄有效性、异步等待取消、GPU 完成事件所有权、原始帧边界和移动指令时间戳。事件测试使用测试专用 CUDA 替身，不等价于 GPU 实机验证。
 
-### DirectML (DML) Build — Universal (All GPUs)
+## 延迟口径
 
-* **Works on:**
+T0 是 Media Foundation 样本回调入口，之后的样本拷贝、排队、解码、转色及检测输入等待计入「接收→取帧」。TRT/DML 都按帧保留时间戳；设备侧帧龄单独显示，缺失、无效、过期均显示不可用。
 
-	* Any modern GPU (NVIDIA, AMD, Intel, including integrated graphics)
-	* Windows 10/11 (x64)
-	* No need for CUDA or special drivers
-* **Recommended for:**
+当前 E2E 是软件观测范围，不包含设备打戳前的 HDMI 流水线，也不代表鼠标硬件执行或游戏画面响应完成。设备帧龄与软件链路使用不同统计窗口，不应直接相加当作逐帧真值。
 
-	* GTX 10xx/9xx/7xx series (old NVIDIA)
-	* Any AMD Radeon or Intel Iris/Xe GPU
-	* Laptops and office PCs with integrated graphics
+## 代码入口
 
-### CUDA + TensorRT Build — High Performance (NVIDIA Only)
+- `Apotheosis/Apotheosis.cpp`：进程入口、输入设备生命周期、Qt 主循环。
+- `Apotheosis/runtime/inference_session.cpp`：会话启停及工作线程回收。
+- `Apotheosis/capture/`、`detector/`、`mouse/`：采集、检测、控制链路。
+- `qt_ui/`：中文界面与配置桥接；`qt_ui/preview/` 是独立外观预览，不启动真实推理。
+- `Apotheosis/config/config.h`、`config.cpp`：配置字段、默认值和读写的权威来源。
 
-* **Works on:**
+控制链设计见 [控制架构](docs/control-architecture.md)。
 
-	* NVIDIA GPUs **GTX 1660, RTX 2000/3000/4000/5000**
-	* **Requires:** CUDA 13.1, TensorRT-10.14.1.48
-	* Windows 10/11 (x64)
-* **Not supported:** GTX 10xx/Pascal and older (TensorRT limitation)
-* **Includes both CUDA+TensorRT and DML support (switchable in settings)**
-
-**Both versions are ready-to-use: just download, unpack, run `ai.exe`.**
-
----
-
-## How to Run (For Precompiled Builds)
-
-1. **Download and unpack your chosen version (see links above).**
-2. For CUDA build, install [CUDA 13.1](https://developer.nvidia.com/cuda-13-1-0-download-archive) if not already installed.
-3. For DML build, no extra software is needed.
-4. **Run `ai.exe`.**
-   On first launch, the model will be exported (may take up to 5 minutes).
-5. Place your `.onnx` model in the `models` folder and select it in the overlay (HOME key).
-6. All settings are available in the overlay.
-   Use the HOME key to open/close overlay.
-
-### Controls
-
-* **Right Mouse Button:** Aim at the detected target
-* **F2:** Exit
-* **F3:** Pause aiming
-* **F4:** Reload config
-* **Home:** Open/close overlay and settings
-
----
-
-# Build From Source (Advanced Users)
-
-* [docs/build.md](docs/build.md)
-
----
-
-## 🗂️ Old Releases
-
-* [Legacy and old versions](https://disk.yandex.ru/d/m0jbkiLEFvnZKg)
-
----
-
-## 📋 Documentation
-
-* C++ config reference (`config.ini`):
-  [docs/config.md](docs/config.md)
-* Setup, FAQ, troubleshooting:
-  [docs/guides.md](docs/guides.md)
-* Source of truth in code:
-  [Apotheosis/config/config.cpp](Apotheosis/config/config.cpp),
-  [Apotheosis/config/config.h](Apotheosis/config/config.h)
-
----
-
-## 📚 References & Useful Links
-
-* [TensorRT Documentation](https://docs.nvidia.com/deeplearning/tensorrt/)
-* [OpenCV Documentation](https://docs.opencv.org/4.x/d1/dfb/intro.html)
-* [ImGui](https://github.com/ocornut/imgui)
-* [CppWinRT](https://github.com/microsoft/cppwinrt)
-* [GLFW](https://www.glfw.org/)
-* [WindMouse](https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/)
-* [MAKCU](https://makcu.com)
-* [depth-anything-tensorrt](https://github.com/spacewalk01/depth-anything-tensorrt)
-
----
-
-## 📄 Licenses
-
-### OpenCV
-
-* **License:** [Apache License 2.0](https://opencv.org/license.html)
-
-### ImGui
-
-* **License:** [MIT License](https://github.com/ocornut/imgui/blob/master/LICENSE)
-
----
-## ❤️ Support the Project & Get Better AI Models
-
-This project is actively developed thanks to the people who support it on [Boosty](https://boosty.to/apotheosis) and [Patreon](https://www.patreon.com/c/apotheosis).  
-**By supporting the project, you get access to improved and better-trained AI models!**
-
----
-
-**Need help or want to contribute? Join our [Discord server](https://discord.gg/37WVp6sNEh) or open an issue on GitHub!**
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Apotheosis/Apotheosis&type=date&legend=top-left)](https://www.star-history.com/#Apotheosis/Apotheosis&type=date&legend=top-left)
+其他参考：[配置](docs/config.md)、[调参](docs/tuning.md)、[界面设计](docs/art-design.md)、[许可证](LICENSE)。旧版操作细节若与当前界面冲突，以源码和当前界面为准。

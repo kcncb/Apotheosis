@@ -30,8 +30,8 @@ public:
     const char* backendName() const noexcept override { return "TRT"; }
 
     bool initialize(const std::string& model_path) override;
-    void processFrame(const cv::Mat& frame) override;
-    void processFrameGpu(GpuImage frame) override;
+    void processFrame(const cv::Mat& frame, runtime::FrameContext context = runtime::FrameContext{}) override;
+    void processFrameGpu(GpuImage frame, runtime::FrameContext context = runtime::FrameContext{}) override;
     void inferenceThread() override;
 
     int numberOfClasses() const override { return numClasses; }
@@ -137,8 +137,7 @@ private:
     //
     // 这里刻意存两个 int64_t 而不是探针的 SubmitStamp, 免得头文件为了一个
     // POD 去包含整个 latency_probe.h。
-    int64_t pendingCaptureNs = 0;
-    int64_t pendingSubmitNs  = 0;
+    runtime::FrameContext pendingContext, publishContext;
     int64_t publishCaptureNs = 0;
     int64_t publishSubmitNs  = 0;
 

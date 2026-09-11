@@ -157,18 +157,20 @@ OverviewPage::OverviewPage(QWidget* parent) : QWidget(parent) {
     auto* diagCol = new QVBoxLayout(diagCard);
     diagCol->setContentsMargins(16, 15, 16, 15);
     diagCol->setSpacing(2);
-    auto* diagTitle = new QLabel(QString::fromUtf8(u8"接收诊断"));
+    // 采集链路分段。这里原来是 eth_capture 的网络接收诊断(发包速率/丢包/内核丢),
+    // 而网络后端已经删除, 五项恒为 0 —— 改成采集卡路径上真正测得到的几段。
+    auto* diagTitle = new QLabel(QString::fromUtf8(u8"采集链路"));
     diagTitle->setProperty("class", "heading");
-    auto* diagSub = new QLabel(QString::fromUtf8(u8"丢帧来源定位"));
+    auto* diagSub = new QLabel(QString::fromUtf8(u8"分段耗时 (ms) · 设备帧龄取决于驱动时间戳"));
     diagSub->setProperty("class", "tertiary");
     diagCol->addWidget(diagTitle);
     diagCol->addWidget(diagSub);
     diagCol->addSpacing(4);
-    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"发送端间隔"), m_rxSender));
-    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"线路丢包"), m_rxWire));
-    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"分片丢失"), m_rxPartial));
-    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"内核丢弃"), m_rxKernel));
-    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"网卡丢弃"), m_rxIf));
+    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"设备帧龄"), m_diagDeviceAge));
+    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"接收→取帧"), m_diagCapToDetect));
+    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"推理"), m_diagInfer));
+    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"发布→消费"), m_diagPublishToAim));
+    diagCol->addWidget(makeDiagRow(QString::fromUtf8(u8"全链路 (下界)"), m_diagEndToEnd));
     diagCol->addStretch();
     lowerRow->addWidget(diagCard, 10);
 
@@ -186,13 +188,20 @@ void OverviewPage::setSourceFps(double fps) {
     m_mFps->setSub(QString::fromUtf8(u8"源 %1 帧").arg(fps, 0, 'f', 0), QStringLiteral("#16A34A"));
 }
 
+// 延迟显示: 负数 = 探针还没出数(尚未跑满一帧), 显示 "--"。0 是合法测量值,
+// 不能拿来当"没有数据", 否则"链路真的很快"和"根本没测"看起来一样。
+static QString ovFmtMs(double ms, int precision = 1) {
+    if (ms < 0.0) return QStringLiteral("--");
+    return QStringLiteral("%1 ms").arg(ms, 0, 'f', precision);
+}
+
 void OverviewPage::setInferenceLatency(double ms) {
-    m_mInfer->setValue(QString::number(ms, 'f', 1));
+    m_mInfer->setValue(ms < 0.0 ? QStringLiteral("--") : QString::number(ms, 'f', 1));
     m_mInfer->setSub(QString::fromUtf8(u8"推理引擎"));
 }
 
 void OverviewPage::setTotalLatency(double ms) {
-    m_mTotal->setValue(QString::number(ms, 'f', 1));
+    m_mTotal->setValue(ms < 0.0 ? QStringLiteral("--") : QString::number(ms, 'f', 1));
     m_mTotal->setSub(QString::fromUtf8(u8"采集 → 落点"), QStringLiteral("#16A34A"));
 }
 
@@ -201,20 +210,22 @@ void OverviewPage::setDetectionCount(int boxes, int locked) {
     m_mTargets->setSub(QString::fromUtf8(u8"当前帧 · 检测 %1").arg(boxes));
 }
 
-void OverviewPage::setReceiverDiagnostics(int senderSpan, int wireLost, int partialLost,
-                                          int kernelDropped, int ifDropped) {
-    auto apply = [](QLabel* lbl, int v) {
-        lbl->setText(QString::number(v));
-        if (v > 0)
-            lbl->setStyleSheet(QStringLiteral("color:#B45309; background:#FBF0DD; padding:1px 8px; border-radius:6px;"));
-        else
-            lbl->setStyleSheet(QStringLiteral("color:#16A34A; background:transparent;"));
+void OverviewPage::setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs, double inferMs,
+                                              double publishToAimMs, double endToEndMs) {
+    // 设备帧龄用两位数: 对接侧正常时它常常只有零点几毫秒, 一位小数看不出"有没有
+    // 排队", 而这一点正是判断"卡本身慢还是对接方式慢"的关键。
+    if (m_diagDeviceAge) {
+        m_diagDeviceAge->setText(deviceAgeUs < 0
+            ? QStringLiteral("--")
+            : QStringLiteral("%1 ms").arg(deviceAgeUs / 1000.0, 0, 'f', 2));
+    }
+    auto setMs = [](QLabel* lbl, double ms) {
+        if (lbl) lbl->setText(ovFmtMs(ms));
     };
-    apply(m_rxSender, senderSpan);
-    apply(m_rxWire, wireLost);
-    apply(m_rxPartial, partialLost);
-    apply(m_rxKernel, kernelDropped);
-    apply(m_rxIf, ifDropped);
+    setMs(m_diagCapToDetect, capToDetectMs);
+    setMs(m_diagInfer, inferMs);
+    setMs(m_diagPublishToAim, publishToAimMs);
+    setMs(m_diagEndToEnd, endToEndMs);
 }
 
 void OverviewPage::setSessionState(bool running, const QString& model,

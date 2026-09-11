@@ -50,7 +50,7 @@ void publish_static_ref(const PivotSnapshot& ref);
 // global palette has at least one enabled colour, runs the detector on the
 // supplied BGR detection-resolution frame and publishes a snapshot.
 // Otherwise publishes valid=false. Cheap when off.
-void process_frame(const cv::Mat& bgrFrame);
+void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns = 0);
 
 // Fast path used by TensorRT/GPU capture: ordinary crosshair colour detection
 // runs directly on the device image and transfers only a compact selected-

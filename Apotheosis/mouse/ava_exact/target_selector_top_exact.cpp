@@ -545,7 +545,7 @@ const SelectedTarget104Abi* AimTargetSelectorExact::associate_tracked_target(
     const auto built = build_fused_target_record_exact(
         config_, detections, geometry, overlap, selected, relation_origin);
     save_previous_boxes(built);
-    if (old_lost_frames <= 0) {
+    if (old_lost_frames <= 0 || built.selected.class_id == tracker_.target.class_id) {
         tracker_.update(&built.selected);
     } else {
         increment_generation_native();
@@ -701,6 +701,23 @@ AimTargetSelectorExact::select_tracked_detection_index(
         tracker_.update(&built.selected);
     }
     return finish_output(output_origin_offset);
+}
+
+void AimTargetSelectorExact::shift_camera_origin(double dx, double dy) noexcept
+{
+    if (!tracker_.active || !std::isfinite(dx) || !std::isfinite(dy)) return;
+    const auto shift = [dx,dy](std::array<float,4>& box) {
+        box[0]-=float(dx);box[2]-=float(dx);box[1]-=float(dy);box[3]-=float(dy);
+    };
+    tracker_.mean[0]-=dx;tracker_.mean[1]-=dy;
+    shift(tracker_.last_box);shift(tracker_.predicted_box);shift(tracker_.predicted_related_box);
+    if (previous_primary_.valid) shift(previous_primary_.box);
+    if (previous_related_.valid) shift(previous_related_.box);
+    auto& t=tracker_.target;
+    t.left-=float(dx);t.right-=float(dx);t.top-=float(dy);t.bottom-=float(dy);
+    t.effective_center_x-=dx;t.effective_center_y-=dy;
+    t.primary_center_x-=dx;t.primary_center_y-=dy;
+    if(t.related_box_valid) {t.related_left-=float(dx);t.related_right-=float(dx);t.related_top-=float(dy);t.related_bottom-=float(dy);}
 }
 
 } // namespace cvm::recovered

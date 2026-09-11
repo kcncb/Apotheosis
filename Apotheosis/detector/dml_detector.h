@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "i_detector.h"
+#include "runtime/latency_probe.h"
 #include "postProcess.h"
 
 struct DmlAdapterInfo
@@ -37,7 +38,7 @@ public:
     std::vector<std::vector<Detection>> detectBatch(const std::vector<cv::Mat>& frames);
 
     void inferenceThread() override;
-    void processFrame(const cv::Mat& frame) override;
+    void processFrame(const cv::Mat& frame, runtime::FrameContext context = runtime::FrameContext{}) override;
 
     int numberOfClasses() const override { return num_classes_; }
     std::vector<std::string> classNames() const override { return class_names_; }
@@ -73,6 +74,8 @@ private:
 
     std::mutex inferenceMutex;
     cv::Mat currentFrame;
+    runtime::latency::SubmitStamp pendingStamp;
+    runtime::FrameContext pendingContext;
     bool frameReady = false;
 
     void initializeModel(const std::string& model_path);

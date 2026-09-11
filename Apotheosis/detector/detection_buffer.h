@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime/frame_context.h"
 #include <algorithm>
 #include <chrono>
 #include <vector>
@@ -35,6 +36,7 @@ struct DetectionBuffer
     //
     // 0 表示无戳 (空检测帧 / 采集不可用), 消费方必须忽略而不是当成 0 延迟。
     int64_t frame_stamp_ns = 0;
+    runtime::FrameContext frame_context;
 
     // Bump version + refresh the publish timestamp/interval. Caller must hold
     // `mutex` (every publish site already does).
@@ -50,7 +52,14 @@ struct DetectionBuffer
                 std::chrono::duration<double, std::milli>(now - stamp).count();
         stamp = now;
         frame_stamp_ns = frame_capture_ns;
+        frame_context = {0, frame_capture_ns, 0, 0};
         ++version;
+    }
+
+    void bumpVersionLocked(runtime::FrameContext context)
+    {
+        bumpVersionLocked(context.captured_ns);
+        frame_context = context;
     }
 
     // True when the last published detection is old relative to the detector's

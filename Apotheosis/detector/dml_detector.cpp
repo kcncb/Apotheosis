@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -210,12 +210,12 @@ bool DirectMLDetector::initialize(const std::string& model_path)
             std::string error;
             if (!oliver::decrypt_file(model_path, payload, error))
             {
-                std::cerr << "[DirectML] oliver 模型解密失败: " << error << std::endl;
+                std::cerr << u8"[DirectML] oliver 模型解密失败: " << error << std::endl;
                 return false;
             }
             if (payload.type != oliver::PayloadType::Onnx)
             {
-                std::cerr << "[DirectML] oliver 文件不是 ONNX 模型，无法使用 DML 后端。" << std::endl;
+                std::cerr << u8"[DirectML] oliver 文件不是 ONNX 模型，无法使用 DML 后端。" << std::endl;
                 return false;
             }
             initializeModelFromBytes(payload.bytes, model_path);
@@ -516,6 +516,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
 
     lastPreprocessTimeValue = t1 - t0;
     lastInferenceTimeValue = t3 - t2;
+    runtime::latency::noteEngineInferenceMs(lastInferenceTimeValue.count());
     lastCopyTimeValue = t4 - t3;
     lastPostprocessTimeValue = t5 - t4;
     lastNmsTimeValue = nmsTimeTmp;
@@ -524,10 +525,12 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
 }
 
 
-void DirectMLDetector::processFrame(const cv::Mat& frame)
+void DirectMLDetector::processFrame(const cv::Mat& frame, runtime::FrameContext context)
 {
     std::unique_lock<std::mutex> lock(inferenceMutex);
-    runtime::latency::markSubmit();
+    if (shouldExit.load()) return;
+    pendingContext = context;
+    pendingStamp = {context.captured_ns, 0, context.sequence};
     currentFrame = frame;
     frameReady = true;
     inferenceCV.notify_one();
@@ -551,6 +554,8 @@ void DirectMLDetector::inferenceThread()
 
 
             cv::Mat frame;
+            runtime::latency::SubmitStamp frameStamp;
+            runtime::FrameContext frameContext;
             bool hasNewFrame = false;
             {
                 std::unique_lock<std::mutex> lock(inferenceMutex);
@@ -562,6 +567,9 @@ void DirectMLDetector::inferenceThread()
                 if (frameReady)
                 {
                     frame = std::move(currentFrame);
+                    frameStamp = pendingStamp;
+                    frameContext = pendingContext;
+                    runtime::latency::markDetectorConsume(frameStamp);
                     frameReady = false;
                     hasNewFrame = true;
                 }
@@ -591,8 +599,8 @@ void DirectMLDetector::inferenceThread()
                     detectionBuffer.classes.push_back(d.classId);
                     detectionBuffer.confidences.push_back(d.confidence);
                 }
-                runtime::latency::markInferenceDone();
-                detectionBuffer.bumpVersionLocked(runtime::latency::takeSubmittedCaptureNs());
+                runtime::latency::markInferenceDone(frameStamp.submit_ns);
+                detectionBuffer.bumpVersionLocked(frameContext);
                 detectionBuffer.cv.notify_all();
             }
         }

@@ -33,6 +33,7 @@
 #include "runtime/cuda_availability.h"
 #include "runtime/inference_session.h"
 #include "runtime/latency_probe.h"
+#include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 #include "detector/dml_detector.h"
 #include "auth/auth_state.h"
@@ -50,6 +51,7 @@ std::atomic<bool> shouldExit(false);
 std::atomic<bool> aiming(false);
 std::atomic<bool> session_stop_requested(true);
 std::recursive_mutex configMutex;
+std::mutex inputDeviceMutex;
 
 TrtDetector trt_detector;
 
@@ -111,47 +113,57 @@ static std::thread StartThreadGuarded(const char* name, Func func)
 
 void createInputDevices()
 {
-    if (makcuSerial)
+    // Serialize reconnects, but never hold configMutex while opening a port.
+    static std::mutex reconnectMutex;
+    std::lock_guard<std::mutex> reconnect(reconnectMutex);
+    const auto cfg = runtime_config::read();
+    std::unique_ptr<MakcuConnection> oldMakcu;
+    std::unique_ptr<MakcuNewConnection> oldNew;
     {
-        delete makcuSerial;
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        if (globalMouseThread)
+        {
+            globalMouseThread->clearQueuedMoves();
+            globalMouseThread->releaseLeftButton();
+            globalMouseThread->setMakcuConnection(nullptr);
+            globalMouseThread->setMakcuNewConnection(nullptr);
+        }
+        oldMakcu.reset(makcuSerial);
+        oldNew.reset(makcuNewSerial);
         makcuSerial = nullptr;
-    }
-
-    if (makcuNewSerial)
-    {
-        delete makcuNewSerial;
         makcuNewSerial = nullptr;
     }
-
-    if (config.input_method == "MAKCU")
+    // Detached from all readers; closing outside the lock keeps status polls
+    // responsive and releases the COM port before its replacement is opened.
+    oldMakcu.reset();
+    oldNew.reset();
+    std::unique_ptr<MakcuConnection> nextMakcu;
+    std::unique_ptr<MakcuNewConnection> nextNew;
+    if (cfg->input_method == "MAKCU")
     {
-        std::cout << "[Mouse] Using MAKCU input." << std::endl;
-        makcuSerial = new MakcuConnection(config.makcu_port, config.makcu_baudrate);
-        if (!makcuSerial->isOpen())
+        nextMakcu = std::make_unique<MakcuConnection>(cfg->makcu_port, cfg->makcu_baudrate);
+        if (!nextMakcu->isOpen()) nextMakcu.reset();
+    }
+    else if (cfg->input_method == "MAKCUNEW")
+    {
+        nextNew = std::make_unique<MakcuNewConnection>(cfg->makcu_new_port, cfg->makcu_new_baudrate);
+        if (!nextNew->isOpen()) nextNew.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(inputDeviceMutex);
+        makcuSerial = nextMakcu.release();
+        makcuNewSerial = nextNew.release();
+        if (globalMouseThread)
         {
-            std::cerr << "[Makcu] Error connecting." << std::endl;
-            delete makcuSerial;
-            makcuSerial = nullptr;
+            globalMouseThread->setMakcuConnection(makcuSerial);
+            globalMouseThread->setMakcuNewConnection(makcuNewSerial);
         }
     }
-    else if (config.input_method == "MAKCUNEW")
-    {
-        std::cout << "[Mouse] Using MAKCUNEW input." << std::endl;
-        makcuNewSerial = new MakcuNewConnection(
-            config.makcu_new_port, config.makcu_new_baudrate);
-        if (!makcuNewSerial->isOpen())
-        {
-            std::cerr << "[MakcuNew] Error connecting." << std::endl;
-            delete makcuNewSerial;
-            makcuNewSerial = nullptr;
-        }
-    }
-    else
-        std::cerr << "[Mouse] Unsupported input method: " << config.input_method << std::endl;
 }
 
 void assignInputDevices()
 {
+    std::lock_guard<std::mutex> lock(inputDeviceMutex);
     if (globalMouseThread)
     {
         globalMouseThread->setMakcuConnection(makcuSerial);
@@ -493,6 +505,10 @@ int main(int argc, char* argv[])
         session.stop();
         g_inference_session = nullptr;
 
+        mouseThread.clearQueuedMoves();
+        mouseThread.releaseLeftButton();
+        mouseThread.setMakcuConnection(nullptr);
+        mouseThread.setMakcuNewConnection(nullptr);
         delete makcuSerial;
         makcuSerial = nullptr;
         delete makcuNewSerial;

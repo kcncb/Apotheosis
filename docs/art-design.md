@@ -2,7 +2,7 @@
 
 ## 一、问题定义
 
-为三角洲行动（Delta Force）的 YOLO 双机自瞄系统设计统一的移动+预测算法，替代当前 Kalman + AimController + Bezier 三件套。
+为三角洲行动（Delta Force）的视觉目标追踪系统设计统一的移动+预测算法，替代当前 Kalman + AimController + Bezier 三件套。
 
 ### 当前系统的问题
 

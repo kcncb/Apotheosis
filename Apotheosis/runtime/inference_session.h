@@ -32,15 +32,13 @@ public:
     void stop();
 
     bool running() const noexcept { return running_.load(std::memory_order_acquire); }
-    IDetector* detector() const noexcept { return detector_raw_; }
-    const std::string& current_backend() const noexcept { return current_backend_; }
-    const std::string& current_model_path() const noexcept { return current_model_path_; }
-    const std::string& last_error() const noexcept { return last_error_; }
+    std::string last_error() const;
 
 private:
     void join_all_locked();
 
-    std::mutex mutex_;
+    void stop_locked();
+    mutable std::mutex mutex_;
     std::atomic<bool> running_{false};
 
     std::unique_ptr<IDetector> detector_owned_;

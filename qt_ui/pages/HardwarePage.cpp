@@ -1,11 +1,14 @@
 #include "pages/HardwarePage.h"
 
 #include "Apotheosis.h"
+#include "runtime/config_snapshot.h"
 #include "config/ConfigManager.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
 
 #include <QComboBox>
+#include <QDoubleSpinBox>
+#include "config/config_bridge.h"
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -57,7 +60,7 @@ HardwarePage::HardwarePage(QWidget* parent)
     auto* statusCard = new CardWidget(zh(u8"连接状态"), QStringLiteral("wifi"));
     auto* statusRow = new QHBoxLayout;
     statusRow->setSpacing(8);
-    m_statusDot = new QLabel(QStringLiteral("●"));
+    m_statusDot = new QLabel(QString::fromUtf8(u8"●"));
     m_statusDot->setFixedWidth(20);
     statusRow->addWidget(m_statusDot);
     m_statusText = new QLabel;
@@ -101,6 +104,27 @@ HardwarePage::HardwarePage(QWidget* parent)
 
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
+
+    auto* mappingCard = new CardWidget(zh(u8"图像与鼠标映射"), QStringLiteral("adjustments"));
+    auto addMapping = [&](const char* title, double Config::*field, double low, double high, const char* suffix) {
+        auto* spin = new QDoubleSpinBox;
+        spin->setDecimals(4); spin->setRange(low, high); spin->setSuffix(QString::fromUtf8(suffix));
+        { std::lock_guard<std::recursive_mutex> lock(configMutex); spin->setValue(config.*field); }
+        mappingCard->contentLayout()->addWidget(FormKit::fieldRow(zh(title), spin));
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [field](double v) {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            config.*field = v;
+            ConfigBridge::instance().markDirty();
+        });
+    };
+    addMapping(u8"水平像素 / 鼠标计数", &Config::mouse_pixels_per_count_x, .01, 100, "");
+    addMapping(u8"垂直像素 / 鼠标计数", &Config::mouse_pixels_per_count_y, .01, 100, "");
+    addMapping(u8"发送后生效延迟（估计）", &Config::mouse_effect_delay_ms, 0, 100, " ms");
+    addMapping(u8"生效延迟误差范围（估计）", &Config::mouse_effect_uncertainty_ms, 0, 50, " ms");
+    addMapping(u8"采集回调前帧龄（估计）", &Config::capture_age_offset_ms, 0, 100, " ms");
+    auto* note = new QLabel(zh(u8"映射应对应当前游戏视角与开镜状态。延迟为模型估计，串口写入成功不等于硬件已执行；回调前帧龄填 0 表示尚未补偿。"));
+    note->setWordWrap(true); mappingCard->contentLayout()->addWidget(note);
+    layout->addWidget(mappingCard);
 
     loadFieldsFromConfig();
 
@@ -164,6 +188,7 @@ void HardwarePage::reconnectDevice()
         config.makcu_new_baudrate = cm.makcuNewBaudrate();
     }
 
+    runtime_config::publish();
     createInputDevices();
     assignInputDevices();
     input_method_changed.store(false);
@@ -173,6 +198,7 @@ void HardwarePage::reconnectDevice()
 void HardwarePage::refreshStatus()
 {
     const bool useNew = m_inputMethodCombo && m_inputMethodCombo->currentIndex() == 1;
+    std::lock_guard<std::mutex> deviceLock(inputDeviceMutex);
     const bool pointerExists = useNew ? makcuNewSerial != nullptr : makcuSerial != nullptr;
     const bool connected = useNew
         ? pointerExists && makcuNewSerial->isOpen()

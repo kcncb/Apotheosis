@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 
 #include <QHBoxLayout>
+#include <QCloseEvent>
+#include <QMessageBox>
 #include <QGraphicsOpacityEffect>
 #include <QLabel>
 #include <QPropertyAnimation>
@@ -20,6 +22,7 @@
 #include "config/ConfigManager.h"
 #include "detector/i_detector.h"
 #include "runtime/inference_session.h"
+#include "runtime/latency_probe.h"
 #include "widgets/StatusBar.h"
 #include "widgets/TopNavBar.h"
 #include "widgets/SideNav.h"
@@ -294,6 +297,7 @@ void MainWindow::updateContextHeader(int primary, int secondary) {
 }
 
 void MainWindow::onSaveRequested() {
+    if (m_sessionOperation.valid()) return;
     ConfigBridge::instance().syncToRuntime();
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
@@ -302,24 +306,89 @@ void MainWindow::onSaveRequested() {
     m_topNav->showSaveFeedback();
 }
 
-void MainWindow::onHeroToggleInference() {
-    if (!g_inference_session)
-        return;
+MainWindow::~MainWindow()
+{
+    // std::future owns its worker. No callback captures this window.
+    if (m_sessionOperation.valid()) m_sessionOperation.wait();
+}
 
-    if (g_inference_session->running()) {
-        g_inference_session->stop();
-    } else {
-        ConfigBridge::instance().syncToRuntime();
-        std::string backend;
-        std::string modelPath;
-        {
-            std::lock_guard<std::recursive_mutex> lk(configMutex);
-            backend = config.backend;
-            modelPath = "models/" + config.ai_model;
-        }
-        g_inference_session->start(backend, modelPath);
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (m_sessionOperation.valid())
+    {
+        m_closeRequested = true;
+        event->ignore();
+        return;
     }
-    // Display refreshes on the next pollMonitorTelemetry() tick.
+    if (g_inference_session && (g_inference_session->running() || m_cleanupRequested))
+    {
+        m_closeRequested = true;
+        beginSessionOperation(false);
+        event->ignore();
+        return;
+    }
+    event->accept();
+}
+
+void MainWindow::onHeroToggleInference()
+{
+    if (!g_inference_session || m_sessionOperation.valid()) return;
+    beginSessionOperation(!g_inference_session->running());
+}
+
+void MainWindow::beginSessionOperation(bool start)
+{
+    if (!g_inference_session || m_sessionOperation.valid()) return;
+    std::string backend, modelPath;
+    if (start)
+    {
+        ConfigBridge::instance().syncToRuntime();
+        std::lock_guard<std::recursive_mutex> lock(configMutex);
+        backend = config.backend;
+        modelPath = "models/" + config.ai_model;
+    }
+    m_starting = start;
+    m_cleanupRequested = start;
+    m_pageStack->setEnabled(false);
+    m_topNav->setEnabled(false);
+    m_topNav->setSessionStatus(false, QString::fromUtf8(
+        start ? u8"正在启动…" : u8"正在停止…"));
+    auto* session = g_inference_session;
+    try
+    {
+        m_sessionOperation = std::async(std::launch::async,
+            [session, start, backend, modelPath]() -> std::string {
+                if (start && !session->start(backend, modelPath)) return session->last_error();
+                if (!start) session->stop();
+                return {};
+            });
+    }
+    catch (const std::exception& e)
+    {
+        m_pageStack->setEnabled(true);
+        m_topNav->setEnabled(true);
+        QMessageBox::critical(this, QString::fromUtf8(u8"会话操作失败"), QString::fromUtf8(e.what()));
+    }
+}
+
+void MainWindow::pollSessionOperation()
+{
+    if (!m_sessionOperation.valid()) return;
+    if (m_sessionOperation.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    std::string error;
+    try { error = m_sessionOperation.get(); }
+    catch (const std::exception& e) { error = e.what(); }
+    catch (...) { error = "unknown session error"; }
+    m_pageStack->setEnabled(true);
+    m_topNav->setEnabled(true);
+    if (!error.empty() && !m_closeRequested)
+        QMessageBox::critical(this, QString::fromUtf8(u8"会话操作失败"), QString::fromUtf8(error.c_str()));
+    if (m_closeRequested)
+    {
+        // Always reap a partially started/failed session before closing.
+        if (m_starting) beginSessionOperation(false);
+        else close();
+    }
 }
 
 QWidget* MainWindow::createPage(const QString& name) {
@@ -339,26 +408,38 @@ QWidget* MainWindow::createPage(const QString& name) {
 }
 
 void MainWindow::pollMonitorTelemetry() {
+    pollSessionOperation();
+    if (g_inference_session && session_stop_requested.load()
+        && m_cleanupRequested && !m_sessionOperation.valid())
+    {
+        beginSessionOperation(false);
+    }
     // ── Shared telemetry (computed once, fed to both 概览 and 性能统计) ──────
     const double fps = static_cast<double>(captureFps.load());
     const double sourceFps = static_cast<double>(captureSourceFps.load());
-    const int rxSender = captureSenderSpanFps.load();
-    const int rxWire = captureWireLostFps.load();
-    const int rxPartial = capturePartialLostFps.load();
-    const int rxKernel = capturePcapKernelDroppedFps.load();
-    const int rxIf = capturePcapIfDroppedFps.load();
 
-    double pre_ms = 0.0, infer_ms = 0.0, copy_ms = 0.0, post_ms = 0.0, nms_ms = 0.0;
-    if (g_inference_session && g_inference_session->detector()) {
-        auto* d = g_inference_session->detector();
-        pre_ms   = d->lastPreprocessTime().count();
-        infer_ms = d->lastInferenceTime().count();
-        copy_ms  = d->lastCopyTime().count();
-        post_ms  = d->lastPostprocessTime().count();
-        nms_ms   = d->lastNmsTime().count();
-    }
-    const double total_ms = pre_ms + infer_ms + copy_ms + post_ms + nms_ms;
-    const double cap_ms = (fps > 0.5) ? (1000.0 / fps) : 0.0;
+    // 延迟一律取端到端探针(runtime/latency_probe.h)的实测值。原来这里是:
+    //   采集延迟 = 1000 / 采集FPS      -> 那是【帧间隔】, 根本不是延迟: 60fps 恒等于
+    //                                     16.7ms, 再怎么优化都动不了它, 却最容易被
+    //                                     读成"采集卡对接延迟好高";
+    //   总延迟   = detector 内部各项之和 -> 不含采集等待、发布→控制环、写出→HID, 却
+    //                                     被标成"总延迟"/"端到端延迟"。
+    // 现在三项分别是 T1-T0 / T2-T1 / T3-T0。另外把【设备侧帧龄】喂给分段卡片: 它是
+    // 驱动/MF 把帧交给我们之前花掉的时间, 不用于单独判定卡芯片的耗时。
+    const auto probe = runtime::latency::snapshot();
+    const bool hasProbe = probe.frames_consumed > 0 && fps > 0.0;
+    const double cap_ms        = hasProbe ? probe.stages[runtime::latency::kCaptureWait].ema_ms : -1.0;
+    const double total_ms      = hasProbe ? probe.stages[runtime::latency::kTotal].ema_ms : -1.0;
+    const double infer_chain_ms = hasProbe ? probe.stages[runtime::latency::kInference].ema_ms : -1.0;
+    const double pub2aim_ms    = hasProbe ? probe.stages[runtime::latency::kPublishToAim].ema_ms : -1.0;
+    const double e2e_ms = hasProbe && probe.stages[runtime::latency::kEndToEnd].n > 0
+        ? probe.stages[runtime::latency::kEndToEnd].ema_ms : -1.0;
+    const int deviceAgeUs = probe.device_frame_age_us;
+
+    // "推理延迟"仍用 detector 自报的纯推理耗时(引擎本体), 分段卡片里的"推理"一行
+    // 是探针的整段(含预处理 / D2H / NMS), 两者含义不同, 故意分开。
+    const double infer_ms = probe.engine_inference_ms;
+
     const bool running = g_inference_session && g_inference_session->running();
 
     // Session uptime: stamp on the false→true edge.
@@ -381,16 +462,23 @@ void MainWindow::pollMonitorTelemetry() {
 
     m_statusBar->setInferenceStatus(running);
     m_statusBar->setFps(fps);
-    m_topNav->setSessionStatus(running, running ? QString::fromUtf8(u8"运行中") : QString::fromUtf8(u8"已停止"));
+    if (!m_sessionOperation.valid())
+        m_topNav->setSessionStatus(running, running ? QString::fromUtf8(u8"运行中") : QString::fromUtf8(u8"已停止"));
 
     // ── 概览 dashboard ──────────────────────────────────────────────────
     if (m_overviewPage) {
         m_overviewPage->setFps(fps);
         m_overviewPage->setSourceFps(sourceFps);
-        m_overviewPage->setReceiverDiagnostics(rxSender, rxWire, rxPartial, rxKernel, rxIf);
         m_overviewPage->setInferenceLatency(infer_ms);
-        m_overviewPage->setTotalLatency(total_ms);
-        m_overviewPage->setDetectionCount(static_cast<int>(detectionBuffer.boxes.size()), -1);
+        m_overviewPage->setTotalLatency(e2e_ms);
+        m_overviewPage->setCaptureChainDiagnostics(deviceAgeUs, cap_ms, infer_chain_ms,
+                                                   pub2aim_ms, e2e_ms);
+        int detectionCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
+            detectionCount = static_cast<int>(detectionBuffer.boxes.size());
+        }
+        m_overviewPage->setDetectionCount(detectionCount, -1);
 
         QString uptime;
         if (running) {
@@ -411,10 +499,11 @@ void MainWindow::pollMonitorTelemetry() {
     if (m_statsPage) {
         m_statsPage->setFps(fps);
         m_statsPage->setSourceFps(sourceFps);
-        m_statsPage->setReceiverDiagnostics(rxSender, rxWire, rxPartial, rxKernel, rxIf);
         m_statsPage->setCaptureLatency(cap_ms);
         m_statsPage->setInferenceLatency(infer_ms);
         m_statsPage->setTotalLatency(total_ms);
+        m_statsPage->setCaptureChainDiagnostics(deviceAgeUs, cap_ms, infer_chain_ms,
+                                                pub2aim_ms, e2e_ms);
         m_statsPage->setGpuMemory(QStringLiteral("%1 MB").arg(gpuMb));
         m_statsPage->setCpuCores(QString::number(cpuCores));
     }

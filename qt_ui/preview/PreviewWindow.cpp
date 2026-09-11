@@ -24,22 +24,22 @@ struct GroupDef {
 
 const QVector<GroupDef>& groups() {
     static const QVector<GroupDef> kGroups = {
-        {QStringLiteral("概览"), {}, {}},
-        {QStringLiteral("会话"),
-         {QStringLiteral("推理启动"), QStringLiteral("模型工具")},
+        {QString::fromUtf8(u8"概览"), {}, {}},
+        {QString::fromUtf8(u8"会话"),
+         {QString::fromUtf8(u8"推理启动"), QString::fromUtf8(u8"模型工具")},
          {QStringLiteral("player-play"), QStringLiteral("settings")}},
-        {QStringLiteral("配置"),
-         {QStringLiteral("画面采集"), QStringLiteral("目标"), QStringLiteral("硬件"),
-          QStringLiteral("AI 模型"), QStringLiteral("深度模型")},
+        {QString::fromUtf8(u8"配置"),
+         {QString::fromUtf8(u8"画面采集"), QString::fromUtf8(u8"目标"), QString::fromUtf8(u8"硬件"),
+          QString::fromUtf8(u8"AI 模型"), QString::fromUtf8(u8"深度模型")},
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu"), QStringLiteral("stack-2")}},
-        {QStringLiteral("控制"),
-         {QStringLiteral("瞄准热键"), QStringLiteral("准星找色"), QStringLiteral("宏脚本")},
+        {QString::fromUtf8(u8"控制"),
+         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"准星找色"), QString::fromUtf8(u8"宏脚本")},
          {QStringLiteral("keyboard"), QStringLiteral("color-swatch"), QStringLiteral("world"),
           QStringLiteral("layers-intersect"), QStringLiteral("terminal-2"), QStringLiteral("history")}},
-        {QStringLiteral("监控"),
-         {QStringLiteral("性能统计"), QStringLiteral("日志"), QStringLiteral("自动采集"),
-          QStringLiteral("调试")},
+        {QString::fromUtf8(u8"监控"),
+         {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
+          QString::fromUtf8(u8"调试")},
          {QStringLiteral("gauge"), QStringLiteral("terminal-2"), QStringLiteral("camera"),
           QStringLiteral("bug")}},
     };
@@ -49,7 +49,7 @@ const QVector<GroupDef>& groups() {
 }  // namespace
 
 PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle(QStringLiteral("Apotheosis — UI 预览"));
+    setWindowTitle(QString::fromUtf8(u8"Apotheosis — UI 预览"));
     resize(1080, 720);
     setMinimumSize(940, 600);
 
@@ -146,7 +146,7 @@ QWidget* PreviewWindow::makePlaceholder(const QString& title, const QString& ico
     name->setStyleSheet(QStringLiteral("font-size:16px; font-weight:500; color:#52525B;"));
     box->addWidget(name);
 
-    auto* hint = new QLabel(QStringLiteral("「%1」的真实内容将在完整版接入 —— 当前为新外壳预览").arg(title));
+    auto* hint = new QLabel(QString::fromUtf8(u8"「%1」的真实内容将在完整版接入 —— 当前为新外壳预览").arg(title));
     hint->setAlignment(Qt::AlignCenter);
     hint->setProperty("class", "tertiary");
     box->addWidget(hint);
@@ -204,7 +204,8 @@ void PreviewWindow::tickMock() {
         m_overview->setInferenceLatency(infer);
         m_overview->setTotalLatency(total);
         m_overview->setDetectionCount(boxes, boxes > 6 ? boxes - 6 : 0);
-        m_overview->setReceiverDiagnostics(0, 0, 2, 0, 0);
+        // 采集链路分段(假数据, 只为看版式): 设备帧龄 / 采集→取帧 / 推理 / 发布→消费 / 全链路。
+        m_overview->setCaptureChainDiagnostics(1200, 0.4, 4.2, 0.9, total);
 
         const QString uptime = QStringLiteral("%1:%2:%3")
             .arg(secs / 3600, 2, 10, QChar('0'))
@@ -217,5 +218,5 @@ void PreviewWindow::tickMock() {
                                     QStringLiteral("TensorRT (CUDA)"), QString());
     }
 
-    m_top->setSessionStatus(m_running, m_running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
+    m_top->setSessionStatus(m_running, m_running ? QString::fromUtf8(u8"运行中") : QString::fromUtf8(u8"已停止"));
 }

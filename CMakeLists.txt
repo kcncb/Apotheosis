@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.24)
 
 project(Apotheosis LANGUAGES C CXX)
 
+include(CTest)
+option(APOTHEOSIS_LOGIC_TESTS_ONLY "Build portable logic regressions without the Windows application" OFF)
+if(APOTHEOSIS_LOGIC_TESTS_ONLY)
+    enable_testing()
+    add_subdirectory(tests)
+    return()
+endif()
+
 if(NOT WIN32)
     message(FATAL_ERROR "Apotheosis only supports Windows builds.")
 endif()
@@ -119,6 +127,15 @@ set(AVA_EXACT_SOURCES
     "${SRC_DIR}/mouse/ava_exact/timed_button_exact.cpp"
 )
 
+# Live application: association/anchor logic only. The legacy PIDF pipeline is
+# retained in AVA_EXACT_SOURCES for reference regressions, not a second runtime.
+set(AVA_TARGET_SOURCES
+    "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_selector_top_exact.cpp"
+    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp")
+
 set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
     "${SRC_DIR}/capture/auto_capture.cpp"
@@ -151,7 +168,8 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
-    ${AVA_EXACT_SOURCES}
+    "${SRC_DIR}/mouse/control/predictive_controller.cpp"
+    ${AVA_TARGET_SOURCES}
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/MakcuNew.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
@@ -237,27 +255,10 @@ target_link_libraries(serial_embedded PUBLIC setupapi)
 
 add_executable(ai WIN32 ${APP_SOURCES})
 
-# Pin CUDA architectures to REAL SMs (no trailing "-virtual" or PTX-only).
-# Without this, CMake default emits PTX targeting compute_<future-arch> and
-# relies on the NVIDIA driver to JIT it to SASS at load time. With CUDA 12.9
-# the PTX version is 8.5+, which older drivers (e.g. R535) reject with
-# "the provided PTX was compiled with an unsupported toolchain" — every
-# kernel launch then fails silently and our preprocess kernel never writes
-# anything to the engine input binding.
-#
-# Listing concrete SM real-arch numbers makes nvcc embed prebuilt SASS for
-# every GPU TensorRT 10 still supports — no driver JIT required:
-#   70  = Volta     (V100 / Titan V)
-#   75  = Turing    (RTX 20 / GTX 16 / T4)
-#   80  = Ampere    (A100)
-#   86  = Ampere    (RTX 30)
-#   89  = Ada       (RTX 40)
-#   90  = Hopper    (H100 / H200)
-#   100 = Blackwell datacenter (B100 / B200)
-#   120 = Blackwell client     (RTX 50)
-# (SM 72 / 87 — Xavier / Orin — are Jetson embedded only and skipped here.)
+# Native code for the deployed Turing/Ampere GPUs; compute_86 PTX provides
+# forward JIT compatibility. TensorRT/driver compatibility is still required.
 set_target_properties(ai PROPERTIES
-    OUTPUT_NAME "Apotheosis"
+    OUTPUT_NAME "ai"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     # 运行机使用的 CMP 40HX/TU106 是 sm_75，开发机 RTX 3060 是 sm_86。
@@ -412,6 +413,7 @@ add_custom_command(TARGET ai POST_BUILD
 add_executable(ava_chain_test EXCLUDE_FROM_ALL
     "${SRC_DIR}/mouse/tests/ava_chain_regression_test.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
+    "${SRC_DIR}/mouse/control/predictive_controller.cpp"
     ${AVA_EXACT_SOURCES})
 target_include_directories(ava_chain_test PRIVATE
     "${SRC_DIR}/mouse"
@@ -440,3 +442,7 @@ message(STATUS "DirectML: ${DIRECTML_DIR}")
 message(STATUS "TensorRT: ${TENSORRT_ROOT}")
 message(STATUS "cuDNN: ${CUDNN_ROOT}")
 message(STATUS "CUDA: ${CUDAToolkit_BIN_DIR}")
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

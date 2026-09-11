@@ -477,13 +477,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
     std::vector<int> classes;
     std::vector<float> confidences;
 
-    boss::AimEngine engine;
+    boss::AimEngine engine(mouseThread.commandJournal());
     boss::AimPathDriver aim_path_driver;
 
     int last_hotkey_index_seen = -2;
     int last_resolution_seen = -1;
 
-    auto last_tick_ts = std::chrono::steady_clock::time_point::min();
 
     TriggerState trigger;
 
@@ -491,6 +490,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
     // 表达的就是这件事: 缓存超时只应该在"锁定过又断流"时清链, 不该在本来就没
     // 锁定时反复 reset。
     bool had_lock = false;
+    double last_gain_x = -1, last_gain_y = -1, last_effect_ms = -1, last_effect_uncertainty_ms = -1, last_source_age_ms = -1;
 
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
@@ -503,6 +503,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // 延迟探针: 本拍消费的那批检测, 其像素的采集时刻 / 发布时刻。
         int64_t probed_frame_capture_ns = 0;
         int64_t probed_publish_ns = 0;
+        runtime::FrameContext frameContext;
 
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);
@@ -543,6 +544,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 detection_age_ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - detectionBuffer.stamp).count();
             probed_frame_capture_ns = detectionBuffer.frame_stamp_ns;
+            frameContext = detectionBuffer.frame_context;
             probed_publish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 detectionBuffer.stamp.time_since_epoch()).count();
         }
@@ -556,11 +558,25 @@ void mouseThreadFunction(MouseThread& mouseThread)
         const auto config_snapshot = runtime_config::read();
 
 
-        if (input_method_changed.load())
+        if (input_method_changed.exchange(false))
         {
             createInputDevices();
             assignInputDevices();
-            input_method_changed.store(false);
+        }
+
+        if (last_gain_x != config_snapshot->mouse_pixels_per_count_x
+            || last_gain_y != config_snapshot->mouse_pixels_per_count_y
+            || last_effect_ms != config_snapshot->mouse_effect_delay_ms
+            || last_effect_uncertainty_ms != config_snapshot->mouse_effect_uncertainty_ms
+            || last_source_age_ms != config_snapshot->capture_age_offset_ms)
+        {
+            engine.reset(); aim_path_driver.reset(); reset_trigger(mouseThread, trigger);
+            mouseThread.clearQueuedMoves(); had_lock = false;
+            last_gain_x = config_snapshot->mouse_pixels_per_count_x;
+            last_gain_y = config_snapshot->mouse_pixels_per_count_y;
+            last_effect_ms = config_snapshot->mouse_effect_delay_ms;
+            last_effect_uncertainty_ms = config_snapshot->mouse_effect_uncertainty_ms;
+            last_source_age_ms = config_snapshot->capture_age_offset_ms;
         }
 
         // Snapshot active hotkey.
@@ -584,7 +600,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
             mouseThread.updateParams(rp);
             last_hotkey_index_seen = active_idx;
             last_resolution_seen = config_resolution;
-            detection_resolution_changed.store(false);
 
             if (resolution_changed || hotkey_changed)
             {
@@ -592,7 +607,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 aim_path_driver.reset();
                 reset_trigger(mouseThread, trigger);
                 mouseThread.clearQueuedMoves();
-                last_tick_ts = std::chrono::steady_clock::time_point::min();
                 had_lock = false;
                 publish_boss_debug(engine);
             }
@@ -603,26 +617,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // the trigger.
         if (!profile_ptr)
         {
-            reset_trigger(mouseThread, trigger);
-            mouseThread.clearQueuedMoves();
-            aim_path_driver.reset();
-            had_lock = false;
-            if (hasNewDetection)
-            {
-                boss::EngineInput in;
-                in.boxes = &precise_boxes;
-                in.classes = &classes;
-                in.confidences = &confidences;
-                in.crosshair_x = config_resolution * 0.5;
-                in.crosshair_y = config_resolution * 0.5;
-                const auto now = std::chrono::steady_clock::now();
-                double dt = 1.0 / 60.0;
-                if (last_tick_ts != std::chrono::steady_clock::time_point::min())
-                    dt = std::chrono::duration<double>(now - last_tick_ts).count();
-                last_tick_ts = now;
-                engine.tick(in, dt);
-                publish_boss_debug(engine);
-            }
+            // Hotkey transitions already cancel once above; never flood the
+            // device with a cancellation packet on every idle poll.
             continue;
         }
 
@@ -653,15 +649,23 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 had_lock = false;
             }
             runtime::chainlog::end_frame();
+        }
+
+        if (hasNewDetection && (probed_frame_capture_ns <= 0 || (frameContext.width>0 &&
+            (frameContext.width!=config_resolution || frameContext.height!=config_resolution))))
+        {
+            engine.reset();
+            if (had_lock) { reset_trigger(mouseThread, trigger); mouseThread.clearQueuedMoves(); }
+            had_lock = false;
             continue;
         }
 
         // 延迟探针 T3: 控制环此刻真正拿到了一批【新鲜】检测。到这里的路径
         // 已经排除了无新帧与陈旧缓存的 continue, 所以结算出来的是真实消费
-        // 延迟, 不会被"读旧数据"污染。T4 用上一步刚取回的鼠标队列延迟。
-        runtime::latency::markAimConsume(
-            probed_frame_capture_ns, probed_publish_ns,
-            static_cast<double>(g_mouse_queue_latency_ms.load()));
+        // 延迟, 不会被"读旧数据"污染。T4 由携带本帧戳的指令发送完成后结算。
+        const int64_t aim_consume_ns = hasNewDetection
+            ? runtime::latency::markAimConsume(probed_frame_capture_ns, probed_publish_ns)
+            : runtime::latency::nowNs();
 
         // 全链路日志: 开一帧。本帧后续所有记录都会带上同一个 frame= 便于串联。
         runtime::chainlog::begin_frame(static_cast<std::int64_t>(lastVersion));
@@ -702,17 +706,23 @@ void mouseThreadFunction(MouseThread& mouseThread)
             s.min_conf = (ac.min_conf > 0.0f) ? ac.min_conf : global_conf;
             in.target_slots.push_back(s);
         }
+        in.has_new_measurement = hasNewDetection;
+        in.sequence = frameContext.sequence ? frameContext.sequence : static_cast<uint64_t>(lastVersion);
+        in.now_ns = runtime::latency::nowNs();
+        in.captured_ns = probed_frame_capture_ns - static_cast<int64_t>(config_snapshot->capture_age_offset_ms * 1e6);
+        in.calibration = {config_snapshot->mouse_pixels_per_count_x, config_snapshot->mouse_pixels_per_count_y,
+                          static_cast<int64_t>(config_snapshot->mouse_effect_delay_ms * 1e6),
+                          static_cast<int64_t>(config_snapshot->mouse_effect_uncertainty_ms * 1e6)};
+        const int control_hz = std::clamp(config_snapshot->capture_fps > 0 ? config_snapshot->capture_fps : 120, 30, 240);
+        in.control_period_ns = 1'000'000'000LL / control_hz;
+        in.max_observation_age_ns = std::clamp<int64_t>((std::max(3,profile_ptr->lost_target_cache_frames)+3)*in.control_period_ns,
+                                                       40'000'000, 150'000'000);
         in.lost_target_cache_frames = profile_ptr->lost_target_cache_frames;
         in.crosshair_x = pivot.x;
         in.crosshair_y = pivot.y;
         in.fov_radius_x = fov_rx;
         in.fov_radius_y = fov_ry;
         in.image_size   = static_cast<double>(config_resolution);
-        // 链路实测延迟交给 PIDF 的延迟补偿(Smith 预测器)。
-        // 0 时补偿自动退化为恒等 —— 与不补偿逐位一致, 所以探针没数据也不会变差。
-        in.measure_latency_sec =
-            runtime::latency::snapshot().stages[runtime::latency::kTotal].ema_ms * 0.001;
-
         in.pidf_params.kp_x = profile_ptr->pidf_kp_x; in.pidf_params.kp_y = profile_ptr->pidf_kp_y;
         in.pidf_params.ki_x = profile_ptr->pidf_ki_x; in.pidf_params.ki_y = profile_ptr->pidf_ki_y;
         in.pidf_params.kd_x = profile_ptr->pidf_kd_x; in.pidf_params.kd_y = profile_ptr->pidf_kd_y;
@@ -721,24 +731,30 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.pidf_params.deadzone_x = profile_ptr->pidf_deadzone_x; in.pidf_params.deadzone_y = profile_ptr->pidf_deadzone_y;
         in.pidf_params.movement_limit_x = profile_ptr->pidf_limit_x; in.pidf_params.movement_limit_y = profile_ptr->pidf_limit_y;
 
-        // AVA 负责 selector/tracker、aimpoint 和 PIDF；用户自定义
-        // AimPath 作为可选的后置轨迹整形，不参与 AVA 的目标预测状态。
+        // Association consumes new frames only. The timestamped observer and
+        // control clock are independent; final shaped commands feed the journal.
         const auto now = std::chrono::steady_clock::now();
         double dt = (detection_interval_ms > 0.0)
             ? std::clamp(detection_interval_ms * 0.001, 1.0 / 1000.0, 0.1)
             : 1.0 / 60.0;
-        last_tick_ts = now;
 
         const boss::EngineOutput out = engine.tick(in, dt);
 
         publish_boss_debug(engine);
+        if (!out.have_target)
+        {
+            if (had_lock) { reset_trigger(mouseThread, trigger); mouseThread.clearQueuedMoves(); }
+            had_lock = false;
+            continue;
+        }
+        if (!out.control_due) continue;
 
         // ─── Drive mouse ───
         if (out.have_target)
         {
             had_lock = true;
-            int drive_dx = out.dx;
-            int drive_dy = out.dy;
+            double drive_dx = out.pixel_dx;
+            double drive_dy = out.pixel_dy;
             // 本帧扳机是否在命中区内 —— 扳机 FSM 在后面才算, 这里先给默认值,
             // 供本帧的全链路日志使用(日志在扳机 FSM 之前落盘)。
             bool trigger_in_zone = false;
@@ -765,9 +781,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
             drive_dy = shaped.move_y;
             if (out.motion_suppressed)
                 mouseThread.clearQueuedMoves();
-            // CVM 在短暂丢检期间继续使用 tracker 的预测框驱动 PIDF；
-            // coasting 只禁止开火，不再丢弃预测移动或重置控制器历史。
-            mouseThread.sendRawMove(drive_dx, drive_dy);
+            // Coasting advances the observer without inventing measurements.
+            // Shape first, then map/quantize once; the journal records that result.
+            mouseThread.sendPixelMove(drive_dx, drive_dy, in.calibration,
+                profile_ptr->pidf_limit_x, profile_ptr->pidf_limit_y,
+                out.observed_at + static_cast<int64_t>(config_snapshot->capture_age_offset_ms * 1e6), aim_consume_ns);
 
             // 全链路日志: 本帧的完整现场(检测/找色枢轴/锚点/误差/控制器输出/整形后
             // 位移/队列/扳机相位/延迟探针)。字段含义见 runtime/chain_log.h。
@@ -790,7 +808,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     static_cast<double>(out.bbox.width),
                     static_cast<double>(out.bbox.height),
                     out.dx, out.dy, out.coasting, out.motion_suppressed,
-                    drive_dx, drive_dy,
+                    static_cast<int>(std::lround(drive_dx)), static_cast<int>(std::lround(drive_dy)),
                     movement_feedback.backlog, movement_feedback.latency_ms,
                     movement_feedback.failed,
                     static_cast<int>(trigger.phase),

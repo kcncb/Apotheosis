@@ -49,7 +49,15 @@ public:
     // backends that don't support GPU decode fall back transparently to the
     // CPU path. Consumer (captureThread) prefers this when available.
     virtual GpuImage GetNextFrameGpu() { return GpuImage(); }
+    virtual bool HasStopped() const { return false; }
     virtual int GetSourceFpsEstimate() const { return 0; }
+    // Steady-clock timestamp of the last successfully dequeued frame. Only the
+    // capture consumer calls this, immediately after GetNextFrameCpu/Gpu.
+    virtual int64_t GetLastFrameCaptureNs() const { return 0; }
+
+    // 驱动时间戳到 sample 回调的帧龄(微秒)。不包含回调之后的解码等工作。
+    // -1 = 缺失、无效或过期。测得 0 与不可用必须区分。
+    virtual int GetDeviceFrameAgeUs() const { return -1; }
 
     // 事件驱动取帧。消费线程在队列取空时调用:支持的后端用 condition_variable
     // 在产帧入队后唤醒它,从而精确贴着产帧节奏取帧,而不是靠固定节拍轮询——后者

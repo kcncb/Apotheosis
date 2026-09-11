@@ -294,12 +294,12 @@ void HotkeyPage::buildFovCard()
 void HotkeyPage::buildTriggerCard()
 {
     auto* card = new CardWidget(
-        QStringLiteral("自动扳机"),
+        QString::fromUtf8(u8"自动扳机"),
         QStringLiteral("crosshair"));
     auto* cl = card->contentLayout();
 
     cl->addWidget(FormKit::toggleRow(
-        QStringLiteral("启用自动扳机"),
+        QString::fromUtf8(u8"启用自动扳机"),
         false, m_triggerEnabled));
 
     auto makeSpin = [](int min, int max, const QString& suffix) {
@@ -313,16 +313,15 @@ void HotkeyPage::buildTriggerCard()
     m_triggerFireDelay      = makeSpin(0,    1000, QStringLiteral(" ms"));
     m_triggerFireDuration   = makeSpin(0,    2000, QStringLiteral(" ms"));
     m_triggerFireInterval   = makeSpin(0,    2000, QStringLiteral(" ms"));
-    m_triggerFireDelay->setToolTip(QStringLiteral(
-        "准星进入命中区后延迟 N ms 才按下, 0 = 立即开火。"));
+    m_triggerFireDelay->setToolTip(QString::fromUtf8(u8"准星进入命中区后延迟 N ms 才按下, 0 = 立即开火。"));
     m_triggerFireDuration->setToolTip(QStringLiteral(
-        "0 = 长按模式: 进入命中区就按住不松手, 直到准星离开命中区\n"
-        "(目标真的丢了也会松开), 不会出现按-松的连点。\n"
-        ">0 = 连点模式: 每次按住 N ms 后松手, 再等冷却间隔重按。"));
+        u8"0 = 长按模式: 进入命中区就按住不松手, 直到准星离开命中区\n"
+        u8"(目标真的丢了也会松开), 不会出现按-松的连点。\n"
+        u8">0 = 连点模式: 每次按住 N ms 后松手, 再等冷却间隔重按。"));
     m_triggerFireInterval->setToolTip(QStringLiteral(
-        "连点模式的冷却间隔。\n"
-        "长按模式下用作准星离开命中区后的最短重按间隔 —— 防止在判定\n"
-        "边缘反复按松形成连点。"));
+        u8"连点模式的冷却间隔。\n"
+        u8"长按模式下用作准星离开命中区后的最短重按间隔 —— 防止在判定\n"
+        u8"边缘反复按松形成连点。"));
     m_triggerYPercent       = makeSpin(10,    300, QStringLiteral(" %"));
     m_triggerDelayJitter    = makeSpin(0,     100, QStringLiteral(" ms"));
     m_triggerDurationJitter = makeSpin(0,     100, QStringLiteral(" ms"));
@@ -331,7 +330,7 @@ void HotkeyPage::buildTriggerCard()
 
     // 命中判定范围与可视化受击框
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("判定命中范围"),
+        QString::fromUtf8(u8"判定命中范围"),
         m_triggerYPercent));
 
     m_triggerVisual = new TriggerVisualWidget(card);
@@ -339,19 +338,19 @@ void HotkeyPage::buildTriggerCard()
 
     // 核心时间参数行
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("开火延迟"),
+        QString::fromUtf8(u8"开火延迟"),
         m_triggerFireDelay));
 
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("按住时长 (0 = 长按)"),
+        QString::fromUtf8(u8"按住时长 (0 = 长按)"),
         m_triggerFireDuration));
 
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("冷却间隔"),
+        QString::fromUtf8(u8"冷却间隔"),
         m_triggerFireInterval));
 
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("随机抖动 (防封)"),
+        QString::fromUtf8(u8"随机抖动 (防封)"),
         m_triggerDelayJitter));
 
     // 动态联动可视化小部件
@@ -611,11 +610,11 @@ void HotkeyPage::rebuildAimClassList()
             return b;
         };
 
-        auto* upBtn = makeIconBtn(QStringLiteral("▲"), QStringLiteral("#71717A"),
+        auto* upBtn = makeIconBtn(QString::fromUtf8(u8"▲"), QStringLiteral("#71717A"),
                                   QStringLiteral("#5E6AD2"), QString::fromUtf8(u8"上移（提高优先级）"));
-        auto* downBtn = makeIconBtn(QStringLiteral("▼"), QStringLiteral("#71717A"),
+        auto* downBtn = makeIconBtn(QString::fromUtf8(u8"▼"), QStringLiteral("#71717A"),
                                     QStringLiteral("#5E6AD2"), QString::fromUtf8(u8"下移（降低优先级）"));
-        auto* delBtn = makeIconBtn(QStringLiteral("✕"), QStringLiteral("#D25A5A"),
+        auto* delBtn = makeIconBtn(QString::fromUtf8(u8"✕"), QStringLiteral("#D25A5A"),
                                    QStringLiteral("#B83232"), QString::fromUtf8(u8"移除"));
         upBtn->setEnabled(idx > 0);
         downBtn->setEnabled(idx < total - 1);
@@ -816,33 +815,20 @@ void HotkeyPage::buildBossAimCard()
     for (int i = 0; i < 10; ++i)
     {
         const int decimals = (i == 0 || i == 1 || i == 6 || i == 7) ? 2 : 3;
-        // AVA 没有给这些 QDoubleSpinBox 额外设置 range，沿用 Qt 的
-        // 原生默认范围 0..99.99。此前把 LR 人为限制到 1.0 会截断
-        // AVA 界面本来允许写入的预测速度。
-        m_pidfGain[i] = makeDouble(0.0, 99.99,
-                                   defaults[i], 0.001, decimals);
+        const double maximum = i < 2 ? 8.0 : i < 4 ? 0.0 : i < 6 ? .25 : i < 8 ? 2.0 : .32;
+        m_pidfGain[i] = makeDouble(0.0, maximum, defaults[i], 0.001, decimals);
     }
     for (int i = 0; i < 4; ++i)
         m_pidfInteger[i] = makeInt(0, 1000, 0);
 
     const QString lockTip = QString::fromUtf8(
-        u8"AVA 的 Kf：决定速度前馈/提前量强度；为 0 时预测速度不会改变输出。");
+        u8"Kf：目标状态估计器的速度前馈强度。实际位移反馈用于区分目标运动与自身视角运动。");
     const QString predictionTip = QString::fromUtf8(
-        u8"AVA 的 LR：控制 Kf 前馈状态的学习速度，不是独立提前量；需配合非零锁定强度。\n"
-        u8"本版给它加了下限，远距离目标也能持续学习速度 —— 原实现在误差大时学习率几乎归零，"
-        u8"于是「必须先贴近了才肯学目标往哪走」，远的/刚见到的目标永远慢半拍。");
-    // 瞄准速度: 控制器内部对比例项有原生标定系数 0.1，所以界面数值与"每帧
-    // 收敛比例"差 10 倍。写清楚换算，用户才不用靠猜来调参。
+        u8"LR：目标速度观测器的响应程度。只在新图像观测到达时学习；不重复使用旧检测。");
     const QString aimSpeedTip = QString::fromUtf8(
-        u8"AVA 的 Kp：每帧向目标推进多少。\n"
-        u8"实际每帧收敛比例 = 本值 × 10%（内部有原生标定系数 0.1）。\n"
-        u8"1.0 → 每帧走掉剩余误差的 10%；10.0 → 约 100%，即一帧到位（此时需靠 Kd 压过冲）。\n"
-        u8"调得越高越「快」，但过冲/摆动也会越明显，配合 Kd 一起加。");
-    // 过冲控制: 本版对微分项加了低通，需要让用户知道行为变了。
+        u8"Kp：位置误差修正强度。控制器按接近、收敛、跟随阶段连续控制，并扣除在途指令；不再按固定每帧百分比解释。");
     const QString overshootTip = QString::fromUtf8(
-        u8"AVA 的 Kd：阻尼，抑制高速接近目标时的来回摆动与过冲。\n"
-        u8"本版给微分项加了一阶低通（约 1.5 帧时间常数，实测最优）：压掉逐帧毛刺，所以准星更稳、"
-        u8"不再因检测抖动而嗡嗡响；代价是它对突变的反应略慢，过冲明显时把本值继续加大即可。");
+        u8"Kd：提高输出偏离预测运动趋势的代价，让纠偏更平稳；不直接对检测框跳动求导。");
     m_pidfGain[0]->setToolTip(aimSpeedTip);
     m_pidfGain[1]->setToolTip(aimSpeedTip);
     m_pidfGain[4]->setToolTip(overshootTip);
@@ -855,13 +841,9 @@ void HotkeyPage::buildBossAimCard()
     // 移动限幅: 实测它对追踪能力的影响比任何参数都直接 —— 因为它是硬约束,
     // 限幅不够时目标速度超过"限幅 x 帧率"就根本追不上。
     const QString limitTip = QString::fromUtf8(
-        u8"每一帧最多允许移动多少像素（鼠标计数）。0 = 不限。\n"
-        u8"⚠️ 这是硬约束：能追上的最高目标速度 = 本值 × 检测帧率。\n"
-        u8"实测需要的下限（120Hz 检测）：250px/s 目标需 2.1/帧、750px/s 需 6.3/帧、"
-        u8"950px/s（喷气级）需 7.9/帧；60Hz 检测时全部翻倍。\n"
-        u8"实测综合偏差：不限=12.1，限 15=13.3，限 8=17.2，限 5=38.7，限 3=80.1\n"
-        u8"—— 限 3 时连 550px/s 的滑铲都会掉到 157px 偏差。\n"
-        u8"建议：没有特别需要就保持 0；要限也请给足（120Hz 下 >=15，60Hz 下 >=30）。");
+        u8"每个控制输出周期最多下发的鼠标计数，0 表示不额外限幅。
+"
+        u8"限制作用于曲线整形和像素换算之后；被截掉的位移不会积累成待补发欠账。");
     m_pidfInteger[2]->setToolTip(limitTip);
     m_pidfInteger[3]->setToolTip(limitTip);
 

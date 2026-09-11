@@ -191,6 +191,10 @@ void Config::writeDefaultsInPlace()
     // Most members already initialized via C++ default initializers in the
     // header; this routine only fixes up the fields that want non-default
     // values when a brand-new config.ini is generated.
+    mouse_pixels_per_count_x = mouse_pixels_per_count_y = 1.0;
+    mouse_effect_delay_ms = 8.333333;
+    mouse_effect_uncertainty_ms = 2.0;
+    capture_age_offset_ms = 0.0;
     capture_device = "";
     capture_format = "";
     capture_width = 0;
@@ -303,6 +307,15 @@ bool Config::loadConfig(const std::string& filename)
     input_method = get_string("", "input_method", "MAKCU");
     if (input_method != "MAKCU" && input_method != "MAKCUNEW")
         input_method = "MAKCU";
+    const auto finiteSetting = [&](const char* key, double fallback, double low, double high) {
+        const double value = get_double("", key, fallback);
+        return std::isfinite(value) ? std::clamp(value, low, high) : fallback;
+    };
+    mouse_pixels_per_count_x = finiteSetting("mouse_pixels_per_count_x", 1.0, .01, 100.0);
+    mouse_pixels_per_count_y = finiteSetting("mouse_pixels_per_count_y", 1.0, .01, 100.0);
+    mouse_effect_delay_ms = finiteSetting("mouse_effect_delay_ms", 8.333333, 0, 100);
+    mouse_effect_uncertainty_ms = finiteSetting("mouse_effect_uncertainty_ms", 2, 0, 50);
+    capture_age_offset_ms = finiteSetting("capture_age_offset_ms", 0, 0, 100);
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
     // MAKCUNEW固件上电固定115200且不回任何二进制响应帧。
@@ -803,8 +816,8 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Apotheosis configuration.\n";
     file << "# Generated automatically; hand-edit with care.\n\n";
 
-    file << "# Capture  (只有「采集卡」一种方式; 参数必须来自设备真实能力探测,\n"
-            "# 组合对不上会直接报错, 不做任何替换)\n"
+    file << u8"# Capture  (只有「采集卡」一种方式; 参数必须来自设备真实能力探测,\n"
+            u8"# 组合对不上会直接报错, 不做任何替换)\n"
         << "capture_device = " << capture_device << "\n"
         << "capture_format = " << capture_format << "\n"
         << "capture_width = " << capture_width << "\n"
@@ -817,6 +830,11 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Hardware / input device\n"
         << "# MAKCU | MAKCUNEW\n"
         << "input_method = " << input_method << "\n"
+        << "mouse_pixels_per_count_x = " << mouse_pixels_per_count_x << "\n"
+        << "mouse_pixels_per_count_y = " << mouse_pixels_per_count_y << "\n"
+        << "mouse_effect_delay_ms = " << mouse_effect_delay_ms << "\n"
+        << "mouse_effect_uncertainty_ms = " << mouse_effect_uncertainty_ms << "\n"
+        << "capture_age_offset_ms = " << capture_age_offset_ms << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
         << "makcu_port = " << makcu_port << "\n"
         << "makcu_new_baudrate = " << makcu_new_baudrate << "\n"

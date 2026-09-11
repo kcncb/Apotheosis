@@ -185,6 +185,7 @@ void TargetKalman4x2Exact::update(
 void TargetTrackerExact::clear() noexcept {
     active = false;
     target = {};
+    last_measurement = {};
     target.related_class_id = -1;
     lost_frames = 0;
     mean = {};
@@ -238,6 +239,7 @@ void TargetTrackerExact::extract_related_transform(
 void TargetTrackerExact::initialize(
     const SelectedTarget104Abi& measurement) noexcept {
     clear();
+    last_measurement = measurement;
     target = measurement;
     target.target_flag = 0;
     target.target_kind_or_age = 0;
@@ -284,6 +286,7 @@ void TargetTrackerExact::update(
         return;
     }
 
+    last_measurement = *measurement;
     const std::int32_t previous_class = target.class_id;
     lost_frames = 0;
     SelectedTarget104Abi incoming = *measurement;

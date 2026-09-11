@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <cstring>
+#include <stdexcept>
 
 #include "inference_session.h"
 #include "thread_loops.h"
@@ -24,6 +25,7 @@
 #include "model_crypto/model_crypto.h"
 #include "auth/auth_state.h"
 #include "runtime/config_snapshot.h"
+#include "runtime/latency_probe.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> detection_resolution_changed;
@@ -41,18 +43,24 @@ std::thread start_guarded(const char* name, Func func, std::atomic<bool>* runnin
         try
         {
             func();
+            if (!session_stop_requested.load() && !shouldExit.load())
+            {
+                std::cerr << "[Session] Worker stopped unexpectedly: " << name << std::endl;
+                if (running) running->store(false, std::memory_order_release);
+                session_stop_requested.store(true);
+            }
         }
         catch (const std::exception& e)
         {
             std::cerr << "[Session] Thread '" << name << "' crashed: " << e.what() << std::endl;
             if (running) running->store(false, std::memory_order_release);
-            shouldExit = true;
+            session_stop_requested.store(true);
         }
         catch (...)
         {
             std::cerr << "[Session] Thread '" << name << "' crashed with unknown exception." << std::endl;
             if (running) running->store(false, std::memory_order_release);
-            shouldExit = true;
+            session_stop_requested.store(true);
         }
     });
 }
@@ -112,9 +120,9 @@ void publish_model_metadata(detector::ModelMetadata md)
         {
             if (md.input_width != md.input_height)
             {
-                std::cout << "[ModelInspector] 警告: 模型输入非方形 ("
+                std::cout << u8"[ModelInspector] 警告: 模型输入非方形 ("
                           << md.input_width << "x" << md.input_height
-                          << "), 检测尺寸按长边取值。" << std::endl;
+                          << u8"), 检测尺寸按长边取值。" << std::endl;
             }
             const int side = (std::max)(md.input_width, md.input_height);
             if (side >= 32 && config.detection_resolution != side)
@@ -122,7 +130,7 @@ void publish_model_metadata(detector::ModelMetadata md)
                 config.detection_resolution = side;
                 config_changed = true;
                 detection_resolution_changed.store(true);
-                std::cout << "[ModelInspector] 检测尺寸跟随模型输入: "
+                std::cout << u8"[ModelInspector] 检测尺寸跟随模型输入: "
                           << side << "x" << side << std::endl;
             }
         }
@@ -219,98 +227,117 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
         return false;
     }
 
-    current_backend_ = backend;
-    current_model_path_ = model_path;
-    last_error_.clear();
-
-    // 单机自用：跳过 oliver 密钥/心跳检查
-    if (backend == "DML")
+    // Reap a failed session before assigning new std::thread objects.
+    stop_locked();
+    if (shouldExit.load()) { last_error_ = "application is shutting down"; return false; }
+    try
     {
-        auto dml = std::make_unique<DirectMLDetector>();
-        if (!dml->initialize(model_path))
+        current_backend_ = backend;
+        current_model_path_ = model_path;
+        last_error_.clear();
+
+        // 单机自用：跳过 oliver 密钥/心跳检查
+        if (backend == "DML")
         {
-            last_error_ = "DirectML detector initialization failed";
-            detector_owned_.reset();
-            detector_raw_ = nullptr;
+            auto dml = std::make_unique<DirectMLDetector>();
+            if (!dml->initialize(model_path))
+            {
+                last_error_ = "DirectML detector initialization failed";
+                detector_owned_.reset();
+                detector_raw_ = nullptr;
+                return false;
+            }
+            detector_raw_ = dml.get();
+            detector_owned_ = std::move(dml);
+            dml_detector = static_cast<DirectMLDetector*>(detector_raw_);
+            g_detector = detector_raw_;
+        }
+        else if (backend == "TRT")
+        {
+            if (!is_tensorrt_available())
+            {
+                last_error_ = "TensorRT runtime not available: " + probe_cuda_runtime().failure_reason;
+                return false;
+            }
+            if (!trt_detector.initialize(model_path))
+            {
+                last_error_ = "TensorRT detector initialization failed";
+                return false;
+            }
+            detector_raw_ = &trt_detector;
+            g_detector = detector_raw_;
+        }
+        else
+        {
+            last_error_ = "unknown backend: " + backend;
             return false;
         }
-        detector_raw_ = dml.get();
-        detector_owned_ = std::move(dml);
-        dml_detector = static_cast<DirectMLDetector*>(detector_raw_);
-        g_detector = detector_raw_;
-    }
-    else if (backend == "TRT")
-    {
-        if (!is_tensorrt_available())
+
+        publish_model_metadata(detector_raw_);
+
+        createInputDevices();
+        assignInputDevices();
+        input_method_changed.store(false);
+
+        detection_resolution_changed.store(true);
+        detector_model_changed.store(false);
+
+        session_stop_requested.store(false);
+
+        int capture_resolution = 320;
         {
-            last_error_ = "TensorRT runtime not available: " + probe_cuda_runtime().failure_reason;
-            return false;
+            std::lock_guard<std::recursive_mutex> config_lock(configMutex);
+            capture_resolution = runtime_config::read()->detection_resolution;
         }
-        if (!trt_detector.initialize(model_path))
-        {
-            last_error_ = "TensorRT detector initialization failed";
-            return false;
-        }
-        detector_raw_ = &trt_detector;
-        g_detector = detector_raw_;
+        running_.store(true, std::memory_order_release);
+
+        capture_thread_ = start_guarded("CaptureThread", [capture_resolution] {
+            captureThread(capture_resolution, capture_resolution);
+        }, &running_);
+
+        detector_thread_ = start_guarded("DetectorThread", [] {
+            if (g_detector)
+                g_detector->inferenceThread();
+        }, &running_);
+
+        mouse_thread_ = start_guarded("MouseThread", [this] {
+    #ifdef _WIN32
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    #endif
+            mouseThreadFunction(mouse_driver_);
+        }, &running_);
+
+        // 单机自用：不再启动鉴权心跳线程
+        std::cout << "[Session] Started with backend=" << backend
+                  << " model=" << model_path << std::endl;
+        return true;
     }
-    else
+    catch (const std::exception& e)
     {
-        last_error_ = "unknown backend: " + backend;
-        return false;
+        last_error_ = e.what();
     }
-
-    publish_model_metadata(detector_raw_);
-
-    createInputDevices();
-    assignInputDevices();
-    input_method_changed.store(false);
-
-    detection_resolution_changed.store(true);
-    detector_model_changed.store(false);
-
-    session_stop_requested.store(false);
-
-    int capture_resolution = 320;
+    catch (...)
     {
-        std::lock_guard<std::recursive_mutex> config_lock(configMutex);
-        capture_resolution = runtime_config::read()->detection_resolution;
+        last_error_ = "unknown error while starting inference";
     }
-    running_.store(true, std::memory_order_release);
+    stop_locked();
+    return false;
+}
 
-    capture_thread_ = start_guarded("CaptureThread", [capture_resolution] {
-        captureThread(capture_resolution, capture_resolution);
-    }, &running_);
-
-    detector_thread_ = start_guarded("DetectorThread", [] {
-        if (g_detector)
-            g_detector->inferenceThread();
-    }, &running_);
-
-    mouse_thread_ = start_guarded("MouseThread", [this] {
-#ifdef _WIN32
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-#endif
-        mouseThreadFunction(mouse_driver_);
-    }, &running_);
-
-    // 单机自用：不再启动鉴权心跳线程
-    std::cout << "[Session] Started with backend=" << backend
-              << " model=" << model_path << std::endl;
-    return true;
+std::string InferenceSession::last_error() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_error_;
 }
 
 void InferenceSession::stop()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_.load(std::memory_order_acquire) &&
-        !capture_thread_.joinable() &&
-        !detector_thread_.joinable() &&
-        !mouse_thread_.joinable())
-    {
-        return;
-    }
+    stop_locked();
+}
 
+void InferenceSession::stop_locked()
+{
     session_stop_requested.store(true);
     if (detector_raw_)
         detector_raw_->requestExit();
@@ -318,6 +345,8 @@ void InferenceSession::stop()
     frameCV.notify_all();
 
     join_all_locked();
+    mouse_driver_.clearQueuedMoves();
+    mouse_driver_.releaseLeftButton();
 
     g_detector = nullptr;
     dml_detector = nullptr;
@@ -325,6 +354,22 @@ void InferenceSession::stop()
     detector_owned_.reset();
     publish_model_metadata(nullptr);
 
+    {
+        std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
+        detectionBuffer.boxes.clear();
+        detectionBuffer.precise_boxes.clear();
+        detectionBuffer.classes.clear();
+        detectionBuffer.confidences.clear();
+        detectionBuffer.bumpVersionLocked();
+    }
+    {
+        std::lock_guard<std::mutex> lock(frameMutex);
+        latestFrame.release();
+        frameQueue.clear();
+    }
+    captureFps.store(0);
+    captureSourceFps.store(0);
+    runtime::latency::reset();
     running_.store(false, std::memory_order_release);
     std::cout << "[Session] Stopped." << std::endl;
 }
@@ -340,13 +385,14 @@ void InferenceSession::join_all_locked()
         }
         else if (t.joinable())
         {
-            std::cout << "[Session] Detaching " << name << " from its own thread." << std::endl;
-            t.detach();
+            // Session operations belong to the coordinator, never its workers.
+            // Detaching here would let teardown free state still in use.
+            throw std::logic_error("session teardown cannot run on a pipeline worker");
         }
     };
 
-    safe_join("capture", capture_thread_);
     safe_join("detector", detector_thread_);
+    safe_join("capture", capture_thread_);
     safe_join("mouse", mouse_thread_);
     safe_join("heartbeat", heartbeat_thread_);
 }

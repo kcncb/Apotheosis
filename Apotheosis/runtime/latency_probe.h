@@ -4,42 +4,23 @@
 // 端到端延迟探针 (End-to-end latency probe)
 // =============================================================================
 //
-// 为什么需要它
-// ------------
-// 原来的 DetectionBuffer::stamp 打的是【推理完成、结果发布】的时刻, 不是
-// 【像素被采集】的时刻。于是整条链路里最贵的几段 —— 采集卡、H264 解码、
-// 预处理、推理本体 —— 从未被测量过, 系统对它们完全是瞎的。
+// 时间边界 (均使用 steady_clock, 随具体帧传递):
+//   T0: Media Foundation OnReadSample 回调入口, 早于样本拷贝/解码/转色。
+//       markCapture(source_ns) 在后端交帧时接收原始戳, 不重打起点。
+//   T1: detector 真正从输入槽取出该帧 (markDetectorConsume)。
+//   T2: 该帧推理完成、发布检测结果。
+//   T3: 控制环消费该结果。T4: 该帧对应的驱动发送调用完成。
+//   capture_wait=T1-T0: 回调交接、样本拷贝、解码、转色、掩码、输入槽等待。
+//   inference=T2-T1: 预处理、推理、后处理与 NMS。
+//   total=T3-T0; e2e=T4-T0。统计不代表显示画面响应或硬件执行完成。
 //
-// 后果: "预测速度"(lr_x/lr_y) 只能按经验手调。采集卡/分辨率/模型/fps 一变,
-// 该值就不再正确 —— 欠补则准星恒定落后移动目标 (v × L), 过补则来回荡。
+// 设备侧帧龄单列: 驱动 DeviceTimestamp 到 OnReadSample 回调的时间。
+// 只有驱动提供可解释的时钟时才显示; 缺失、无效或过期均为 -1。
+// 该字段与 total/E2E 的样本和 EMA 窗口不同, 不能简单相加当作逐帧真值。
+// 当前探针不覆盖设备打戳之前的 HDMI 流水线, 也不覆盖鼠标硬件/游戏响应。
+// 小设备帧龄不能单独证明卡芯片很快或驱动完全没有开销。
 //
-// 本探针给帧打上【采集时刻】时间戳, 一路带到 aim loop, 把总延迟按阶段拆开:
-//
-//   T0 markCapture()          采集后端产出一帧 (最早可观测时刻)
-//   T1 markSubmit()           detector 取走该帧
-//   T2 markInferenceDone()    推理完成、检测结果发布
-//   T3 markAimConsume()       aim loop 消费该检测
-//   T4 markMoveSent()         位移真正写出到鼠标
-//
-//   capture_wait   = T1 - T0   帧在采集侧排队/下载/掩码的耗时
-//   inference      = T2 - T1   预处理 + 推理 + NMS
-//   publish_to_aim = T3 - T2   发布 -> 控制环唤醒消费
-//   aim_to_move    = T4 - T3   控制环 -> HID 写出
-//   total          = T3 - T0   ★ 真正决定"准星落后多少"的那个数
-//   e2e            = T4 - T0   全链路下界
-//
-// 不可观测的部分 (必须知道, 否则会误判)
-// ------------------------------------
-// 采集卡内部 HDMI -> USB 的流水线延迟 (典型 20-60ms) 在 PC 侧【物理上不可
-// 测量】: 帧进到进程时, 卡里那段已经花掉了。本探针给出的 total/e2e 是【下界】。
-// 真值需要用 240/480fps 手机同时拍屏幕与鼠标 LED, 数帧差 ÷ 帧率。
-// 那个差额是一个近乎恒定的常数, 就是你在配置里需要手工兜住的部分。
-//
-// 开销
-// ----
-// 全无锁、零分配。每帧写 3-4 个原子量 + 一次短临界区, 量级 ~100ns/帧,
-// 相对 5-30ms 的帧预算可以忽略。可长期常开。
-//
+// 统计由原子量和互斥量保护; 日志线程负责格式化/落盘。实际开销需实机测量。
 // =============================================================================
 
 #include <atomic>
@@ -89,11 +70,10 @@ inline CaptureStamp& captureStamp()
     return s;
 }
 
-// 采集后端刚产出一帧时调用。这是我们在 PC 侧能打的最早的时间点。
-// 返回采集时刻 (纳秒), 调用方顺手喂给 noteCaptureForStats()。
-inline int64_t markCapture()
+// 后端交帧时传入原始回调戳; 无原始戳的调用方退回当前时刻。
+inline int64_t markCapture(int64_t source_ns = 0)
 {
-    const int64_t ns = nowNs();
+    const int64_t ns = source_ns > 0 ? source_ns : nowNs();
     auto& s = captureStamp();
     s.ns.store(ns, std::memory_order_release);
     s.seq.fetch_add(1, std::memory_order_relaxed);
@@ -111,6 +91,34 @@ inline uint64_t loadCaptureSeq()
 }
 
 // -----------------------------------------------------------------------------
+// 设备侧帧龄独立于回调后的 T0..T4。-1 表示缺失/无效/过期。
+// -----------------------------------------------------------------------------
+inline std::atomic<int>& deviceFrameAgeUs()
+{
+    static std::atomic<int> v{ -1 };
+    return v;
+}
+
+inline std::atomic<int64_t>& deviceAgeUpdateNs()
+{
+    static std::atomic<int64_t> v{0};
+    return v;
+}
+
+inline void noteDeviceFrameAgeUs(int us)
+{
+    deviceFrameAgeUs().store(us, std::memory_order_relaxed);
+    deviceAgeUpdateNs().store(nowNs(), std::memory_order_release);
+}
+
+inline int loadDeviceFrameAgeUs()
+{
+    if (nowNs() - deviceAgeUpdateNs().load(std::memory_order_acquire) > 2'000'000'000)
+        return -1;
+    return deviceFrameAgeUs().load(std::memory_order_relaxed);
+}
+
+// -----------------------------------------------------------------------------
 // 跨线程的一次性交接量 (detector -> aim loop)
 // -----------------------------------------------------------------------------
 inline std::atomic<int64_t>& submitNs()
@@ -119,10 +127,7 @@ inline std::atomic<int64_t>& submitNs()
     return v;
 }
 
-// detector 取帧时把该帧的采集戳一并存下, 推理线程发布时取回写进
-// DetectionBuffer::frame_stamp_ns。走独立的原子量是为了不必给
-// TrtDetector / DirectMLDetector 的类定义加成员 (跨线程, 但 processFrame
-// 与推理线程之间已有 inferenceMutex/frameReady 的 happens-before)。
+// 单线程自测的兼容槽。生产检测器必须使用随帧携带的 SubmitStamp。
 inline std::atomic<int64_t>& submittedCaptureNs()
 {
     static std::atomic<int64_t> v{0};
@@ -146,6 +151,7 @@ struct SubmitStamp
 {
     int64_t capture_ns = 0;   // T0 采集时刻
     int64_t submit_ns  = 0;   // T1 detector 取帧时刻
+    uint64_t sequence = 0;
 };
 
 // -----------------------------------------------------------------------------
@@ -207,6 +213,9 @@ struct Shared
     double     capture_interval_ms   = 0.0;
     int64_t    prev_capture_ns       = 0;
 
+    double     engine_inference_ms   = -1.0;
+    int64_t    engine_update_ns      = 0;
+    int64_t    reset_ns              = 0;
     bool       enabled               = true;
 };
 
@@ -241,38 +250,32 @@ inline void noteCaptureForStats(int64_t ns)
 // -----------------------------------------------------------------------------
 inline SubmitStamp markSubmitStamp()
 {
-    SubmitStamp out;
-    out.capture_ns = loadCaptureNs();
-    out.submit_ns  = nowNs();
-    submitNs().store(out.submit_ns, std::memory_order_release);
-    submittedCaptureNs().store(out.capture_ns, std::memory_order_release);
-
-    auto& sh = shared();
-    double wait_ms = 0.0;
-    if (out.capture_ns != 0) wait_ms = nsToMs(out.submit_ns - out.capture_ns);
-
-    // 一次临界区完成全部统计写入。
-    //
-    // 旧实现在这里分了两次: `stages[kCaptureWait].push()` 写在【锁外】, 而
-    // snapshot() 是持锁读同一个数组 —— 那是一处真实的数据竞争, 污染的恰好
-    // 就是"采集->取帧"这个排查延迟时最需要看的数字。合并进一把锁即修好,
-    // 顺带还把每帧两次加锁减成一次。
-    std::lock_guard<std::mutex> lk(sh.mu);
-    sh.stages[kCaptureWait].push(wait_ms);
-
-    // 采集序号跳变 => detector 没跟上, 中间有帧被覆盖丢弃。
-    const uint64_t seq = loadCaptureSeq();
-    if (seq > sh.last_capture_seq_seen + 1)
-        sh.counters.dropped_capture += (seq - sh.last_capture_seq_seen - 1);
-    sh.last_capture_seq_seen = seq;
-    sh.last_capture_ns_seen  = out.capture_ns;
-    return out;
+    // Called by the capture producer. Counters are updated only when inference
+    // actually removes the frame from its latest-only input slot.
+    return {loadCaptureNs(), 0, loadCaptureSeq()};
 }
 
-// 兼容入口: 只关心采集戳的调用方(自测/DML)仍按原样使用。
+inline void markDetectorConsume(SubmitStamp& stamp)
+{
+    stamp.submit_ns = nowNs();
+    submitNs().store(stamp.submit_ns, std::memory_order_release);
+    submittedCaptureNs().store(stamp.capture_ns, std::memory_order_release);
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    if (stamp.capture_ns > 0)
+        sh.stages[kCaptureWait].push(nsToMs(stamp.submit_ns - stamp.capture_ns));
+    if (stamp.sequence > sh.last_capture_seq_seen + 1)
+        sh.counters.dropped_capture += stamp.sequence - sh.last_capture_seq_seen - 1;
+    sh.last_capture_seq_seen = stamp.sequence;
+    sh.last_capture_ns_seen = stamp.capture_ns;
+}
+
+// Single-thread compatibility entry used by the standalone probe tests.
 inline int64_t markSubmit()
 {
-    return markSubmitStamp().capture_ns;
+    auto stamp = markSubmitStamp();
+    markDetectorConsume(stamp);
+    return stamp.capture_ns;
 }
 
 // -----------------------------------------------------------------------------
@@ -280,7 +283,7 @@ inline int64_t markSubmit()
 //
 // submit_ns: 本次发布所依据那一帧的 T1(取帧时刻)。TrtDetector 必须把该帧在
 // 取走时记下的 T1 传进来 —— 不能让它自己去读全局槽, 那个槽此时可能已经是
-// 下一帧的(见 SubmitStamp 注释)。传 -1 表示"沿用旧的全局槽语义", 供 DML 与
+// 下一帧的(见 SubmitStamp 注释)。传 -1 表示"沿用旧的全局槽语义", 仅供单线程
 // 自测使用。
 // -----------------------------------------------------------------------------
 inline void markInferenceDone(int64_t submit_ns = -1)
@@ -308,33 +311,36 @@ inline void noteDetectionSeen()
 }
 
 // -----------------------------------------------------------------------------
-// aim loop 侧: 消费了一条检测。
-//   frame_capture_ns - DetectionBuffer::frame_stamp_ns (可能为 0 = 无戳)
-//   publish_ns       - DetectionBuffer::stamp
-//   queue_ms         - 现有 g_mouse_queue_latency_ms, 用于结算 T4
+// T3: return the actual consume instant so the move command can carry it.
+// A frame with no movement contributes to total, but not to send latency/E2E.
 // -----------------------------------------------------------------------------
-inline void markAimConsume(int64_t frame_capture_ns, int64_t publish_ns,
-                           double queue_ms)
+inline int64_t markAimConsume(int64_t frame_capture_ns, int64_t publish_ns)
 {
     auto& sh = shared();
     const int64_t now = nowNs();
-
     std::lock_guard<std::mutex> lk(sh.mu);
-    sh.stages[kPublishToAim].push(
-        publish_ns != 0 ? nsToMs(now - publish_ns) : 0.0);
-
+    sh.stages[kPublishToAim].push(publish_ns != 0 ? nsToMs(now - publish_ns) : 0.0);
     if (frame_capture_ns == 0)
     {
         sh.counters.stale_consumes++;
-        return;
+        return now;
     }
-
-    const double total_ms = nsToMs(now - frame_capture_ns);
-    sh.stages[kTotal].push(total_ms);
-    sh.stages[kAimToMove].push(queue_ms);
-    if (queue_ms > 0.0)
-        sh.stages[kEndToEnd].push(total_ms + queue_ms);
+    sh.stages[kTotal].push(nsToMs(now - frame_capture_ns));
     sh.counters.frames_consumed++;
+    return now;
+}
+
+// T4: called only when this command's driver send has completed successfully.
+// This does not acknowledge physical mouse execution or display response.
+inline void markMoveSent(int64_t frame_capture_ns, int64_t aim_ns, int64_t sent_ns = 0)
+{
+    if (!sent_ns) sent_ns = nowNs();
+    if (frame_capture_ns <= 0 || aim_ns < frame_capture_ns || sent_ns < aim_ns) return;
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    if (frame_capture_ns < sh.reset_ns) return; // a late command from an old session
+    sh.stages[kAimToMove].push(nsToMs(sent_ns - aim_ns));
+    sh.stages[kEndToEnd].push(nsToMs(sent_ns - frame_capture_ns));
 }
 
 // -----------------------------------------------------------------------------
@@ -348,10 +354,20 @@ struct Snapshot
     uint64_t capture_frames      = 0;
     uint64_t dropped_capture     = 0;
     uint64_t stale_consumes      = 0;
+    int      device_frame_age_us = -1;
     double   capture_fps         = 0.0;
     double   capture_interval_ms = 0.0;
     Stage    stages[kStageCount];
+    double   engine_inference_ms = -1.0;
 };
+
+inline void noteEngineInferenceMs(double ms)
+{
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    sh.engine_inference_ms = ms;
+    sh.engine_update_ns = nowNs();
+}
 
 inline Snapshot snapshot()
 {
@@ -359,11 +375,14 @@ inline Snapshot snapshot()
     Snapshot out;
     std::lock_guard<std::mutex> lk(sh.mu);
     out.enabled             = sh.enabled;
+    out.engine_inference_ms = nowNs() - sh.engine_update_ns <= 2'000'000'000
+        ? sh.engine_inference_ms : -1.0;
     out.frames_consumed     = sh.counters.frames_consumed;
     out.detections_seen     = sh.counters.detections_seen;
     out.capture_frames      = sh.counters.capture_frames;
     out.dropped_capture     = sh.counters.dropped_capture;
     out.stale_consumes      = sh.counters.stale_consumes;
+    out.device_frame_age_us = loadDeviceFrameAgeUs();
     out.capture_interval_ms = sh.capture_interval_ms;
     out.capture_fps = (sh.capture_interval_ms > 0.0)
                           ? 1000.0 / sh.capture_interval_ms
@@ -384,6 +403,10 @@ inline void reset()
     sh.last_capture_ns_seen  = 0;
     sh.capture_interval_ms   = 0.0;
     sh.prev_capture_ns       = 0;
+    sh.engine_inference_ms   = -1.0;
+    sh.engine_update_ns      = 0;
+    sh.reset_ns              = nowNs();
+    noteDeviceFrameAgeUs(-1);
 }
 
 inline void setEnabled(bool on)
@@ -420,33 +443,39 @@ inline std::string formatLines(bool detail)
     };
 
     if (!s.enabled)
-        return "延迟探针: 已关闭\n";
+        return u8"延迟探针: 已关闭\n";
 
     if (s.frames_consumed == 0)
-        return "延迟探针: 等待数据...\n";
+        return u8"延迟探针: 等待数据...\n";
 
-    add("采集 %.1f fps (%.2f ms/帧)", s.capture_fps, s.capture_interval_ms);
-    add("总延迟 %.1f ms  (均 %.1f / 峰 %.1f)",
+    add(u8"采集 %.1f fps (%.2f ms/帧)", s.capture_fps, s.capture_interval_ms);
+    add(u8"总延迟 %.1f ms  (均 %.1f / 峰 %.1f)",
         s.stages[kTotal].last_ms, s.stages[kTotal].ema_ms,
         s.stages[kTotal].max_ms);
 
     if (detail)
     {
-        add("  采集->取帧  %5.1f ms", s.stages[kCaptureWait].last_ms);
-        add("  推理        %5.1f ms", s.stages[kInference].last_ms);
-        add("  发布->消费  %5.1f ms", s.stages[kPublishToAim].last_ms);
-        add("  消费->写出  %5.1f ms", s.stages[kAimToMove].last_ms);
-        add("  全链路      %5.1f ms",
-            s.stages[kEndToEnd].last_ms > 0.0 ? s.stages[kEndToEnd].last_ms
-                                              : s.stages[kTotal].last_ms);
+        add(u8"  采集->取帧  %5.1f ms", s.stages[kCaptureWait].last_ms);
+        add(u8"  推理        %5.1f ms", s.stages[kInference].last_ms);
+        add(u8"  发布->消费  %5.1f ms", s.stages[kPublishToAim].last_ms);
+        add(u8"  消费->写出  %5.1f ms", s.stages[kAimToMove].last_ms);
+        if (s.stages[kEndToEnd].n > 0)
+            add(u8"  全链路      %5.1f ms", s.stages[kEndToEnd].last_ms);
+        else
+            addLine(u8"  全链路      -- (暂无成功发送样本)");
+        // 独立诊断值; 不计入上述 T0..T4, 也不是卡芯片延迟。
+        if (s.device_frame_age_us >= 0)
+            add(u8"  设备侧帧龄  %5.1f ms  (驱动/MF 内部)", s.device_frame_age_us / 1000.0);
+        else
+            addLine(u8"  设备侧帧龄  --      (时间戳缺失、无效或过期)");
         if (s.dropped_capture > 0)
-            add("  !! detector 跟不上, 已丢 %llu 帧",
+            add(u8"  !! detector 跟不上, 已丢 %llu 帧",
                 static_cast<unsigned long long>(s.dropped_capture));
-        addLine("  (不含采集卡内部延迟, 典型 +20~60 ms)");
+        addLine(u8"  (以上均不含采集卡芯片内部 HDMI->USB, 当前探针未覆盖)");
     }
     else
     {
-        add("  推理 %.1f | 消费 %.1f | 写出 %.1f",
+        add(u8"  推理 %.1f | 消费 %.1f | 写出 %.1f",
             s.stages[kInference].last_ms, s.stages[kPublishToAim].last_ms,
             s.stages[kAimToMove].last_ms);
     }
@@ -468,9 +497,9 @@ inline std::vector<std::string> formatLinesAscii(bool detail)
     if (s.frames_consumed == 0) { out.push_back("latency probe: waiting..."); return out; }
 
     std::snprintf(buf, sizeof(buf), "E2E %.1f ms  (avg %.1f / pk %.1f)",
-                  s.stages[kEndToEnd].last_ms, s.stages[kEndToEnd].ema_ms,
+                  s.stages[kEndToEnd].n > 0 ? s.stages[kEndToEnd].last_ms : -1.0, s.stages[kEndToEnd].ema_ms,
                   s.stages[kEndToEnd].max_ms);
-    out.push_back(buf);
+    out.push_back(s.stages[kEndToEnd].n > 0 ? buf : "E2E n/a (no successful send)");
 
     std::snprintf(buf, sizeof(buf), "  cap->det %5.1f  infer %5.1f",
                   s.stages[kCaptureWait].last_ms, s.stages[kInference].last_ms);
@@ -490,7 +519,17 @@ inline std::vector<std::string> formatLinesAscii(bool detail)
                       static_cast<unsigned long long>(s.frames_consumed),
                       static_cast<unsigned long long>(s.dropped_capture));
         out.push_back(buf);
-        out.push_back("  (excl. cap-card internal 20-60ms)");
+        if (s.device_frame_age_us >= 0)
+        {
+            std::snprintf(buf, sizeof(buf), "  devq %.1f ms (driver/MF, pre-hand-off)",
+                          s.device_frame_age_us / 1000.0);
+            out.push_back(buf);
+        }
+        else
+        {
+            out.push_back("  devq n/a (timestamp unavailable/stale)");
+        }
+        out.push_back("  (excl. card-internal HDMI->USB)");
     }
     return out;
 }
@@ -570,16 +609,20 @@ inline std::string timestampNow()
 inline std::string summaryLine()
 {
     const Snapshot s = snapshot();
-    char buf[320];
+    char buf[400];
     std::snprintf(
         buf, sizeof(buf),
         "E2E=%.2f avg=%.2f pk=%.2f | cap2det=%.2f infer=%.2f pub2aim=%.2f "
-        "aim2mv=%.2f total=%.2f | src=%.1ffps frames=%llu seen=%llu dropped=%llu stale=%llu",
-        s.stages[kEndToEnd].last_ms, s.stages[kEndToEnd].ema_ms,
+        "aim2mv=%.2f total=%.2f | devq=%.2f | src=%.1ffps frames=%llu seen=%llu "
+        "dropped=%llu stale=%llu",
+        s.stages[kEndToEnd].n > 0 ? s.stages[kEndToEnd].last_ms : -1.0, s.stages[kEndToEnd].ema_ms,
         s.stages[kEndToEnd].max_ms,
         s.stages[kCaptureWait].ema_ms, s.stages[kInference].ema_ms,
         s.stages[kPublishToAim].ema_ms, s.stages[kAimToMove].ema_ms,
         s.stages[kTotal].ema_ms,
+        // devq = 设备侧帧龄(驱动/MF 在把帧交给我们之前花掉的时间)。-1 = 该驱动
+        // 不提供 sample 时间戳; 它是"卡本身慢"与"对接方式慢"的分界线。
+        s.device_frame_age_us >= 0 ? s.device_frame_age_us / 1000.0 : -1.0,
         s.capture_fps, static_cast<unsigned long long>(s.frames_consumed),
         static_cast<unsigned long long>(s.detections_seen),
         static_cast<unsigned long long>(s.dropped_capture),
@@ -623,7 +666,7 @@ inline void logWorker(FileLogConfig cfg)
             char buf[200];
             std::snprintf(buf, sizeof(buf),
                           "EVENT dropped_detector +%llu (total %llu, capture %llu) "
-                          "-> detector 跟不上, 中间帧被覆盖丢弃",
+                          u8"-> detector 跟不上, 中间帧被覆盖丢弃",
                           static_cast<unsigned long long>(s.dropped_capture - last_dropped),
                           static_cast<unsigned long long>(s.dropped_capture),
                           static_cast<unsigned long long>(s.capture_frames));
@@ -635,7 +678,7 @@ inline void logWorker(FileLogConfig cfg)
             char buf[200];
             std::snprintf(buf, sizeof(buf),
                           "EVENT stale_consume +%llu (total %llu) "
-                          "-> 控制环读到了无采集戳的数据",
+                          u8"-> 控制环读到了无采集戳的数据",
                           static_cast<unsigned long long>(s.stale_consumes - last_stale),
                           static_cast<unsigned long long>(s.stale_consumes));
             logLine(buf);
@@ -678,8 +721,8 @@ inline void logWorker(FileLogConfig cfg)
                     "IDLE consumed=+0 seen=+%llu -> %s",
                     static_cast<unsigned long long>(seen_delta),
                     seen_delta > 0
-                        ? "检测仍在产帧, 仅是瞄准键未按下 (采集/推理正常)"
-                        : "采集或推理确实已停更");
+                        ? u8"检测仍在产帧, 仅是瞄准键未按下 (采集/推理正常)"
+                        : u8"采集或推理确实已停更");
                 logLine(buf);
             }
             last_seen = s.detections_seen;
@@ -721,16 +764,18 @@ inline bool startFileLog(const FileLogConfig& cfg = FileLogConfig{})
         return false;
     }
     probe << "# Apotheosis end-to-end latency log" << '\n'
-          << "# T0=frame enters process(capture) T1=detector picks up "
+          << "# T0=MF sample callback entry T1=detector dequeues frame "
              "T2=inference published T3=aim loop consumes T4=move sent" << '\n'
-          << "# total = T3-T0   <- THIS is the L in lag = v * L" << '\n'
+          << "# total = T3-T0 (software measurement age after MF callback)" << '\n'
           << "# e2e   = T4-T0" << '\n'
           << "# stages: cap2det=T1-T0  infer=T2-T1  pub2aim=T3-T2  aim2mv=T4-T3" << '\n'
-          << "# unit: ms. EXCLUDES capture-card internal HDMI->USB (typ 20-60ms), "
-             "so this is a LOWER BOUND." << '\n'
+          << u8"# devq = 设备侧帧龄: 驱动/MF 把帧交给我们之前花掉的时间. -1 = 驱动未提供"
+             u8"/有效/新鲜时间戳. 不用于单独判定卡芯片快慢" << '\n'
+          << "# unit: ms. EXCLUDES the capture card's internal HDMI->USB pipeline "
+             "(not measurable in software), so this is a LOWER BOUND." << '\n'
           << "# line kinds: periodic summary | EVENT drop/stale | SPIKE | IDLE" << '\n'
-          << "# frames=aim loop 消费过的批数  seen=aim loop 看到的新检测批数(含未消费)" << '\n'
-          << "# seen 涨而 frames 不涨 = 瞄准键未按下(正常); 两者都不涨 = 采集/推理停更" << '\n'
+          << u8"# frames=aim loop 消费过的批数  seen=aim loop 看到的新检测批数(含未消费)" << '\n'
+          << u8"# seen 涨而 frames 不涨 = 瞄准键未按下(正常); 两者都不涨 = 采集/推理停更" << '\n'
           << "# started: " << detail::timestampNow() << '\n';
     probe.flush();
     probe.close();

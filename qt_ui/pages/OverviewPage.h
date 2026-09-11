@@ -18,11 +18,14 @@ public:
 
     void setFps(double fps);
     void setSourceFps(double fps);
+    // 负数 = 尚无数据(显示 "--")。数值来自端到端探针, 见 runtime/latency_probe.h。
     void setInferenceLatency(double ms);
-    void setTotalLatency(double ms);
+    void setTotalLatency(double ms);   // 端到端下界: 采集产出 -> 位移写出
     void setDetectionCount(int boxes, int locked);
-    void setReceiverDiagnostics(int senderSpan, int wireLost, int partialLost,
-                                int kernelDropped, int ifDropped);
+    // 采集链路分段: 设备帧龄 / 采集→取帧 / 推理 / 发布→消费 / 全链路, 单位 ms。
+    // deviceAgeUs < 0 = 该驱动不提供设备时间戳。
+    void setCaptureChainDiagnostics(int deviceAgeUs, double capToDetectMs, double inferMs,
+                                    double publishToAimMs, double endToEndMs);
     void setSessionState(bool running, const QString& model,
                          const QString& backend, const QString& uptime);
 
@@ -44,11 +47,11 @@ private:
     TelemetryChart* m_chart{};
     QLabel* m_chartValue{};
 
-    QLabel* m_rxSender{};
-    QLabel* m_rxWire{};
-    QLabel* m_rxPartial{};
-    QLabel* m_rxKernel{};
-    QLabel* m_rxIf{};
+    QLabel* m_diagDeviceAge{};
+    QLabel* m_diagCapToDetect{};
+    QLabel* m_diagInfer{};
+    QLabel* m_diagPublishToAim{};
+    QLabel* m_diagEndToEnd{};
 
     bool m_running = false;
 };

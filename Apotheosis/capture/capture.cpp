@@ -357,6 +357,7 @@ private:
                 // cudaMemcpy2D,worker 自己阻塞、不影响 capture loop。
                 cv::Mat host;
                 gpu.download(host);
+                const auto capture_ns = gpu.captureNs();
                 gpu.release(); // 尽早释放 GPU 引用,detector 那条引用还在,
                                // 但本线程持有就可能延后 buffer 复用。
 
@@ -372,7 +373,7 @@ private:
                 frameCV.notify_one();
 
                 if (needCrosshair)
-                    crosshair_runtime::process_frame(host);
+                    crosshair_runtime::process_frame(host, capture_ns);
             }
             catch (const std::exception& e)
             {
@@ -473,6 +474,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 {
     try
     {
+        detection_resolution_changed.exchange(false);
+        capture_method_changed.exchange(false);
         CaptureThreadConfig currentCfg = SnapshotCaptureConfig();
         if (currentCfg.verbose)
             std::cout << "[Capture] OpenCV version: " << CV_VERSION << std::endl;
@@ -572,6 +575,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         {
             clearCaptureFrames();
             clearDetections();
+            captureFps.store(0);
+            captureSourceFps.store(0);
+            runtime::latency::noteDeviceFrameAgeUs(-1);
             frameCV.notify_one();
         };
 
@@ -685,25 +691,14 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         struct CaptureCudaGuard
         {
             cudaStream_t stream{ nullptr };
-            std::array<cudaEvent_t, 8> maskEvents{};
-            size_t maskEventIndex{ 0 };
+            GpuReadyEventPool<8> maskEvents;
             CaptureCudaGuard()
             {
                 cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-                for (auto& event : maskEvents)
-                    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
             }
             ~CaptureCudaGuard()
             {
-                for (auto& event : maskEvents)
-                    if (event) cudaEventDestroy(event);
-                if (stream)    cudaStreamDestroy(stream);
-            }
-            cudaEvent_t nextMaskEvent()
-            {
-                cudaEvent_t event = maskEvents[maskEventIndex];
-                maskEventIndex = (maskEventIndex + 1) % maskEvents.size();
-                return event;
+                if (stream) cudaStreamDestroy(stream);
             }
         };
         CaptureCudaGuard captureCuda;
@@ -719,18 +714,19 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
         {
             try
             {
+                const bool resolutionChanged = detection_resolution_changed.exchange(false);
+                const bool captureChanged = capture_method_changed.exchange(false);
+                const bool fpsChanged = capture_fps_changed.exchange(false);
                 currentCfg = SnapshotCaptureConfig();
 
-            if (capture_fps_changed.exchange(false))
+            if (fpsChanged)
             {
                 updateFrameDuration(currentCfg.capture_fps);
                 // 事件驱动后端(MF)跳过 limiter,改由后端在解码前按此上限丢帧降采样。
                 if (capturer) capturer->SetTargetFps(currentCfg.capture_fps);
             }
 
-            const bool needsReinit =
-                detection_resolution_changed.exchange(false) ||
-                capture_method_changed.exchange(false);
+            const bool needsReinit = resolutionChanged || captureChanged;
 
             if (needsReinit)
             {
@@ -752,6 +748,11 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     std::cout << "[Capture] Reinitialized capture backend." << std::endl;
             }
 
+            if (capturer && capturer->HasStopped())
+            {
+                capturer.reset();
+                setCaptureUnavailable();
+            }
             if (!capturer)
             {
                 const auto now = std::chrono::steady_clock::now();
@@ -797,15 +798,14 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             // doesn't produce GPU frames or the per-iteration GPU queue is
             // empty, fall through to the CPU queue.
             GpuImage screenshotGpu = capturer->GetNextFrameGpu();
+            screenshotGpu.setCaptureNs(capturer->GetLastFrameCaptureNs());
             bool freshCpuFrameThisIter = false;
             bool gpuMaskApplied = false;
 
-            // ★ 端到端延迟探针的起点: 帧刚进入本进程, 这是 PC 侧能打的最早
-            // 时刻。打点必须在下游任何处理之前 —— circle_mask 下推、D2H 下载、
-            // 提交 detector、推理、发布、控制环唤醒, 全部计入总延迟。
-            // (采集卡内部 HDMI->USB 那段在此刻已经花掉, 无法观测, 见探针头注释)
+            // 使用该帧 OnReadSample 回调入口的原始戳, 将后端内部的样本拷贝、
+            // 工作队列、解码和转色纳入测量。GPU 异步剩余工作由 detector 等事件。
             if (!screenshotGpu.empty())
-                runtime::latency::noteCaptureForStats(runtime::latency::markCapture());
+                runtime::latency::noteCaptureForStats(runtime::latency::markCapture(capturer->GetLastFrameCaptureNs()));
 
             // circle_mask 下推 GPU:在解码 BGR 之后、D2H/detector 之前 in-place
             // 跑一个圆形掩码 kernel,detector 直接吃 masked GpuImage,后续 D2H
@@ -821,17 +821,10 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     screenshotGpu.data(), screenshotGpu.step(),
                     screenshotGpu.cols(), screenshotGpu.rows(),
                     captureCuda.stream);
-                cudaEvent_t maskEvent = captureCuda.nextMaskEvent();
-                if (maskEvent)
-                {
-                    cudaEventRecord(maskEvent, captureCuda.stream);
-                    screenshotGpu.setReadyEvent(maskEvent);
-                }
-                else
-                {
-                    cudaStreamSynchronize(captureCuda.stream);
-                    screenshotGpu.setReadyEvent(nullptr);
-                }
+                auto maskEvent = captureCuda.maskEvents.record(captureCuda.stream);
+                if (!maskEvent && cudaStreamSynchronize(captureCuda.stream) != cudaSuccess)
+                    throw std::runtime_error("CUDA mask completion failed");
+                screenshotGpu.setReadyEvent(std::move(maskEvent));
                 gpuMaskApplied = true;
             }
 
@@ -888,7 +881,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 screenshotCpu = capturer->GetNextFrameCpu();
                 freshCpuFrameThisIter = !screenshotCpu.empty();
                 if (freshCpuFrameThisIter)
-                    runtime::latency::noteCaptureForStats(runtime::latency::markCapture());
+                    runtime::latency::noteCaptureForStats(runtime::latency::markCapture(capturer->GetLastFrameCaptureNs()));
             }
 
             if (screenshotGpu.empty() && screenshotCpu.empty())
@@ -902,8 +895,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 // 那一帧覆盖丢掉,从而把帧率压到源帧率以下。这里不再调用
                 // applyFrameLimiter——空帧没有产出,不该占用一个限流节拍。
                 // WaitFrame 返回 false(后端不支持事件等待)时回退到 1ms 短睡。
-                if (!capturer->WaitFrame(4))
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (capturer->SupportsEventWait()) capturer->WaitFrame(4);
+                else std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
 
@@ -917,7 +910,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             // Preserve the established detector on that path.
             if (screenshotGpu.empty() && (gpuCrosshairActive || cpuColourActive)
                 && !screenshotCpu.empty())
-                crosshair_runtime::process_frame(screenshotCpu);
+                crosshair_runtime::process_frame(screenshotCpu, capturer->GetLastFrameCaptureNs());
 
             detectionFrame = screenshotCpu;
 
@@ -929,7 +922,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     g_detector->backend() == DetectorBackend::TensorRT;
                 if (!screenshotGpu.empty() && !usedCpuDetectionOverride && detectorAcceptsGpu)
                 {
-                    g_detector->processFrameGpu(std::move(screenshotGpu));
+                    const runtime::FrameContext context{runtime::latency::loadCaptureSeq(), capturer->GetLastFrameCaptureNs(),
+                                                        screenshotGpu.cols(), screenshotGpu.rows()};
+                    g_detector->processFrameGpu(std::move(screenshotGpu), context);
                 }
                 else
                 {
@@ -941,7 +936,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                         screenshotGpu.download(detectionFrame);
                     }
                     if (!detectionFrame.empty())
-                        g_detector->processFrame(detectionFrame);
+                        g_detector->processFrame(detectionFrame, {runtime::latency::loadCaptureSeq(), capturer->GetLastFrameCaptureNs(),
+                                                                detectionFrame.cols, detectionFrame.rows});
                 }
             }
 
@@ -1008,6 +1004,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 // 已经按 1 秒滚动算好,这里只是搬运。
                 if (capturer)
                 {
+                    // 设备侧帧龄(驱动/MF 把帧交给我们之前花掉的时间)。它发生在 T0 之前,
+                    // 与回调后的软件链路分别显示, 不据此单独判断卡芯片快慢。
+                    runtime::latency::noteDeviceFrameAgeUs(capturer->GetDeviceFrameAgeUs());
                     captureSenderSpanFps.store(capturer->GetSenderSpanFps());
                     captureWireLostFps.store(capturer->GetWireLostFps());
                     capturePartialLostFps.store(capturer->GetPartialLostFps());
@@ -1016,6 +1015,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 }
                 else
                 {
+                    // 没有后端就重置成"测不到", 否则 UI 会一直显示上一张卡的旧值。
+                    runtime::latency::noteDeviceFrameAgeUs(-1);
                     captureSenderSpanFps.store(0);
                     captureWireLostFps.store(0);
                     capturePartialLostFps.store(0);

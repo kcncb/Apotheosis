@@ -148,6 +148,7 @@ PivotSnapshot read()
 void publish(const PivotSnapshot& snap)
 {
     std::lock_guard<std::mutex> lk(g_mtx);
+    if (snap.ts.time_since_epoch().count() && g_snap.ts.time_since_epoch().count() && snap.ts < g_snap.ts) return;
     g_snap = snap;
 }
 
@@ -163,7 +164,7 @@ void publish_static_ref(const PivotSnapshot& ref)
     g_static_ref = ref;
 }
 
-void process_frame(const cv::Mat& bgrFrame)
+void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
 {
     if (bgrFrame.empty() || bgrFrame.type() != CV_8UC3)
     {
@@ -278,7 +279,8 @@ void process_frame(const cv::Mat& bgrFrame)
     }
 
     PivotSnapshot snap;
-    snap.ts = std::chrono::steady_clock::now();
+    snap.ts = captured_ns > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(captured_ns))
+                              : std::chrono::steady_clock::now();
     static int s_lost_frames = 0;
     static cv::Point2f s_last_valid_hit(0, 0);
 
@@ -394,7 +396,8 @@ void process_gpu_frame(const GpuImage& frame)
     }
 
     PivotSnapshot out;
-    out.ts = std::chrono::steady_clock::now();
+    out.ts = frame.captureNs() > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(frame.captureNs()))
+                                  : std::chrono::steady_clock::now();
     const int count = state.host_result[1];
     if (count >= std::max(1, snapshot->crosshair_min_pixel_count))
     {
