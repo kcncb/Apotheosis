@@ -521,6 +521,30 @@ bool Config::loadConfig(const std::string& filename)
                 hk.pidf_mapping_version = 2;
             }
 
+            // v3: 把"前馈整条关死"的老配置升级到可用值。
+            //
+            // 为什么需要: pidf_kf_x 默认 0, 而 ff_output = ff_state*dt*kf, 于是
+            // kf=0 时前馈完全不出力, pidf_lr_x 调多少都没反应 —— 表现为"追不上
+            // 横移目标、摆头后咬不住"。多场景模拟(aim_scenario_sim, 120Hz, 25ms
+            // 链路延迟)实测: 出厂默认 kf=0/lr=0 综合分 37.8, 打开前馈后 20.6。
+            // 只动这三个"必须配套"的值, 不碰用户自己调的 Kp(瞄准速度)与死区/限幅。
+            if (hk.pidf_mapping_version < 3)
+            {
+                if (hk.pidf_kf_x <= 0.0f && hk.pidf_kf_y <= 0.0f)
+                {
+                    hk.pidf_kf_x = (hk.pidf_kf_x <= 0.0f) ? 1.0f : hk.pidf_kf_x;
+                    hk.pidf_kf_y = (hk.pidf_kf_y <= 0.0f) ? 1.0f : hk.pidf_kf_y;
+                    // lr 只在前馈本来就没开时才补, 避免覆盖用户已经选好的值
+                    if (hk.pidf_lr_x <= 0.0f) hk.pidf_lr_x = 0.05f;
+                    if (hk.pidf_lr_y <= 0.0f) hk.pidf_lr_y = 0.05f;
+                    // 微分项在延迟下 kd>=0.1 会发散(实测), 老默认 0.01 又几乎没有
+                    // 阻尼; 0.05 是实测的稳健值。
+                    if (hk.pidf_kd_x < 0.02f) hk.pidf_kd_x = 0.05f;
+                    if (hk.pidf_kd_y < 0.02f) hk.pidf_kd_y = 0.05f;
+                }
+                hk.pidf_mapping_version = 3;
+            }
+
             hk.lost_target_cache_frames = static_cast<int>(get_long(
                 sec, "lost_target_cache_frames", hk.lost_target_cache_frames));
 
@@ -881,7 +905,7 @@ bool Config::saveConfig(const std::string& filename)
         file << "keys = " << joinStrings(hk.keys) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
-        file << "pidf_mapping_version = 2\n";
+        file << "pidf_mapping_version = 3\n";
         file << std::fixed << std::setprecision(4)
              << "pidf_kp_x = " << hk.pidf_kp_x << "\n" << "pidf_kp_y = " << hk.pidf_kp_y << "\n"
              << "pidf_ki_x = " << hk.pidf_ki_x << "\n" << "pidf_ki_y = " << hk.pidf_ki_y << "\n"

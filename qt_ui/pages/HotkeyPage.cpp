@@ -812,7 +812,7 @@ void HotkeyPage::buildBossAimCard()
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
 
-    const double defaults[10] = {1, 1, 0, 0, .01, .01, 0, 0, 0, 0};
+    const double defaults[10] = {1, 1, 0, 0, .05, .05, 1, 1, .05, .05};
     for (int i = 0; i < 10; ++i)
     {
         const int decimals = (i == 0 || i == 1 || i == 6 || i == 7) ? 2 : 3;

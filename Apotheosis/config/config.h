@@ -53,12 +53,15 @@ struct HotkeyProfile
     int fovY = 74;
 
     // AVA PIDF Mode 1。AVA 界面只暴露 Kp/Kd/Kf/LR，Ki 固定为 0。
-    int pidf_mapping_version = 2;
+    int pidf_mapping_version = 3;
     float pidf_kp_x = 1.0f, pidf_kp_y = 1.0f;
     float pidf_ki_x = 0.0f, pidf_ki_y = 0.0f;
-    float pidf_kd_x = 0.01f, pidf_kd_y = 0.01f;
-    float pidf_kf_x = 0.0f, pidf_kf_y = 0.0f;
-    float pidf_lr_x = 0.0f, pidf_lr_y = 0.0f;
+    // 前馈三件套必须配套: kf=0 会让 ff_output = ff_state*dt*kf 恒为 0, 即前馈
+    // 整条关死, 此时 lr 调多少都没反应(实测: 追横移目标落后 10.4px、摆头咬不住)。
+    // 默认直接给可用值; 多场景模拟综合分 37.8 -> 20.6(见 tests/aim_scenario_sim.cpp)。
+    float pidf_kd_x = 0.05f, pidf_kd_y = 0.05f;
+    float pidf_kf_x = 1.0f, pidf_kf_y = 1.0f;
+    float pidf_lr_x = 0.05f, pidf_lr_y = 0.05f;
     int pidf_deadzone_x = 0, pidf_deadzone_y = 0;
     int pidf_limit_x = 0, pidf_limit_y = 0;
 
