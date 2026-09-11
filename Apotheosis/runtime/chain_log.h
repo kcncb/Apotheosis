@@ -35,8 +35,18 @@
 //   APOTH_CHAINLOG=2   逐帧全量(推荐排查时用)
 //   APOTH_CHAINLOG=3   逐帧全量 + 每个候选目标明细(最详细, 开销最大)
 //
-// 开销: 逐帧全量约 5-15 条记录/帧, 每条 ~200 字节, 120Hz 下约 1-2MB/s 的写入量,
-//       全在内存里, 对瞄准回路的影响远小于一帧抖动。
+// 落盘(重要)
+//   · 默认【开】: 每条记录同时追加写到 logs/chain_live.log。写入走 stdio 缓冲,
+//     每 256 条 flush 一次 —— 也就是说即使程序崩溃/卡死/被强杀, 磁盘上仍然有
+//     【最后约 0.2 秒之前】的全部记录, 这正是排查最需要的现场。
+//   · 单文件上限 64MB(约十几分钟), 到顶后停止追加并在文件里写一行说明, 避免
+//     长时间挂机把磁盘写满。
+//   · logs/ 目录会自动创建(见 ensure_directory)。
+//   · APOTH_CHAINLOG_FILE=0 只关落盘(仍保留内存环形缓冲与手动/dump);
+//     APOTH_CHAINLOG_FILE=<路径> 可指定文件。
+//
+// 开销: 逐帧全量约 5-15 条记录/帧, 每条 ~200 字节, 120Hz 下约 1-2MB/s 的写入量。
+//       内存部分只是 memcpy; 落盘部分是带缓冲的追加写, 不进主循环的临界路径。
 // =============================================================================
 
 #include <atomic>
@@ -46,6 +56,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__has_include)
+#if __has_include(<filesystem>)
+#include <filesystem>
+#define APOTH_CHAINLOG_HAS_FILESYSTEM 1
+#endif
+#endif
 #include <mutex>
 #include <string>
 
@@ -139,6 +155,110 @@ inline void end_frame()
     frame_context().valid = false;
 }
 
+// ── 落盘 ────────────────────────────────────────────────────────────────────
+// 与内存环形缓冲并行的第二条通路: 追加写到文件, 崩溃也留得下现场。
+inline constexpr long long kFileLimitBytes = 64ll * 1024 * 1024;   // 单文件上限
+inline constexpr int kFlushEveryRecords = 256;                     // 多少条 flush 一次
+
+struct FileSink
+{
+    std::mutex mutex;
+    std::FILE* file = nullptr;
+    std::string path;
+    long long bytes = 0;
+    int since_flush = 0;
+    bool attempted = false;      // 只尝试打开一次, 失败不反复重试
+    bool capped = false;         // 到上限后不再写
+    std::string notice;          // 失败/到顶的原因(写进文件后再也不重试)
+};
+
+inline FileSink& file_sink()
+{
+    static FileSink instance;
+    return instance;
+}
+
+inline bool ensure_directory(const std::string& path)
+{
+    const std::size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos || slash == 0)
+        return true;
+#if defined(__has_include)
+#if __has_include(<filesystem>)
+    std::error_code code;
+    std::filesystem::create_directories(path.substr(0, slash), code);
+    return !code;
+#endif
+#endif
+    return true;   // 没有 <filesystem> 就交给调用方确保目录存在
+}
+
+// 落盘开关: 0 = 关; 其它值 = 文件路径(默认 logs/chain_live.log)。
+inline std::string file_path_from_env()
+{
+    const char* env = std::getenv("APOTH_CHAINLOG_FILE");
+    if (env == nullptr)
+        return "logs/chain_live.log";       // 默认开
+    if (env[0] == '0' && env[1] == '\0')
+        return {};                          // 显式关闭
+    return env;
+}
+
+inline void file_write_locked(const char* line, int length)
+{
+    auto& sink_ref = file_sink();
+    if (!sink_ref.attempted)
+    {
+        sink_ref.attempted = true;
+        sink_ref.path = file_path_from_env();
+        if (!sink_ref.path.empty())
+        {
+            ensure_directory(sink_ref.path);
+            sink_ref.file = std::fopen(sink_ref.path.c_str(), "wb");
+            if (sink_ref.file == nullptr)
+                sink_ref.notice = "fopen_failed";
+        }
+    }
+    if (sink_ref.file == nullptr || sink_ref.capped || length <= 0)
+        return;
+    if (sink_ref.bytes + length + 1 > kFileLimitBytes)
+    {
+        sink_ref.capped = true;
+        std::fprintf(sink_ref.file,
+                     "# chain log 到单文件上限 %lld 字节, 停止追加(可调 "
+                     "kFileLimitBytes 或换文件)\n",
+                     kFileLimitBytes);
+        std::fflush(sink_ref.file);
+        return;
+    }
+    std::fwrite(line, 1, static_cast<std::size_t>(length), sink_ref.file);
+    std::fputc('\n', sink_ref.file);
+    sink_ref.bytes += length + 1;
+    if (++sink_ref.since_flush >= kFlushEveryRecords)
+    {
+        sink_ref.since_flush = 0;
+        std::fflush(sink_ref.file);   // 让崩溃时最多只丢 256 条
+    }
+}
+
+inline void file_flush()
+{
+    std::lock_guard<std::mutex> guard(file_sink().mutex);
+    if (file_sink().file != nullptr)
+        std::fflush(file_sink().file);
+}
+
+inline void file_close()
+{
+    std::lock_guard<std::mutex> guard(file_sink().mutex);
+    if (file_sink().file != nullptr)
+    {
+        std::fflush(file_sink().file);
+        std::fclose(file_sink().file);
+        file_sink().file = nullptr;
+    }
+}
+
 // ── 写入 ────────────────────────────────────────────────────────────────────
 #if defined(__GNUC__) || defined(__clang__)
 #define APOTH_CHAINLOG_PRINTF(fmt_index, arg_index) \
@@ -153,7 +273,7 @@ inline void write(Section section, int minimum_level, const char* format, ...)
     if (!enabled(section, minimum_level))
         return;
     auto& s = sink();
-    std::lock_guard<std::mutex> guard(s.mutex);
+    std::unique_lock<std::mutex> guard(s.mutex);
     const std::int64_t slot = s.sequence % kCapacity;
     const auto& context = frame_context();
     char* line = s.lines[slot];
@@ -179,6 +299,14 @@ inline void write(Section section, int minimum_level, const char* format, ...)
     ++s.sequence;
     ++s.written;
     ++s.pending;
+    const int length = (used < 0) ? 0 : used;
+    char copy[kLineSize];
+    std::memcpy(copy, line, static_cast<std::size_t>(length) + 1);
+    guard.unlock();   // 先放掉缓冲锁再拿落盘锁, 避免锁嵌套
+    {
+        std::lock_guard<std::mutex> file_guard(file_sink().mutex);
+        file_write_locked(copy, length);
+    }
 }
 
 // 关键事件: 不受逐帧开关影响(级别 >= 0 就记), 用于记录"为什么没瞄/为什么松手"
@@ -188,7 +316,7 @@ inline void event(const char* format, ...)
     if (level() < 0)
         return;
     auto& s = sink();
-    std::lock_guard<std::mutex> guard(s.mutex);
+    std::unique_lock<std::mutex> guard(s.mutex);
     const std::int64_t slot = s.sequence % kCapacity;
     char* line = s.lines[slot];
     int used = std::snprintf(line, kLineSize, "L,event");
@@ -214,6 +342,14 @@ inline void event(const char* format, ...)
     ++s.sequence;
     ++s.written;
     ++s.pending;
+    const int length = (used < 0) ? 0 : used;
+    char copy[kLineSize];
+    std::memcpy(copy, line, static_cast<std::size_t>(length) + 1);
+    guard.unlock();   // 先放掉缓冲锁再拿落盘锁, 避免锁嵌套
+    {
+        std::lock_guard<std::mutex> file_guard(file_sink().mutex);
+        file_write_locked(copy, length);
+    }
 }
 
 // ── 导出 ────────────────────────────────────────────────────────────────────
@@ -221,7 +357,7 @@ inline void event(const char* format, ...)
 inline std::int64_t dump(const char* path)
 {
     auto& s = sink();
-    std::lock_guard<std::mutex> guard(s.mutex);
+    std::unique_lock<std::mutex> guard(s.mutex);
     std::FILE* file = std::fopen(path, "wb");
     if (file == nullptr)
         return -1;
