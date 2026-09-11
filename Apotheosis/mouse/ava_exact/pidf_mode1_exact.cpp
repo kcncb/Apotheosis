@@ -709,6 +709,13 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.scratch_y = ff_apply_y * s.ff_output_y;
     s.raw_pid_y = (s.raw_pid_y * 0.1 + s.scratch_y) * frame_scale;
 
+    // ⚠️ 定标前提: 本控制器在【屏幕像素】空间工作, 输出的是【鼠标计数】, 两者
+    // 之间的系数就是"被控对象增益"(游戏内灵敏度 x DPI 的等效值)。全部增益
+    // (kp/kd/前馈学习率及其延迟定档)都按该系数 = 1 标定。实测(aim_scenario_sim,
+    // 3 帧延迟): 系数 0.5 -> 21.9, 1.0 -> 12.1(最优), 1.3 -> 13.2, 2.0 -> 162.8,
+    // 3.0 -> 发散 —— 因为有效回路增益 ≈ kp*系数, 系数变大就吃光相位裕度。
+    // 部署前请校准: 关辅助, 鼠标走 N 计数, 量目标在检测图上移动的像素数,
+    // 调游戏内灵敏度使 1 计数 ≈ 1 像素。
     s.move_x = quantize(
         s.raw_pid_x, s.residual_x, s.rounded_x,
         s.move_nonzero_x, s.axis_blocked_x != 0);
