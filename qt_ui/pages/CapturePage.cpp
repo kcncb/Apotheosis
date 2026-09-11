@@ -2,18 +2,46 @@
 #include "config/ConfigManager.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
+#include "widgets/IconFont.h"
 #include "widgets/ToggleSwitch.h"
 
 #include "capture/capture_card_probe.h"
 
 #include <QComboBox>
+#include <QFont>
+#include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
+#include <QPainter>
+#include <QPixmap>
 #include <QPoint>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
-#include <QSpinBox>
 #include <QVBoxLayout>
+
+namespace {
+
+// 把图标字体的字形画成 QIcon —— 和侧边栏同一套画法, 保证观感一致。
+// 图标字体没加载成功时返回空 QIcon, 调用方回退成文字。
+QIcon iconFromGlyph(const QString& name, int px, const QString& color) {
+    if (!IconFont::available())
+        return QIcon();
+    const qreal dpr = 2.0;
+    QPixmap pm(QSize(static_cast<int>(px * dpr), static_cast<int>(px * dpr)));
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setFont(IconFont::font(px));
+    p.setPen(QColor(color));
+    p.drawText(QRectF(0, 0, px, px), Qt::AlignCenter,
+               QString(IconFont::glyph(name)));
+    p.end();
+    return QIcon(pm);
+}
+
+}  // namespace
 
 // ────────────────────────────────────────────────────────────────────────────
 // 采集设置页 —— 只有一种采集方式: 采集卡
@@ -49,7 +77,6 @@ CapturePage::CapturePage(QWidget* parent)
     layout->setSpacing(14);
     scroll->setWidget(content);
 
-    buildGeneralCard(layout);
     buildCardCard(layout);
 
     layout->addStretch();
@@ -59,36 +86,6 @@ CapturePage::CapturePage(QWidget* parent)
     onLoadConfig();
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// 通用采集
-// ────────────────────────────────────────────────────────────────────────────
-
-void CapturePage::buildGeneralCard(QVBoxLayout* layout) {
-    auto* card = new CardWidget(
-        QStringLiteral("通用采集"),
-        QStringLiteral("device-desktop"));
-
-    m_detResolution = new QSpinBox;
-    m_detResolution->setRange(32, 2048);
-    m_detResolution->setToolTip(tr(
-        "模型输入边长。\n"
-        "中心裁切区域【恒等于】该值 —— 送进检测器的永远正好是模型要的尺寸,\n"
-        "不多裁也不少裁再缩, 省掉一次缩放, 同时避免裁切尺寸与模型尺寸不一致\n"
-        "导致检测框和鼠标坐标空间错位。"));
-    card->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("检测分辨率"), m_detResolution));
-    connect(m_detResolution, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [](int v) { ConfigManager::instance().setDetectionResolution(v); });
-
-    m_circleMask = new ToggleSwitch;
-    m_circleMask->setToolTip(tr("把检测区域限制在画面中心的圆形内, 屏蔽四角干扰。"));
-    card->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("圆形遮罩"), m_circleMask));
-    connect(m_circleMask, &ToggleSwitch::toggled,
-            this, [](bool on) { ConfigManager::instance().setCircleMask(on); });
-
-    layout->addWidget(card);
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // 采集卡
@@ -105,22 +102,44 @@ void CapturePage::buildCardCard(QVBoxLayout* layout) {
     m_cardCard->contentLayout()->addWidget(m_error);
     m_error->hide();
 
-    // ── 设备 ──
+    // ── 设备 (行尾跟一个圆形"重新探测"按钮) ──
     m_devCombo = new QComboBox;
     m_devCombo->setToolTip(tr(
         "系统实际枚举到的视频采集卡。\n"
         "只有一张卡也请显式选择 —— 你选的那张不在时程序不会自动换一张。"));
+
+    // 重新探测是个低频动作, 不值得占一整行 —— 收成一个小圆钮挂在设备行尾。
+    m_refreshBtn = new QPushButton;
+    m_refreshBtn->setCursor(Qt::PointingHandCursor);
+    m_refreshBtn->setFixedSize(28, 28);
+    m_refreshBtn->setToolTip(tr(
+        "重新枚举采集卡, 并读取每张卡真实支持的 格式 / 分辨率 / 帧率。\n"
+        "每张卡需要 20-300ms, 所以只在打开本页或手动点击时执行。"));
+    m_refreshBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { border:1px solid #D8DEE9; border-radius:14px;"
+        "              background:#FFFFFF; }"
+        "QPushButton:hover { background:#F1F4F9; }"
+        "QPushButton:pressed { background:#E4E9F2; }"));
+    if (IconFont::available()) {
+        m_refreshBtn->setIcon(iconFromGlyph(QStringLiteral("refresh"), 15,
+                                           QStringLiteral("#5B6472")));
+        m_refreshBtn->setIconSize(QSize(15, 15));
+    } else {
+        m_refreshBtn->setText(QStringLiteral("\u21bb"));
+    }
+    connect(m_refreshBtn, &QPushButton::clicked, this, &CapturePage::refreshDevices);
+
+    auto* devRow = new QWidget;
+    auto* devRowLayout = new QHBoxLayout(devRow);
+    devRowLayout->setContentsMargins(0, 0, 0, 0);
+    devRowLayout->setSpacing(8);
+    devRowLayout->addWidget(m_devCombo, 1);
+    devRowLayout->addWidget(m_refreshBtn, 0);
+
     m_cardCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("采集卡"), m_devCombo));
+        FormKit::fieldRow(QStringLiteral("采集卡"), devRow));
     connect(m_devCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CapturePage::onDeviceChanged);
-
-    m_refreshBtn = new QPushButton(QStringLiteral("重新探测采集卡能力"));
-    m_refreshBtn->setToolTip(tr(
-        "重新枚举设备, 并读取每张卡真实支持的 格式 / 分辨率 / 帧率。\n"
-        "每张卡需要 20-300ms, 所以只在打开本页或手动点击时执行。"));
-    m_cardCard->contentLayout()->addWidget(m_refreshBtn);
-    connect(m_refreshBtn, &QPushButton::clicked, this, &CapturePage::refreshDevices);
 
     // ── 像素格式 ──
     m_fmtCombo = new QComboBox;
@@ -194,6 +213,16 @@ void CapturePage::showError(const QString& text) {
 void CapturePage::clearError() { showError(QString()); }
 
 void CapturePage::refreshDevices() {
+    // 用户点"刷新"时同样只是重新探测, 不是重新选择 —— 期间也不回写配置。
+    const bool prevRestoring = m_restoring;
+    m_restoring = true;
+
+    struct RestoreGuard {
+        bool& flag;
+        bool  prev;
+        ~RestoreGuard() { flag = prev; }
+    } restoreGuard{ m_restoring, prevRestoring };
+
     // 按【名字】记住用户的选择 —— index 会随插拔顺序变化, 名字不会。
     QString want = m_devCombo->currentIndex() >= 0
         ? m_devCombo->currentData().toString()
@@ -359,6 +388,9 @@ void CapturePage::onFpsChanged(int) {
 
 // 把当前三级下拉的选择写回配置。任何一级没选中就不写, 由 UI 的提示承担。
 void CapturePage::applySelectionToConfig() {
+    // 还原过程中不回写 —— 否则会把中间态当成用户选择写进配置。
+    if (m_restoring) return;
+
     const MFDeviceInfo* dev = currentDevice();
     if (!dev) return;
     if (m_fmtCombo->currentIndex() < 0) return;
@@ -420,12 +452,16 @@ void CapturePage::updateCapabilitySummary() {
 void CapturePage::onLoadConfig() {
     auto& cfg = ConfigManager::instance();
 
-    m_detResolution->setValue(cfg.detectionResolution());
-    m_circleMask->setChecked(cfg.circleMask());
+    // 检测尺寸与圆形遮罩已不是界面选项: 尺寸跟随模型输入边长, 遮罩常开。
     m_gpuDecode->setChecked(cfg.captureGpuDecode());
 
     // 探测 + 还原三级选择。refreshDevices 内部会按名字找回配置里的设备,
     // 找不到就明确报错 —— 不会退到第 0 张卡。
+    //
+    // 整段还原期间禁止回写配置: 逐级重建会让三级下拉短暂处在"未选中"状态,
+    // 那时落盘等于用替身模式覆盖用户真正的选择。
+    m_restoring = true;
     refreshDevices();
+    m_restoring = false;
     updateCapabilitySummary();
 }

@@ -24,6 +24,7 @@ namespace
 
 std::mutex g_mtx;
 PivotSnapshot g_snap{};
+PivotSnapshot g_static_ref{};
 
 crosshair::CrosshairDetector  g_detector;
 
@@ -148,6 +149,18 @@ void publish(const PivotSnapshot& snap)
 {
     std::lock_guard<std::mutex> lk(g_mtx);
     g_snap = snap;
+}
+
+PivotSnapshot read_static_ref()
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    return g_static_ref;
+}
+
+void publish_static_ref(const PivotSnapshot& ref)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_static_ref = ref;
 }
 
 void process_frame(const cv::Mat& bgrFrame)
@@ -388,9 +401,19 @@ void process_gpu_frame(const GpuImage& frame)
         cv::Point2f hit(
             static_cast<float>(state.host_result[2]) / static_cast<float>(count),
             static_cast<float>(state.host_result[3]) / static_cast<float>(count));
-        const float cx = frame.cols() * 0.5f, cy = frame.rows() * 0.5f;
-        const float tolerance = 0.5f * static_cast<float>(std::min(roi_w, roi_h));
-        if (std::hypot(hit.x - cx, hit.y - cy) <= tolerance)
+        // 接受窗口 = ROI 本体, 不再叠加"离画面中心 <= 0.5*min(roi_w,roi_h)"
+        // 的圆形门限。那个半径比 ROI 小得多(rect 32x66 时只有 16px), 会把 ROI
+        // 特意向上扩展出来的后坐力抬枪带整段判掉: 准星一旦离开画面中心 16px 就
+        // 判无效, pivot 随即回落成画面几何中心(见 mouse_thread_loop.cpp 的
+        // resolve_crosshair_pivot), 控制器以为已经对准目标, 于是不再下压 ——
+        // 表现就是"开了找色也没有压枪效果"。ROI 尺寸本身就是用户设定的接受范围,
+        // 假命中由内核的邻近度排序 + ROI 边界约束。
+        const float roi_left   = static_cast<float>(roi_x);
+        const float roi_top    = static_cast<float>(roi_y);
+        const float roi_right  = roi_left + static_cast<float>(roi_w);
+        const float roi_bottom = roi_top + static_cast<float>(roi_h);
+        if (hit.x >= roi_left && hit.x <= roi_right
+            && hit.y >= roi_top && hit.y <= roi_bottom)
         {
             const float smooth = snapshot->crosshair_smooth;
             if (smooth > 0.001f)

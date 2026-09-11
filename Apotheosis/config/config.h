@@ -88,15 +88,20 @@ struct HotkeyProfile
     // ─────────────────────────────────────────────────────────────────────
     // 扳机 — 5 态状态机 (idle/delay/pressed/cooldown/switch_cd)。
     //   trigger_fire_delay:    进入命中区后延迟 N ms 才按下(0=立即)
-    //   trigger_fire_duration: 每次按住持续 N ms
-    //   trigger_fire_interval: 松手后冷却 N ms 才能再次触发
+    //   trigger_fire_duration: 单次按住时长上限。
+    //                          0 = 【长按模式】: 按住不松手, 直到准星离开命中区
+    //                              (目标真的丢了也会松手), 不做"按-松"循环。
+    //                          >0 = 连点模式: 按住 N ms → 松手 → 冷却 interval
+    //                              → 若仍在命中区再按, 即老的点射行为。
+    //   trigger_fire_interval: 连点模式的冷却间隔 / 长按模式离开命中区后的
+    //                          最短重按间隔(防止在判定边缘反复按松)
     //   trigger_y_percent:     命中区占 bbox 的百分比 (100=整框, >100=预开火)
     //   trigger_*_jitter_ms:   对应延迟的随机 ±N ms 抖动(破除机械感)
     //   trigger_switch_cooldown_ms: 目标 track_id 变化时的转火冷却
     // ─────────────────────────────────────────────────────────────────────
     bool  trigger_enabled = false;
     int   trigger_fire_delay = 0;
-    int   trigger_fire_duration = 100;
+    int   trigger_fire_duration = 0;
     int   trigger_fire_interval = 200;
     int   trigger_y_percent = 100;
     int   trigger_delay_jitter_ms    = 0;

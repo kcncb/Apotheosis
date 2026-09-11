@@ -226,6 +226,7 @@ set(APP_SOURCES
     "${QT_UI_DIR}/widgets/ToggleSwitch.h"
     "${QT_UI_DIR}/widgets/TopNavBar.cpp"
     "${QT_UI_DIR}/widgets/TopNavBar.h"
+    "${QT_UI_DIR}/widgets/TriggerVisualWidget.h"
 )
 
 add_library(serial_embedded STATIC

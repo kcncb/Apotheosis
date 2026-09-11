@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
@@ -358,6 +358,21 @@ ModelMetadata inspect_onnx_model(const std::string& model_path, bool verbose)
             {
                 out.fixed_input_size = false;
                 break;
+            }
+        }
+
+        // 采集侧的中心裁切边长就是模型输入边长, 所以这里把真实 H / W 取出来。
+        // 只认 NCHW (YOLO 导出的都是 [1,3,H,W]); 维度数量对不上就留 0,
+        // 让调用方保持原值而不是被一个猜出来的尺寸带偏。
+        if (input_shape.size() == 4)
+        {
+            const int64_t h = input_shape[2];
+            const int64_t w = input_shape[3];
+            const int64_t max_int = static_cast<int64_t>((std::numeric_limits<int>::max)());
+            if (h > 0 && w > 0 && h <= max_int && w <= max_int)
+            {
+                out.input_width  = static_cast<int>(w);
+                out.input_height = static_cast<int>(h);
             }
         }
 

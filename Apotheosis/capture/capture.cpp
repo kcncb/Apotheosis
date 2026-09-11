@@ -111,7 +111,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     return snapshot;
 }
 
-
+class TimerResolutionGuard
 {
 public:
     void Enable()
@@ -545,7 +545,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             }
         };
 
-
+        std::unique_ptr<IScreenCapture> capturer = createCapturer(currentCfg, captureWidth, captureHeight);
         if (capturer)
             capturer->SetTargetFps(currentCfg.capture_fps);
         auto lastCapturerCreateAttempt = std::chrono::steady_clock::now();

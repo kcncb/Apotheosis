@@ -509,7 +509,7 @@ inline FileLogState& fileLogState()
 // MSVC 与 clang/gcc 行为一致, 所以统一走这个helper。
 inline std::string pathToUtf8(const std::filesystem::path& p)
 {
-    const std::u8string u8 = p.u8string();
+    const auto u8 = p.u8string();
     return std::string(u8.begin(), u8.end());
 }
 

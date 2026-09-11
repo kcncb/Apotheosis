@@ -16,6 +16,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -119,7 +120,18 @@ bool SelectExactMediaType(IMFSourceReader* reader,
     std::vector<TypeInfo>            sameRes;         // 同 subtype + 同尺寸
     std::vector<std::string>         otherFormats;    // 设备还提供哪些格式
     std::vector<std::pair<int,int>>  allResolutions;  // 该格式下有哪些分辨率
-    const TypeInfo*                  exact = nullptr;
+    // 命中项用【下标】记录, 绝不用指向循环局部变量的指针。
+    //
+    // 这里踩过一个必然踩中的坑: 早先写成 `exact = &info` (循环内的局部变量),
+    // 紧接着 `sameRes.push_back(std::move(info))` 把 ComPtr 移走, info.type
+    // 当场变成空; 循环结束后再解引用它, 等于把 nullptr 交给
+    // SetCurrentMediaType —— 恒定返回 E_INVALIDARG(0x80070057)。
+    //
+    // 表现就是"设备明明宣称支持这个格式/分辨率/帧率, 却永远切不过去", 而且
+    // 对任何配置都失败, 于是采集卡路径完全出不了画面。
+    // 用下标还顺带躲开了 sameRes 扩容导致 &back() 失效的问题。
+    constexpr size_t kNoExactMatch = static_cast<size_t>(-1);
+    size_t exactIndex = kNoExactMatch;
 
     for (DWORD i = 0;; ++i)
     {
@@ -164,16 +176,28 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         if (std::find(allResolutions.begin(), allResolutions.end(), wh) == allResolutions.end())
             allResolutions.push_back(wh);
 
-        if (info.w == wantW && info.h == wantH)
+        const bool sameResolution = (info.w == wantW && info.h == wantH);
+
+        // 29.97 / 59.94 这类非整数帧率按 ±1 容差匹配, 这是设备侧的表示差异,
+        // 不是"换了个模式"。
+        if (sameResolution
+            && std::abs(info.fps - static_cast<double>(wantFps)) <= 1.0
+            && exactIndex == kNoExactMatch)
         {
-            // 29.97 / 59.94 这类非整数帧率按 ±1 容差匹配, 这是设备侧的表示差异,
-            // 不是"换了个模式"。
-            if (std::abs(info.fps - static_cast<double>(wantFps)) <= 1.0 && !exact)
-                exact = &info;
-            sameRes.push_back(std::move(info));
+            exactIndex = sameRes.size();   // 记录即将 push 的位置
         }
-        sameFormat.push_back(std::move(info));
+
+        // sameFormat 收一份拷贝(ComPtr 拷贝只是 AddRef), 保证它始终持有有效的
+        // 媒体类型; sameRes 拿走原件。早先对 sameFormat 也用 std::move, 拿到的
+        // 是被搬空的 type —— 只是碰巧它当时只被用来判空, 现在不再依赖这个巧合。
+        sameFormat.push_back(info);
+        if (sameResolution)
+            sameRes.push_back(std::move(info));
     }
+
+    // 循环结束后才解析下标: 此时 sameRes 已定型, 元素地址稳定。
+    const TypeInfo* exact =
+        (exactIndex == kNoExactMatch) ? nullptr : &sameRes[exactIndex];
 
     const auto joinRes = [](const std::vector<std::pair<int,int>>& v) {
         std::ostringstream os;
@@ -230,11 +254,26 @@ bool SelectExactMediaType(IMFSourceReader* reader,
         return false;
     }
 
-    if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, exact->type.Get())))
+    const HRESULT setHr = reader->SetCurrentMediaType(
+        MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, exact->type.Get());
+    if (FAILED(setHr))
     {
+        // 带上真实 HRESULT: 这个失败在"设备本身支持该模式"时几乎总是并发占用
+        // (另一个程序/本进程另一路采集正持有这张卡)或设备被重置, 光看
+        // "SetCurrentMediaType failed" 分不出来。
+        char hrText[32];
+        std::snprintf(hrText, sizeof(hrText), "0x%08lX", static_cast<unsigned long>(setHr));
         std::ostringstream os;
         os << "device refused to switch to " << wantName << " " << wantW << "x" << wantH
-           << " @ " << wantFps << "fps (SetCurrentMediaType failed)";
+           << " @ " << wantFps << "fps (SetCurrentMediaType failed, hr=" << hrText << ")";
+        if (setHr == static_cast<HRESULT>(0x80070005))
+            os << " [E_ACCESSDENIED: 设备正被另一个进程独占]";
+        else if (setHr == static_cast<HRESULT>(0xC00D3704))
+            os << " [MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED: 设备被拔出或重置]";
+        else if (setHr == static_cast<HRESULT>(0xC00D3E85))
+            os << " [MF_E_SHUTDOWN: 设备对象已被关闭]";
+        else if (setHr == static_cast<HRESULT>(0xC00D36B4))
+            os << " [MF_E_INVALIDMEDIATYPE: 驱动不接受该媒体类型]";
         out_error = os.str();
         return false;
     }
@@ -424,7 +463,6 @@ const KnownFormat kKnownFormats[] = {
     { &MFVideoFormat_IYUV,   "IYUV",  false },
     { &MFVideoFormat_YV12,   "YV12",  false },
     { &MFVideoFormat_UYVY,   "UYVY",  false },
-    { &MFVideoFormat_YUYV,   "YUYV",  false },
     { &MFVideoFormat_M4S2,   "M4S2",  false },
     { &MFVideoFormat_NV11,   "NV11",  false },
     { &MFVideoFormat_MP43,   "MP43",  false },

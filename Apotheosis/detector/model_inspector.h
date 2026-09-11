@@ -25,6 +25,16 @@ struct ModelMetadata
     ClassNamesSource source = ClassNamesSource::None;
     bool fixed_input_size = false;
     bool fixed_input_size_known = false;
+
+    // 模型第 0 个输入张量的 H / W (NCHW 的 [2] / [3])。
+    //
+    // 采集侧的中心裁切边长恒等于模型输入边长, 所以这两个值是
+    // detection_resolution 的唯一来源 —— 用户不再手填尺寸, 填错就会出现
+    // 裁切尺寸和模型输入对不上、检测框与鼠标坐标空间错位。
+    //
+    // 任一为 0 表示动态形状或读取失败, 调用方应保持原值。
+    int input_width  = 0;
+    int input_height = 0;
 };
 
 // Lightweight ONNX inspection used by the launcher UI before inference starts.

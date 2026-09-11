@@ -20,9 +20,6 @@ bool ConfigManager::load(const QString& path) {
     m_settings = new QSettings(m_path + ".cache", QSettings::IniFormat, this);
 
     if (!QFileInfo::exists(m_path)) {
-        setCaptureMethod("udp_capture");
-        setUdpIp("0.0.0.0");
-        setUdpPort(1234);
         setDetectionResolution(320);
         setCaptureFps(60);
         setCircleMask(true);
@@ -536,7 +533,7 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.lostTargetCacheFrames = m_settings->value(prefix + "lost_target_cache_frames", 5).toInt();
     data.triggerEnabled      = m_settings->value(prefix + "trigger_enabled", false).toBool();
     data.triggerFireDelay    = m_settings->value(prefix + "trigger_fire_delay", 0).toInt();
-    data.triggerFireDuration = m_settings->value(prefix + "trigger_fire_duration", 100).toInt();
+    data.triggerFireDuration = m_settings->value(prefix + "trigger_fire_duration", 0).toInt();
     data.triggerFireInterval = m_settings->value(prefix + "trigger_fire_interval", 200).toInt();
     data.triggerYPercent     = m_settings->value(prefix + "trigger_y_percent", 100).toInt();
     data.triggerDelayJitterMs    = m_settings->value(prefix + "trigger_delay_jitter_ms",    0).toInt();

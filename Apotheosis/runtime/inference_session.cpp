@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <Windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
 #include <filesystem>
@@ -97,6 +98,33 @@ void publish_model_metadata(detector::ModelMetadata md)
             config_changed = true;
             std::cout << "[ModelInspector] Automatically set fixed_input_size = "
                       << (md.fixed_input_size ? "true" : "false") << std::endl;
+        }
+
+        // 检测尺寸跟随模型: 中心裁切边长恒等于模型输入边长。
+        //
+        // 以前这是界面上一个手填的 spinbox, 现在由模型元数据决定 —— 裁切尺寸
+        // 和模型输入对不上时, 检测框与鼠标坐标会落在两个不同的空间里, 表现是
+        // 准星"指哪不打哪", 而且很难从现象反推到尺寸不匹配。
+        //
+        // 非方形模型这里取长边: 整条链路 (裁切 / 坐标换算 / 轨迹) 都按方形边长
+        // 设计, 所以取长边保证不丢内容, 同时把这件事明确说出来。
+        if (md.input_width > 0 && md.input_height > 0)
+        {
+            if (md.input_width != md.input_height)
+            {
+                std::cout << "[ModelInspector] 警告: 模型输入非方形 ("
+                          << md.input_width << "x" << md.input_height
+                          << "), 检测尺寸按长边取值。" << std::endl;
+            }
+            const int side = (std::max)(md.input_width, md.input_height);
+            if (side >= 32 && config.detection_resolution != side)
+            {
+                config.detection_resolution = side;
+                config_changed = true;
+                detection_resolution_changed.store(true);
+                std::cout << "[ModelInspector] 检测尺寸跟随模型输入: "
+                          << side << "x" << side << std::endl;
+            }
         }
         config.sync_class_filters_from_model(md.class_count, md.class_names);
     }

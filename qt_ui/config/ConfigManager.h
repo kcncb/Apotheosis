@@ -131,7 +131,8 @@ public:
         int lostTargetCacheFrames = 5;
         bool triggerEnabled = false;
         int triggerFireDelay = 0;
-        int triggerFireDuration = 100;
+        // 0 = 长按模式(按住不松手, 准星离开命中区才松开); >0 = 连点模式。
+        int triggerFireDuration = 0;
         int triggerFireInterval = 200;
         int triggerYPercent = 100;
         int triggerDelayJitterMs    = 0;

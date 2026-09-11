@@ -2,6 +2,7 @@
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
+#include <timeapi.h>
 
 #include <algorithm>
 #include <atomic>

@@ -8,7 +8,6 @@
 
 class QComboBox;
 class QLabel;
-class QSpinBox;
 class QPushButton;
 class QVBoxLayout;
 class ToggleSwitch;
@@ -43,7 +42,6 @@ private:
     // 把三级下拉的当前选择写回配置 (只有通过设备能力校验才会写)。
     void applySelectionToConfig();
 
-    void buildGeneralCard(QVBoxLayout* layout);
     void buildCardCard(QVBoxLayout* layout);
 
     // 三级联动: 逐级收缩, 每一级都只列设备真实支持的项。
@@ -55,10 +53,6 @@ private:
     void updateCapabilitySummary();
     void showError(const QString& text);
     void clearError();
-
-    // ── 通用 ──
-    QSpinBox*     m_detResolution{};
-    ToggleSwitch* m_circleMask{};
 
     // ── 采集卡 ──
     CardWidget*   m_cardCard{};
@@ -73,4 +67,12 @@ private:
     QPushButton*  m_refreshBtn{};
 
     std::vector<MFDeviceInfo> m_devices;
+
+    // 正在按配置还原三级下拉。
+    //
+    // 还原过程中绝不允许回写配置: refreshDevices()/onLoadConfig() 会逐级重建
+    // 下拉, 中间态是"这一级还没选中"。若此时落盘, 落下的就是中间态的替身值
+    // —— 实测会把用户存的 NV12 1080p120 悄悄改成 NV12 3840x2160@25, 而用户
+    // 只是打开了程序。回写只应由用户在三级的显式操作触发。
+    bool m_restoring = false;
 };

@@ -97,7 +97,19 @@ void AimEngine::rebuildSelector(const EngineInput& in)
     config.class_priority_enabled = true;
     config.search_radius = 0.5f;
     config.acquire_center_weight = 0.7f;
-    config.max_lost_frames = std::clamp(in.lost_target_cache_frames, 0, 240);
+    // 滑行(coasting)窗口下限 1 帧。
+    //
+    // AVA 的 tracker 只要 lost_frames > max_lost_frames 就立刻 clear(), 而目标
+    // 一旦判丢就会走 handle_aim_target_loss_exact() → reset_pidf(): 把 integral /
+    // feed-forward / residual 全部清零。其中 residual 正是"每拍位移不足 1 个
+    // count 时把零头攒到下一拍"的那份状态 —— 准星逼近锚点后每拍只有 0.2~0.6
+    // count, 全靠它攒够 1 才发得出去。所以:
+    //   · 单帧漏检(0.10 置信度检测器 + 快速横移目标的常态) → 整链重置 →
+    //     连续两拍不发位移 = "一顿一顿";
+    //   · residual 被反复清零 → 锚点附近永远差最后几个像素 = "在周围落不到身上"。
+    // 配置里的 0 只当 1 帧(漏一帧走 tracker 预测分支, 不重置控制器), 想要更长
+    // 的滑行窗口把"丢失目标缓存"调大即可。
+    config.max_lost_frames = std::clamp(in.lost_target_cache_frames, 1, 240);
     config.normalizer_x = std::max(1, static_cast<int>(std::lround(in.image_size)));
     config.normalizer_y = config.normalizer_x;
 

@@ -67,9 +67,13 @@ void ConfigBridge::syncToRuntime() {
     config.capture_fps        = cm.captureFps();
     config.capture_gpu_decode = cm.captureGpuDecode();
 
-    int oldDetRes = config.detection_resolution;
-    config.detection_resolution = cm.detectionResolution();
-    config.circle_mask   = cm.circleMask();
+    // detection_resolution 与 circle_mask 都不再是界面选项:
+    //   前者由模型输入边长推导 (见 inference_session.cpp publish_model_metadata),
+    //   后者是固定设计。
+    // 所以这里【绝不能】从 ConfigManager 回写 —— 那份副本只用于界面展示,
+    // 一旦回写就会用陈旧值盖掉模型推导出来的真实尺寸。
+    // oldDetRes 仍然快照, 因为下面靠它判断尺寸变化后要重建采集。
+    const int oldDetRes = config.detection_resolution;
 
     // --- Hardware ---
     std::string oldInput = config.input_method;

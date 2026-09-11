@@ -311,8 +311,18 @@ void HotkeyPage::buildTriggerCard()
     };
 
     m_triggerFireDelay      = makeSpin(0,    1000, QStringLiteral(" ms"));
-    m_triggerFireDuration   = makeSpin(1,    2000, QStringLiteral(" ms"));
+    m_triggerFireDuration   = makeSpin(0,    2000, QStringLiteral(" ms"));
     m_triggerFireInterval   = makeSpin(0,    2000, QStringLiteral(" ms"));
+    m_triggerFireDelay->setToolTip(QStringLiteral(
+        "准星进入命中区后延迟 N ms 才按下, 0 = 立即开火。"));
+    m_triggerFireDuration->setToolTip(QStringLiteral(
+        "0 = 长按模式: 进入命中区就按住不松手, 直到准星离开命中区\n"
+        "(目标真的丢了也会松开), 不会出现按-松的连点。\n"
+        ">0 = 连点模式: 每次按住 N ms 后松手, 再等冷却间隔重按。"));
+    m_triggerFireInterval->setToolTip(QStringLiteral(
+        "连点模式的冷却间隔。\n"
+        "长按模式下用作准星离开命中区后的最短重按间隔 —— 防止在判定\n"
+        "边缘反复按松形成连点。"));
     m_triggerYPercent       = makeSpin(10,    300, QStringLiteral(" %"));
     m_triggerDelayJitter    = makeSpin(0,     100, QStringLiteral(" ms"));
     m_triggerDurationJitter = makeSpin(0,     100, QStringLiteral(" ms"));
@@ -333,7 +343,7 @@ void HotkeyPage::buildTriggerCard()
         m_triggerFireDelay));
 
     cl->addWidget(FormKit::fieldRow(
-        QStringLiteral("连击时长 (按住)"),
+        QStringLiteral("按住时长 (0 = 长按)"),
         m_triggerFireDuration));
 
     cl->addWidget(FormKit::fieldRow(

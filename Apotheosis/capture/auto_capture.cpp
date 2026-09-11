@@ -68,7 +68,6 @@ CfgSnap snapshot_cfg()
     s.use_low       = config.auto_capture_use_low;
     s.low_conf      = config.auto_capture_low_conf;
     s.any_detection = config.auto_capture_any_detection;
-    s.use_flashlight= config.auto_capture_use_flashlight;
     s.cooldown_ms   = std::max(0, config.auto_capture_cooldown_ms);
     s.force_keys    = config.auto_capture_force_keys;
     s.out_dir       = config.auto_capture_output_dir.empty()

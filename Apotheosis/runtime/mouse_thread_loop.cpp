@@ -67,8 +67,119 @@ struct PivotResolved
     bool   from_color = false;
 };
 
+// ── 静态准星参考点 ────────────────────────────────────────────────────────
+//
+// 找色【不参与 PID 公式】: 它只回答"这一帧准星在画面哪个位置", 用来替代那个
+// 原本写死的画面几何中心(静态准星)。所以它必须以一个【静态常量】的姿态进入
+// 控制环, 而不是一个每帧都在跳的活信号 —— 否则 pivot 的压缩噪声/选簇翻转会
+// 直接变成误差阶跃, 被控制器放大成抖动或"一顿一顿"。
+//
+// 三条约束(都只作用在参考点上, 不改变控制器本身):
+//   1) 限速   : 参考点每拍位移不超过 kMaxSpeedPxPerSec×dt, 几十像素的假命中/
+//               跳簇被摊到几拍里, 不会变成一次 20px 的大步;
+//   2) 惯性   : 一阶低通, 强度由 crosshair_smooth 决定(和运行期那份滤波同向),
+//               但保留一个最小基线, 保证参考点始终是"缓动"的;
+//   3) 丢帧保持: 命中断掉先原地保持 kHoldMs, 而不是瞬间弹回几何中心; 超时后
+//               再限速滑回中心 —— 避免"参考点跳回中心"这种几十像素的阶跃。
+struct StaticCrosshairRef
+{
+    double x = 0.0;
+    double y = 0.0;
+    bool   engaged = false;
+
+    std::chrono::steady_clock::time_point last_update{};
+    std::chrono::steady_clock::time_point last_hit{};
+    bool have_update = false;
+
+    // 参考点的最大移动速度。真实后坐力抬枪(几百 px/s)完全不受限, 只有单帧突跳
+    // 会被削平: 56px 的假跳在 ~5 拍(42ms)内吸收完。
+    static constexpr double kMaxSpeedPxPerSec = 1500.0;
+    static constexpr double kMinTauSec        = 0.010;  // 基线惯性(最跟手时)
+    static constexpr double kMaxTauSec        = 0.050;  // crosshair_smooth = 1 时
+    static constexpr int    kHoldMs           = 120;
+
+    void reset()
+    {
+        engaged = false;
+        have_update = false;
+    }
+
+    void update(bool fresh, double tx, double ty,
+                double centre, double smooth,
+                std::chrono::steady_clock::time_point now)
+    {
+        double dt = have_update
+            ? std::chrono::duration<double>(now - last_update).count()
+            : (1.0 / 120.0);
+        last_update = now;
+        have_update = true;
+        dt = std::clamp(dt, 1.0e-4, 0.1);
+
+        if (fresh)
+        {
+            if (!engaged)
+            {
+                // 第一次拿到命中: 直接落位, 不做缓动(否则会从中心慢慢爬过去)。
+                x = tx;
+                y = ty;
+                engaged = true;
+                last_hit = now;
+                return;
+            }
+
+            // crosshair_smooth: 越大越稳(与 crosshair_runtime 的 One-Euro 同向)。
+            const double s = std::clamp(smooth, 0.0, 1.0);
+            const double tau = kMinTauSec + (kMaxTauSec - kMinTauSec) * s;
+            const double a = 1.0 - std::exp(-dt / tau);
+            double nx = x + (tx - x) * a;
+            double ny = y + (ty - y) * a;
+            clamp_step(nx, ny, dt);
+            last_hit = now;
+            return;
+        }
+
+        if (!engaged)
+            return;
+
+        const auto since_hit = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_hit).count();
+        if (since_hit <= kHoldMs)
+            return;   // 丢帧保持: 参考点不动
+
+        // 超时回收: 朝几何中心限速滑回, 到位后交还给几何中心。
+        double nx = centre, ny = centre;
+        if (!clamp_step(nx, ny, dt))
+            engaged = false;   // 已经回到中心
+    }
+
+private:
+    // 把 (nx,ny) 约束到"离当前参考点最多 kMaxSpeedPxPerSec×dt"。返回 false
+    // 表示目标就是当前点(无位移)。
+    bool clamp_step(double& nx, double& ny, double dt)
+    {
+        const double dx = nx - x;
+        const double dy = ny - y;
+        const double mag = std::hypot(dx, dy);
+        if (mag <= 1e-9)
+            return false;
+        const double max_step = kMaxSpeedPxPerSec * dt;
+        if (mag > max_step)
+        {
+            nx = x + dx / mag * max_step;
+            ny = y + dy / mag * max_step;
+        }
+        x = nx;
+        y = ny;
+        return true;
+    }
+};
+
+StaticCrosshairRef g_static_crosshair;
+
 PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
-                                      int detection_resolution)
+                                      int detection_resolution,
+                                      double crosshair_smooth,
+                                      std::chrono::steady_clock::time_point now)
 {
     const double centre = detection_resolution * 0.5;
     PivotResolved out;
@@ -77,19 +188,39 @@ PivotResolved resolve_crosshair_pivot(const HotkeyProfile* profile,
     // 扳机只负责开火判定，不能隐式启用准星找色。否则枪口闪光或准星动画
     // 会在开火时移动 PID 参考点，表现为锁定后抖动。
     if (!profile || !profile->crosshair_detect_enabled)
+    {
+        g_static_crosshair.reset();
+        crosshair_runtime::publish_static_ref(crosshair_runtime::PivotSnapshot{});
         return out;
+    }
 
     const auto snap = crosshair_runtime::read();
-    if (!snap.valid)
+    bool fresh = false;
+    if (snap.valid)
+    {
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - snap.ts).count();
+        fresh = age <= crosshair_runtime::kFreshnessMs;
+    }
+
+    g_static_crosshair.update(fresh, snap.x, snap.y, centre,
+                             crosshair_smooth, now);
+
+    // 参考点对外发布一份(预览画的就是这个, 和原始命中点分开看)。
+    {
+        crosshair_runtime::PivotSnapshot ref;
+        ref.ts = now;
+        ref.valid = g_static_crosshair.engaged;
+        ref.x = g_static_crosshair.engaged ? g_static_crosshair.x : centre;
+        ref.y = g_static_crosshair.engaged ? g_static_crosshair.y : centre;
+        crosshair_runtime::publish_static_ref(ref);
+    }
+
+    if (!g_static_crosshair.engaged)
         return out;
 
-    const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - snap.ts).count();
-    if (age > crosshair_runtime::kFreshnessMs)
-        return out;
-
-    out.x = snap.x;
-    out.y = snap.y;
+    out.x = g_static_crosshair.x;
+    out.y = g_static_crosshair.y;
     out.from_color = true;
     return out;
 }
@@ -231,6 +362,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
     TriggerState trigger;
 
+    // 本会话是否真的持有过锁定。重构时丢掉的老代码守卫 (ev_last_track_id != -1)
+    // 表达的就是这件事: 缓存超时只应该在"锁定过又断流"时清链, 不该在本来就没
+    // 锁定时反复 reset。
+    bool had_lock = false;
+
     g_pid_last_err_px.store(0.0f);
     g_pid_mode_track.store(false);
 
@@ -329,6 +465,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 reset_trigger(mouseThread, trigger);
                 mouseThread.clearQueuedMoves();
                 last_tick_ts = std::chrono::steady_clock::time_point::min();
+                had_lock = false;
                 publish_boss_debug(engine);
             }
         }
@@ -341,6 +478,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             reset_trigger(mouseThread, trigger);
             mouseThread.clearQueuedMoves();
             aim_path_driver.reset();
+            had_lock = false;
             if (hasNewDetection)
             {
                 boss::EngineInput in;
@@ -363,20 +501,25 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // 正常缓存按“空检测帧”递增 missed；若采集/推理完全停更，就没有新
         // version 可递增。用最近检测节奏把缓存帧数换算成超时，避免旧锁定
         // 永久挂住，同时仍不拿陈旧 anchor 驱动 mover。
+        //
+        // 超时下限 3 个采集周期: 这个分支的目的只是"发现检测流真的断了", 不该
+        // 被正常的发布抖动(8.2ms 的节奏偶尔 9~10ms)触发 —— engine.reset() 会连
+        // PIDF 的 residual 一起清掉, 那正是"逼近锚点后停住不再收敛"的直接原因。
         if (!hasNewDetection)
         {
             const double cadence_ms = (detection_interval_ms > 0.0)
                 ? std::clamp(detection_interval_ms, 1.0, 1000.0)
                 : (1000.0 / 60.0);
             const double cache_timeout_ms = cadence_ms
-                * static_cast<double>(std::max(1, profile_ptr->lost_target_cache_frames + 1));
-            if (detection_age_ms > cache_timeout_ms)
+                * static_cast<double>(std::max(3, profile_ptr->lost_target_cache_frames + 1));
+            if (had_lock && detection_age_ms > cache_timeout_ms)
             {
                 engine.reset();
                 publish_boss_debug(engine);
                 mouseThread.clearQueuedMoves();
                 reset_trigger(mouseThread, trigger);
                 g_pid_last_err_px.store(0.0f);
+                had_lock = false;
             }
             continue;
         }
@@ -388,7 +531,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
             probed_frame_capture_ns, probed_publish_ns,
             static_cast<double>(g_mouse_queue_latency_ms.load()));
 
-        const auto pivot = resolve_crosshair_pivot(profile_ptr, config_resolution);
+        const auto pivot = resolve_crosshair_pivot(
+            profile_ptr, config_resolution, config_snapshot->crosshair_smooth,
+            std::chrono::steady_clock::now());
 
         // The dynamic gate is based on the previous tick's locked track, so it
         // can constrain the candidate set before tracker association this tick.
@@ -452,6 +597,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // ─── Drive mouse ───
         if (out.have_target)
         {
+            had_lock = true;
             int drive_dx = out.dx;
             int drive_dy = out.dy;
             boss::AimPathDriver::Params path;
@@ -481,12 +627,23 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // coasting 只禁止开火，不再丢弃预测移动或重置控制器历史。
             mouseThread.sendRawMove(drive_dx, drive_dy);
 
+            // 扳机模式: 0 = 长按(按住不松手), >0 = 连点(按 duration 后松手)。
+            const bool trigger_hold_mode = profile_ptr->trigger_fire_duration <= 0;
+
             if (out.coasting)
             {
-                reset_trigger(mouseThread, trigger);
+                // 长按模式: 短暂滑行(检测丢一两帧, tracker 还在预测)不松手 ——
+                // 松了再按就是"连点"那种顿挫。这里冻结扳机状态, 等目标观测
+                // 回来再由 FSM 按"准星是否还在命中区"决定是否松手。目标真的
+                // 丢了会走下面 !have_target 分支强制松开。
+                if (!trigger_hold_mode)
+                    reset_trigger(mouseThread, trigger);
             }
 
-            // ─── 扳机 FSM (精准受击盒约束 + 瞬秒爆发连击) ───
+            // ─── 扳机 FSM (命中盒约束) ───
+            // 长按模式 (trigger_fire_duration == 0): 进命中区按下, 一直按住,
+            // 只有准星离开命中区才松手。连点模式 (>0): 老行为, 按 N ms 松手,
+            // 冷却后再按。
             if (!out.coasting && profile_ptr->trigger_enabled)
             {
                 const double scale = std::max(0.1, profile_ptr->trigger_y_percent / 100.0);
@@ -513,7 +670,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     trigger.phase_time_ms = now_ms;
                     mouseThread.pressLeftButton();
                     trigger.phase = TriggerPhase::Pressed;
-                    trigger.phase_target_ms = jitter_ms(
+                    // 长按模式不设按住上限(phase_target_ms 只在连点模式使用)。
+                    trigger.phase_target_ms = trigger_hold_mode ? 0 : jitter_ms(
                         profile_ptr->trigger_fire_duration,
                         profile_ptr->trigger_duration_jitter_ms);
                 };
@@ -584,6 +742,22 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     }
                     break;
                 case TriggerPhase::Pressed:
+                    if (trigger_hold_mode)
+                    {
+                        // 长按模式: 只要还在命中区就一直按住, 不做时长循环。
+                        // 准星离开命中区才松手, 然后走一次冷却间隔 —— 避免在
+                        // 判定边缘"按-松-按"变成连点。
+                        if (!in_zone)
+                        {
+                            mouseThread.releaseLeftButton();
+                            trigger.phase = TriggerPhase::Cooldown;
+                            trigger.phase_time_ms = now_ms;
+                            trigger.phase_target_ms = jitter_ms(
+                                profile_ptr->trigger_fire_interval,
+                                profile_ptr->trigger_interval_jitter_ms);
+                        }
+                        break;
+                    }
                     if (now_ms - trigger.phase_time_ms >= trigger.phase_target_ms)
                     {
                         mouseThread.releaseLeftButton();
@@ -631,6 +805,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             reset_trigger(mouseThread, trigger);
             mouseThread.clearQueuedMoves();
             g_pid_last_err_px.store(0.0f);
+            had_lock = false;
 
         }
 

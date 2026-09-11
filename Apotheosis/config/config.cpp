@@ -290,8 +290,14 @@ bool Config::loadConfig(const std::string& filename)
     if (capture_height < 0) capture_height = 0;
     if (capture_fps    < 0) capture_fps    = 0;
     capture_gpu_decode = get_bool("", "capture_gpu_decode", true);
+    // detection_resolution 只是模型输入边长的缓存值, 用户不可设。
+    // 真值在启动 / 换模型时由模型元数据写入 (publish_model_metadata),
+    // 这里先读旧值垫底, 探测不到输入形状时才用得上。
     detection_resolution = std::clamp(static_cast<int>(get_long("", "detection_resolution", 320)), 32, 2048);
-    circle_mask = get_bool("", "circle_mask", true);
+
+    // 圆形遮罩不再是用户选项 —— 中心裁切 + 圆形遮罩是本项目的固定设计,
+    // 所以直接忽略 ini 里可能残留的 false, 避免升级后遮罩被静默关掉。
+    circle_mask = true;
 
     // ---------- Hardware ----------
     input_method = get_string("", "input_method", "MAKCU");
@@ -693,9 +699,9 @@ bool Config::loadConfig(const std::string& filename)
             std::swap(hk.aim_path_bezier_cy1, hk.aim_path_bezier_cy2);
         }
 
-        // 扳机 clamp
+        // 扳机 clamp (duration 允许 0 = 长按模式, 见 config.h)
         hk.trigger_fire_delay    = std::clamp(hk.trigger_fire_delay,    0, 5000);
-        hk.trigger_fire_duration = std::clamp(hk.trigger_fire_duration, 1, 5000);
+        hk.trigger_fire_duration = std::clamp(hk.trigger_fire_duration, 0, 5000);
         hk.trigger_fire_interval = std::clamp(hk.trigger_fire_interval, 0, 5000);
         hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 500);
         hk.trigger_delay_jitter_ms    = std::clamp(hk.trigger_delay_jitter_ms,    0, 500);

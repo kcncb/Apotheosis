@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include "config/config.h"
 #include "crosshair/color_picker.h"
 #include "crosshair/crosshair_detector.h"
+#include "crosshair/crosshair_runtime.h"
 #include "detection_buffer.h"
 #include "i_detector.h"
 #include "preview_window.h"
@@ -88,6 +90,8 @@ struct PreviewConfigSnapshot
     int    crosshair_close_radius = 0;
     std::vector<crosshair::CrosshairColorBand> crosshair_colors;
     bool   any_color_enabled = false;
+    // 当前热键是否勾选了准星找色。用来区分"没命中"和"压根没开/没色带"。
+    bool   crosshair_hotkey_enabled = false;
 
     // Active (or fallback #0) hotkey FOV state.
     int    fov_base_x = 0;
@@ -135,6 +139,7 @@ PreviewConfigSnapshot snapshot_config()
         s.fov_base_x = hk.fovX;
         s.fov_base_y = hk.fovY;
         s.dynamic_fov_enabled = hk.dynamic_fov_enabled;
+        s.crosshair_hotkey_enabled = hk.crosshair_detect_enabled;
     }
     return s;
 }
@@ -199,8 +204,11 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
 
     // 3. Crosshair colour-find ROI rectangle.
     // Bottom-edge midpoint anchored at the frame centre (square sits above
-    // the centre line). Must match clipped_center_roi() in
-    // crosshair/crosshair_detector.cpp so the preview matches detection.
+    // the centre line). Must match the runtime ROI in
+    // crosshair/crosshair_runtime.cpp::process_gpu_frame
+    // (roi_y = rows/2 - roi_h + 10) — that is the window the live finder
+    // actually searches; a frame drawn from any other formula would lie to
+    // whoever is tuning the ROI.
     if (cfg.crosshair_rect_w > 0 && cfg.crosshair_rect_h > 0)
     {
         const int rw = std::max(4, cfg.crosshair_rect_w);
@@ -212,27 +220,84 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
             cv::rectangle(canvas, clipped, bgr(255, 190, 0), 1, cv::LINE_AA);
     }
 
-    // 4. Live crosshair colour hit marker.
-    if (cfg.any_color_enabled && canvas.type() == CV_8UC3)
+    // 4. 运行期准星找色结果 —— 直接读 crosshair_runtime 发布的那份 pivot。
+    //
+    // 这里必须显示运行期快照, 不能在本线程里另跑一次 CPU 检测器: 实战走的是
+    // GPU 路径 (cpu_path_active() 恒为 false), 而 CPU 检测器的 ROI
+    // (crosshair_detector.cpp dynamic_center_roi, cy - 0.6*h) 和接受窗口都跟
+    // 运行期不一样, 画出来的命中点会"看着生效、实际无效"。判断压枪有没有参考
+    // 点, 只看这一行。
+    // 注: 预览画布用 Hershey 字体, 渲染不了中文, 所以这一行保持英文 —— 与上方
+    // "Infer FPS | Lat" 一栏的既有约定一致; 中文文案在 Qt/ImGui 面板里。
     {
-        crosshair::CrosshairDetectorSettings settings;
-        settings.enabled = true;
-        settings.rect_w = cfg.crosshair_rect_w;
-        settings.rect_h = cfg.crosshair_rect_h;
-        settings.min_pixel_count = cfg.crosshair_min_pixel_count;
-        settings.close_radius = cfg.crosshair_close_radius;
-        settings.colors = cfg.crosshair_colors;
+        const auto snap = crosshair_runtime::read();
+        const auto ref  = crosshair_runtime::read_static_ref();
+        const auto ref_age_ms = ref.valid
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - ref.ts).count()
+            : -1;
+        // 参考点只在新鲜时展示: 松开瞄准热键后它会停在上次的值, 画出来会误导。
+        const bool ref_fresh = ref_age_ms >= 0 && ref_age_ms <= 250;
+        const long long age_ms = snap.valid
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - snap.ts).count()
+            : -1;
 
-        static crosshair::CrosshairDetector detector;
-        auto hit = detector.detect(canvas, settings);
-        if (hit)
+        char ref_text[48];
+        if (ref_fresh)
+            std::snprintf(ref_text, sizeof(ref_text), "ref (%d,%d)",
+                          static_cast<int>(std::lround(ref.x)),
+                          static_cast<int>(std::lround(ref.y)));
+        else
+            std::snprintf(ref_text, sizeof(ref_text), "ref -");
+
+        char line[200];
+        if (!cfg.any_color_enabled || !cfg.crosshair_hotkey_enabled)
         {
-            const cv::Point p(static_cast<int>(hit->x), static_cast<int>(hit->y));
-            cv::circle(canvas, p, 5, bgr(0, 0, 0), 3, cv::LINE_AA);
-            cv::circle(canvas, p, 5, bgr(60, 60, 255), 1, cv::LINE_AA);
-            cv::line(canvas, cv::Point(p.x - 8, p.y), cv::Point(p.x + 8, p.y), bgr(60, 60, 255), 1, cv::LINE_AA);
-            cv::line(canvas, cv::Point(p.x, p.y - 8), cv::Point(p.x, p.y + 8), bgr(60, 60, 255), 1, cv::LINE_AA);
+            std::snprintf(line, sizeof(line), "Xhair: OFF (hotkey/palette off)");
         }
+        else if (snap.valid)
+        {
+            // 原始命中点 + 真正进控制环的静态参考点一起显示: 参考点乱跳就是
+            // 控制环被灌了抖动, 参考点稳而命中点跳说明限速/惯性在起作用。
+            std::snprintf(line, sizeof(line),
+                          "Xhair: HIT (%d,%d) age=%lldms%s | %s",
+                          static_cast<int>(std::lround(snap.x)),
+                          static_cast<int>(std::lround(snap.y)),
+                          age_ms,
+                          (age_ms > crosshair_runtime::kFreshnessMs) ? " STALE" : "",
+                          ref_text);
+        }
+        else
+        {
+            std::snprintf(line, sizeof(line), "Xhair: MISS | %s", ref_text);
+        }
+
+        const cv::Scalar col = snap.valid ? bgr(80, 255, 80) : bgr(150, 150, 150);
+        draw_text_with_bg(canvas, line, cv::Point(6, canvas.rows - 6),
+                          bgr(245, 245, 245), bgr(0, 0, 0));
+
+        if (snap.valid)
+        {
+            const cv::Point p(static_cast<int>(std::lround(snap.x)),
+                              static_cast<int>(std::lround(snap.y)));
+            cv::drawMarker(canvas, p, col, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
+            cv::circle(canvas, p, 6, col, 1, cv::LINE_AA);
+        }
+
+        // 静态参考点 = 找色对瞄准环的唯一输出, 用方块表示。
+        if (ref_fresh)
+        {
+            const cv::Point r(static_cast<int>(std::lround(ref.x)),
+                              static_cast<int>(std::lround(ref.y)));
+            cv::rectangle(canvas, cv::Rect(r.x - 7, r.y - 7, 15, 15),
+                          bgr(255, 120, 240), 1, cv::LINE_AA);
+        }
+
+        // 画面几何中心 = 找色关闭/参考点回收后回落的位置。两个标记重合就说明
+        // 找色当前没有提供任何有效参考(等于没压枪), 分开才是真的在跟随准星。
+        cv::drawMarker(canvas, cv::Point(canvas.cols / 2, canvas.rows / 2),
+                       bgr(0, 200, 255), cv::MARKER_TILTED_CROSS, 10, 1, cv::LINE_AA);
     }
 
 
