@@ -170,6 +170,25 @@ double ff_learning_rate_cap(const PidfDelayModelExact& delay,
 // 5 帧及以下 kp=2.0 仍是稳的(20.7), 所以不设上限; 6 帧收到 0.8、7-8 帧收到 0.4。
 // 宁可【滞后】也不要【发散】—— 发散时准星会自己乱飞, 比滞后危险得多。
 // 12 帧以上任何 kp 都稳不住, 那是链路本身的极限, 只能靠降延迟解决。
+// 微分增益 kd 的【延迟上限】。
+//
+// 微分项吃的是延迟后的测量, 延迟一大它对相位是净害, 必须比 kp 收得更狠。
+// 实测(aim_scenario_sim, kp 与 lr 均由定档给出, kf=1):
+//     总延迟     2帧     3帧     5帧     6帧     7帧     8帧
+//     kd=0.05  10.44  12.77  20.70  31.49  98.80  276.50
+//     kd=0.03  10.93  13.46  20.13  31.20  44.83   85.16
+//     kd=0.02  11.28  14.12  20.71  32.13  47.88   81.67
+// 低延迟下 0.05 最好; 5-7 帧收到 0.03; 8 帧以上收到 0.02。
+double derivative_gain_cap(const PidfDelayModelExact& delay,
+                           double dt) noexcept {
+    const double total_frames = link_latency_frames(delay, dt);
+    if (total_frames > 1.0e8)
+        return 0.03;                       // 没有实测延迟: 折中
+    if (total_frames <= 4.5)
+        return 0.05;
+    return total_frames <= 7.5 ? 0.03 : 0.02;
+}
+
 double proportional_gain_cap(const PidfDelayModelExact& delay,
                              double dt) noexcept {
     const double total_frames = link_latency_frames(delay, dt);
@@ -538,12 +557,16 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     //      锁定)就打出一个微分尖峰, 而 Kp 越高这个尖峰越猛。
     // 低通写成时间常数形式(与 dt 无关), 于是 240fps 和 60fps 的手感一致。
     // tau 约 2 帧: 既压掉逐帧毛刺, 又保留追踪运动趋势的阻尼作用。
+    // 高延迟时把 kd 也收到安全档(见 derivative_gain_cap)
+    const double kd_cap = derivative_gain_cap(delay, dt);
     constexpr double kDerivativeTauSec = 0.020;
     const double d_alpha = 1.0 - std::exp(-dt / kDerivativeTauSec);
     const double d_raw_x =
-        (s.corrected_error_x - s.previous_error_x) * s.kd_x / dt;
+        (s.corrected_error_x - s.previous_error_x)
+        * std::min(s.kd_x, kd_cap) / dt;
     const double d_raw_y =
-        (s.corrected_error_y - s.previous_error_y) * s.kd_y / dt;
+        (s.corrected_error_y - s.previous_error_y)
+        * std::min(s.kd_y, kd_cap) / dt;
     s.d_filtered_x += (d_raw_x - s.d_filtered_x) * d_alpha;
     s.d_filtered_y += (d_raw_y - s.d_filtered_y) * d_alpha;
     s.scratch_x = s.d_filtered_x;
