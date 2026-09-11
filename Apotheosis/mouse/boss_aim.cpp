@@ -193,6 +193,8 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     out.anchor={float(command.predicted_anchor.x),float(command.predicted_anchor.y)};
     out.bbox=observed_box_;
     out.bbox.x+=out.anchor.x-observed_anchor_.x;out.bbox.y+=out.anchor.y-observed_anchor_.y;
+    out.observed_bbox=observed_box_;
+    out.class_id=class_id_;
     out.coasting=!in.has_new_measurement || last_observed_sequence_!=in.sequence;
     out.pixel_dx=command.pixels.x;out.pixel_dy=command.pixels.y;
     out.dx=int(std::lround(command.pixels.x));out.dy=int(std::lround(command.pixels.y));

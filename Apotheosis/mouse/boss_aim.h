@@ -67,6 +67,10 @@ struct EngineOutput
     int current_track_id = -1;
     cv::Point2f anchor{};
     cv::Rect2f bbox{};
+    // 本帧的原始观测框(未随预测锚点平移)与锁定类别, 供诊断日志区分
+    // "框自己在跳"和"锚点比例随类别切换"。bbox 的宽高与原始框相同。
+    cv::Rect2f observed_bbox{};
+    int class_id = -1;
     int dx = 0;
     int dy = 0;
     double cutoff_hz = 0.0;

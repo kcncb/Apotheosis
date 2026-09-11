@@ -388,6 +388,11 @@ inline void chain_log_aim_frame(std::int64_t frame_id,
                                 const double* anchor_xy,
                                 double box_w,
                                 double box_h,
+                                int class_id,
+                                double obs_x,
+                                double obs_y,
+                                double k_x,
+                                double k_y,
                                 int engine_dx,
                                 int engine_dy,
                                 bool coasting,
@@ -417,9 +422,13 @@ inline void chain_log_aim_frame(std::int64_t frame_id,
         fov_radius_x, fov_radius_y, resolution);
     runtime::chainlog::write(
         runtime::chainlog::SecControl, 2,
-        ",track_id=%d,anchor_x=%.2f,anchor_y=%.2f,box_w=%.1f,box_h=%.1f,"
+        ",track_id=%d,class=%d,anchor_x=%.2f,anchor_y=%.2f,"
+        "obs_x=%.1f,obs_y=%.1f,box_w=%.1f,box_h=%.1f,"
+        "k_x=%.3f,k_y=%.3f,"
         "err_x=%.2f,err_y=%.2f,dx=%d,dy=%d,coasting=%d,suppressed=%d",
-        track_id, anchor_xy[0], anchor_xy[1], box_w, box_h,
+        track_id, class_id, anchor_xy[0], anchor_xy[1],
+        obs_x, obs_y, box_w, box_h,
+        k_x, k_y,
         anchor_xy[0] - crosshair_xy[0], anchor_xy[1] - crosshair_xy[1],
         engine_dx, engine_dy, coasting ? 1 : 0, motion_suppressed ? 1 : 0);
     runtime::chainlog::write(
@@ -807,6 +816,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     out.current_track_id, anchor_xy,
                     static_cast<double>(out.bbox.width),
                     static_cast<double>(out.bbox.height),
+                    out.class_id,
+                    static_cast<double>(out.observed_bbox.x),
+                    static_cast<double>(out.observed_bbox.y),
+                    in.calibration.pixels_per_count_x,
+                    in.calibration.pixels_per_count_y,
                     out.dx, out.dy, out.coasting, out.motion_suppressed,
                     static_cast<int>(std::lround(drive_dx)), static_cast<int>(std::lround(drive_dy)),
                     movement_feedback.backlog, movement_feedback.latency_ms,
