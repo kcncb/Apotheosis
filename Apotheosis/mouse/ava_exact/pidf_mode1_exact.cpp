@@ -141,13 +141,47 @@ void apply_high_kf_correction(PidfMode1State& s,
 // 没测到(0)时按保守的 0.05, 与旧默认一致 —— 不会比现在更差。
 //
 // 用户把「预测速度」调得比这个上限更低时, 以用户的值为准(取 min)。
+// 链路总延迟(帧) = 测量侧 + 指令侧。没测到延迟时返回一个大值(走最保守档)。
+double link_latency_frames(const PidfDelayModelExact& delay,
+                           double dt) noexcept {
+    if (delay.measure_latency_sec <= 0.0)
+        return 1.0e9;
+    return delay.measure_latency_sec / dt + delay.command_latency_frames;
+}
+
 double ff_learning_rate_cap(const PidfDelayModelExact& delay,
                             double dt) noexcept {
-    if (delay.measure_latency_sec <= 0.0)
+    const double total_frames = link_latency_frames(delay, dt);
+    if (total_frames > 1.0e8)
         return 0.05;                       // 没有实测延迟, 保守
-    const double total_frames =
-        delay.measure_latency_sec / dt + delay.command_latency_frames;
     return total_frames <= 4.0 ? 0.08 : 0.05;
+}
+
+// 比例增益 kp 的【延迟上限】。
+//
+// 为什么必须加: 比例环的相位裕度同样由链路延迟决定, 延迟一大, 高 kp 会直接
+// 【发散】而不是"只是慢一点"。实测(aim_scenario_sim, kd=0.05 kf=1, 补偿开启):
+//   总延迟(测量+指令)   6帧     7帧     8帧     12帧
+//     kp=2.0          14323   8.7e6  1.4e9   8.8e7
+//     kp=1.0             40    1861   1.8e5   5.5e7
+//     kp=0.8             31     482   14366   1.2e8
+//     kp=0.6             34     180    1574   2.2e8
+//     kp=0.4             39      99     277   2.4e8
+// 5 帧及以下 kp=2.0 仍是稳的(20.7), 所以不设上限; 6 帧收到 0.8、7-8 帧收到 0.4。
+// 宁可【滞后】也不要【发散】—— 发散时准星会自己乱飞, 比滞后危险得多。
+// 12 帧以上任何 kp 都稳不住, 那是链路本身的极限, 只能靠降延迟解决。
+double proportional_gain_cap(const PidfDelayModelExact& delay,
+                             double dt) noexcept {
+    const double total_frames = link_latency_frames(delay, dt);
+    if (total_frames > 1.0e8)
+        return 1.0;                        // 没有实测延迟: 取折中值, 宁可慢
+    if (total_frames <= 5.5)
+        return 1.0e9;                      // 不设上限, 用用户的值
+    if (total_frames <= 6.5)
+        return 0.8;
+    if (total_frames <= 8.5)
+        return 0.4;
+    return 0.25;                           // 再高就只能"尽量别发散", 性能已不可用
 }
 
 // 前馈速度估计器: 学习率由调用方显式传入(当前 = dynamic_lr, 即基学习率 × 高斯权重
@@ -515,11 +549,15 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.scratch_x = s.d_filtered_x;
     s.scratch_y = s.d_filtered_y;
 
+    // 高延迟时把 kp 收到安全档(见 proportional_gain_cap): 宁可滞后, 不可发散。
+    const double kp_cap = proportional_gain_cap(delay, dt);
     const double proportional_integral_x =
-        s.integral_x * s.ki_x + s.corrected_error_x * s.kp_x;
+        s.integral_x * s.ki_x
+        + s.corrected_error_x * std::min(s.kp_x, kp_cap);
     s.raw_pid_x = s.scratch_x + proportional_integral_x;
     const double proportional_integral_y =
-        s.integral_y * s.ki_y + s.corrected_error_y * s.kp_y;
+        s.integral_y * s.ki_y
+        + s.corrected_error_y * std::min(s.kp_y, kp_cap);
     s.raw_pid_y = s.scratch_y + proportional_integral_y;
 
     // 前馈速度估计: 学习率沿用 dynamic_lr(基学习率 × 高斯权重下限)。

@@ -195,6 +195,8 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
     TargetTrackerExact tracker;
 
     const int frames = static_cast<int>(sc.duration / e.dt);
+    const double jitter = (argc > 13) ? std::atof(argv[13]) : 0.0;
+    double clock = 0.0;   // 抖动时钟: dt 在 (1±jitter) 之间跳, 模拟真实调度
     for (int f = 0; f < frames; ++f)
     {
         const double t = f * e.dt;
@@ -208,7 +210,8 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
 
         // 检测噪声 + 量化
         static const double noise[] = {0,1,-1,0,1,0,-1,1,0,-1};
-        const double nz = 0.35 * noise[f % 10];
+        const double noise_px = (argc > 12) ? std::atof(argv[12]) : 0.35;
+        const double nz = noise_px * noise[f % 10];
         const double measured = std::round((measured_true + nz) * 2.0) * 0.5;
 
         // 指令生效延迟: 队列长度 = mouse_lat+1, applied = dx_{f-mouse_lat}。
@@ -275,7 +278,10 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
         in.target_y = 160.0 + (is_x ? 0.0 : predicted);
         in.current_y = 160.0;
         in.radius_x = rx; in.radius_y = ry;
-        const auto out = update_pidf_mode1(s, delay, in, (f + 1) * e.dt);
+        static const double jit[] = {1.0, 1.15, 0.9, 1.08, 0.95, 1.2, 0.85, 1.02, 0.92, 1.1};
+        const double dtf = e.dt * (1.0 + jitter * (jit[f % 10] - 1.0));
+        clock += dtf;
+        const auto out = update_pidf_mode1(s, delay, in, clock);
         const double dx = is_x ? static_cast<double>(out.dx) : static_cast<double>(out.dy);
         pending.push_back(dx);
         while (static_cast<int>(pending.size()) > e.mouse_lat + 1)
@@ -430,7 +436,7 @@ std::vector<Scenario> scenarios()
 
 int main(int argc, char** argv)
 {
-    // 参数位: kp kd kf lr 限幅 检测延迟 鼠标延迟 [假定测量延迟 [假定指令延迟 [kf_y [lr_y]]]]
+    // 参数位: kp kd kf lr 限幅 检测延迟 鼠标延迟 [假定测量延迟 [假定指令延迟 [kf_y [lr_y [噪声px [dt抖动]]]]]]
     Params p;
     Env e;
     if (argc > 1) p.kp = std::atof(argv[1]);
