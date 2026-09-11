@@ -211,7 +211,7 @@ void Config::writeDefaultsInPlace()
     fixed_input_size = false;
 
     use_cuda_graph = true;
-    use_double_buffer = true;
+    use_double_buffer = false;
     gpuMemoryReserveMB = 2048;
     enableGpuExclusiveMode = true;
 
@@ -325,7 +325,7 @@ bool Config::loadConfig(const std::string& filename)
     fixed_input_size = get_bool("", "fixed_input_size", false);
 
     use_cuda_graph = get_bool("", "use_cuda_graph", true);
-    use_double_buffer = get_bool("", "use_double_buffer", true);
+    use_double_buffer = get_bool("", "use_double_buffer", false);
     gpuMemoryReserveMB = get_long("", "gpuMemoryReserveMB", 2048);
     enableGpuExclusiveMode = get_bool("", "enableGpuExclusiveMode", true);
 

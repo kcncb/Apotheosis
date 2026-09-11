@@ -144,7 +144,26 @@ void MouseThread::sendRawMove(int dx, int dy)
         std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
         if (makcu_new_)
         {
-            makcu_new_->move(dx, dy);
+            // MAKCUNEW 是【直发】: 不走 moveWorkerLoop。于是那条路上维护的
+            // lastLatencyUs_ / appliedD* / failedMoves_ 永远不会被更新 ——
+            // 直接后果是延迟探针的 aim2mv(T3→T4) 与 E2E 恒为 0.00, 日志看起来
+            // 像"写出零延迟", 实际上是没测。这里就地把真实写出耗时与位移量补上,
+            // 让遥测对这条路径同样成立(语义与队列路径一致: 决策→写出完成)。
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool ok = makcu_new_->move(dx, dy);
+            const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            lastLatencyUs_.store(static_cast<long long>(elapsed_us),
+                                 std::memory_order_release);
+            if (ok)
+            {
+                appliedDx_.fetch_add(dx, std::memory_order_release);
+                appliedDy_.fetch_add(dy, std::memory_order_release);
+            }
+            else
+            {
+                failedMoves_.fetch_add(1, std::memory_order_release);
+            }
             return;
         }
     }

@@ -125,6 +125,23 @@ private:
     };
     PendingFrameType pendingFrameType = PendingFrameType::None;
 
+    // ── 延迟探针: 按帧携带的时间戳 (T0 采集 / T1 取帧) ──
+    //
+    // pending*: processFrame*/processFrameGpu 写入(持 inferenceMutex), 推理线程
+    //   在【取走该帧的那一刻】读走, 存进自己的 per-slot 数组。
+    // publish*: 当前正在发布的那一帧的 T0/T1, postProcess() 发布时使用。
+    //
+    // 为什么不直接读探针的全局槽: 那是"只存最新"的量, 而发布发生在取走下一帧
+    // 之后(双缓冲下必然如此) —— 在那里读到的恒定是下一帧的戳, 于是 total 系统性
+    // 地少算整整一个帧间隔(120fps = 8.33ms)。按帧、按槽携带才不会有这个错位。
+    //
+    // 这里刻意存两个 int64_t 而不是探针的 SubmitStamp, 免得头文件为了一个
+    // POD 去包含整个 latency_probe.h。
+    int64_t pendingCaptureNs = 0;
+    int64_t pendingSubmitNs  = 0;
+    int64_t publishCaptureNs = 0;
+    int64_t publishSubmitNs  = 0;
+
     void loadEngine(const std::string& engineFile);
 
     void preProcess(const cv::Mat& frame);

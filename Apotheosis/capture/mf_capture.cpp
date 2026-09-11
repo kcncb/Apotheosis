@@ -756,11 +756,22 @@ void MFCapture::ReceiveThread()
         // 帧率 / 带宽 / 延迟全部不可控, 正是要杜绝的那类"看不见的回退"。
         reader.Reset();
         ComPtr<IMFAttributes> readerAttrs;
-        MFCreateAttributes(&readerAttrs, 2);
+        MFCreateAttributes(&readerAttrs, 3);
         if (readerAttrs)
         {
             readerAttrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
             readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
+            // MF_LOW_LATENCY: 要求采集管线按最小延迟投递。
+            //
+            // 不设这一项时默认是 FALSE, MF 会走"抗抖动优先"的缓冲策略: 帧在
+            // 框架/驱动内部多排一段才交给 ReadSample。那几帧的等待发生在本进程
+            // 之外, 端到端延迟探针的 T0 打点在其【之后】, 所以探针完全看不到它 ——
+            // 现象就是"每帧都拿到了, 但每帧都已经旧了", 而日志上 cap2det 依然是
+            // 零点几毫秒, 看起来一切正常。
+            //
+            // 设为 TRUE 只改变投递时机: 不改变格式/分辨率/帧率的协商结果, 也不
+            // 引入任何 CPU 侧转换(上面的 converter 仍然禁用)。这是纯收益项。
+            readerAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
         }
         if (FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttrs.Get(), &reader)))
         {

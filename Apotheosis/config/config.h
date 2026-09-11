@@ -204,13 +204,22 @@ public:
 
     // CUDA / System
     bool use_cuda_graph = true;
-    // Double-buffer pipeline: overlap CPU post-processing of frame N with
-    // GPU preprocess+inference of frame N+1. Trades ~1 frame of latency for
-    // throughput. Disables CUDA Graph path when enabled (simpler code path).
-    // Default ON: hides the CPU NMS / D2H sync from the inference critical
-    // path. The 1-frame extra latency is well below typical capture jitter
-    // (~8ms at 120fps), and downstream Kalman prediction compensates.
-    bool use_double_buffer = true;
+    // 双缓冲流水线: 用第 N+1 帧的 GPU 推理去重叠第 N 帧的 CPU 后处理。
+    //
+    // 代价是【整整一帧延迟】: 检测结果的发布被门控在"下一帧到达"上(后处理块
+    // 在 hasNewFrame 分支内, post_slot 取 prev_slot), 所以帧间隔多长就多等多久
+    // —— 120fps = +8.33ms, 60fps = +16.7ms。
+    //
+    // 默认关闭, 理由:
+    //   · 它换来的吞吐只在 GPU 链 + CPU 后处理逼近帧预算时才有意义。实测
+    //     infer≈0.5ms, 相对 120fps 的 8.33ms 预算有整个数量级的余量, 属于白付一帧。
+    //   · 旧注释称"这一帧延迟远低于采集抖动(~8ms@120fps)"—— 8ms 就是 120fps 的
+    //     整个帧间隔, 它并不"远低于"任何东西。
+    //   · 旧注释称"下游 Kalman 预测会补偿"—— 但预测通路实际是关闭的(tracker 的
+    //     predicted_center_valid 恒为 0, 且 PIDF 的 LR/KF 默认为 0), 没有任何东西
+    //     在补偿这一帧。
+    // 注意: 它与 CUDA Graph 现在可以共存(每槽一张图), 需要吞吐时在界面打开即可。
+    bool use_double_buffer = false;
     int gpuMemoryReserveMB = 2048;
     bool enableGpuExclusiveMode = true;
     int cpuCoreReserveCount = 4;

@@ -191,7 +191,13 @@ private:
         int height = 0;
         int stride = 0;
     };
-    static constexpr int MAX_PROCESS_QUEUE = 2;
+    // 只保留最新帧: 入队时若已有待处理 job, 直接丢掉它再放新的。
+    //
+    // 原来是 2 —— 深度虽小, 但语义是"丢最旧"的 FIFO, 与下游输出队列的
+    // MAX_QUEUE_SIZE=1(只保留最新)不一致。worker 只要追不上生产者, 队列就会
+    // 稳定停在深水位, 每一帧都白等一拍。而下游 detector 本来就会用下一拍覆盖
+    // 旧帧, 所以多留一帧【不提高任何实际吞吐, 只增加延迟】。
+    static constexpr int MAX_PROCESS_QUEUE = 1;
     std::thread process_thread_;
     std::mutex process_mutex_;
     std::condition_variable process_cv_;

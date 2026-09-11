@@ -134,6 +134,20 @@ inline int64_t takeSubmittedCaptureNs()
     return submittedCaptureNs().load(std::memory_order_acquire);
 }
 
+// 采集时刻与取帧时刻成对携带。
+//
+// ★ 必须在 detector【取走该帧的那一次临界区里】读出, 并把结果按槽保存下来。
+//
+// 旧实现在【发布时】才去读那两个"只存最新"的全局量。而发布发生在取走下一帧
+// 之后(双缓冲下必然如此), 所以读到的恒定是【下一帧】的采集戳 —— total 于是
+// 系统性地少算整整一个帧间隔(120fps = 8.33ms), 而且越是开双缓冲错得越稳定。
+// 按帧、按槽携带即可彻底解耦: 每个 slot 记住自己那一帧的 T0/T1, 发布时取自己那份。
+struct SubmitStamp
+{
+    int64_t capture_ns = 0;   // T0 采集时刻
+    int64_t submit_ns  = 0;   // T1 detector 取帧时刻
+};
+
 // -----------------------------------------------------------------------------
 // 阶段统计
 // -----------------------------------------------------------------------------
@@ -172,23 +186,10 @@ enum StageId
     kStageCount
 };
 
-inline const char* stageName(int id)
-{
-    switch (id)
-    {
-    case kCaptureWait:  return "采集->取帧";
-    case kInference:    return "推理";
-    case kPublishToAim: return "发布->消费";
-    case kAimToMove:    return "消费->写出";
-    case kTotal:        return "总延迟(T0->T3)";
-    case kEndToEnd:     return "全链路(T0->T4)";
-    default:            return "?";
-    }
-}
-
 struct Counters
 {
     uint64_t frames_consumed   = 0;  // aim loop 结算过的完整帧
+    uint64_t detections_seen    = 0;  // aim loop 看到的新检测批数(含未消费的)
     uint64_t capture_frames    = 0;  // 采集产出帧数
     uint64_t dropped_capture   = 0;  // 采集产出但 detector 没跟上的帧数
     uint64_t stale_consumes    = 0;  // aim loop 拿到没有采集戳的旧数据
@@ -238,40 +239,72 @@ inline void noteCaptureForStats(int64_t ns)
 // -----------------------------------------------------------------------------
 // detector 侧: 取到帧。返回该帧的采集戳 (由调用方保存并随检测结果发布)。
 // -----------------------------------------------------------------------------
-inline int64_t markSubmit()
+inline SubmitStamp markSubmitStamp()
 {
-    const int64_t cap = loadCaptureNs();
-    submitNs().store(nowNs(), std::memory_order_release);
-    submittedCaptureNs().store(cap, std::memory_order_release);
+    SubmitStamp out;
+    out.capture_ns = loadCaptureNs();
+    out.submit_ns  = nowNs();
+    submitNs().store(out.submit_ns, std::memory_order_release);
+    submittedCaptureNs().store(out.capture_ns, std::memory_order_release);
 
     auto& sh = shared();
-    auto& st = sh.stages[kCaptureWait];
     double wait_ms = 0.0;
-    if (cap != 0) wait_ms = nsToMs(nowNs() - cap);
-    st.push(wait_ms);
+    if (out.capture_ns != 0) wait_ms = nsToMs(out.submit_ns - out.capture_ns);
+
+    // 一次临界区完成全部统计写入。
+    //
+    // 旧实现在这里分了两次: `stages[kCaptureWait].push()` 写在【锁外】, 而
+    // snapshot() 是持锁读同一个数组 —— 那是一处真实的数据竞争, 污染的恰好
+    // 就是"采集->取帧"这个排查延迟时最需要看的数字。合并进一把锁即修好,
+    // 顺带还把每帧两次加锁减成一次。
+    std::lock_guard<std::mutex> lk(sh.mu);
+    sh.stages[kCaptureWait].push(wait_ms);
 
     // 采集序号跳变 => detector 没跟上, 中间有帧被覆盖丢弃。
-    {
-        std::lock_guard<std::mutex> lk(sh.mu);
-        const uint64_t seq = loadCaptureSeq();
-        if (seq > sh.last_capture_seq_seen + 1)
-            sh.counters.dropped_capture += (seq - sh.last_capture_seq_seen - 1);
-        sh.last_capture_seq_seen = seq;
-        sh.last_capture_ns_seen  = cap;
-    }
-    return cap;
+    const uint64_t seq = loadCaptureSeq();
+    if (seq > sh.last_capture_seq_seen + 1)
+        sh.counters.dropped_capture += (seq - sh.last_capture_seq_seen - 1);
+    sh.last_capture_seq_seen = seq;
+    sh.last_capture_ns_seen  = out.capture_ns;
+    return out;
+}
+
+// 兼容入口: 只关心采集戳的调用方(自测/DML)仍按原样使用。
+inline int64_t markSubmit()
+{
+    return markSubmitStamp().capture_ns;
 }
 
 // -----------------------------------------------------------------------------
 // detector 侧: 推理完成、即将发布检测结果。
+//
+// submit_ns: 本次发布所依据那一帧的 T1(取帧时刻)。TrtDetector 必须把该帧在
+// 取走时记下的 T1 传进来 —— 不能让它自己去读全局槽, 那个槽此时可能已经是
+// 下一帧的(见 SubmitStamp 注释)。传 -1 表示"沿用旧的全局槽语义", 供 DML 与
+// 自测使用。
 // -----------------------------------------------------------------------------
-inline void markInferenceDone()
+inline void markInferenceDone(int64_t submit_ns = -1)
 {
-    const int64_t sub = submitNs().load(std::memory_order_acquire);
+    const int64_t sub = (submit_ns >= 0)
+        ? submit_ns
+        : submitNs().load(std::memory_order_acquire);
     if (sub == 0) return;
     auto& sh = shared();
     std::lock_guard<std::mutex> lk(sh.mu);
     sh.stages[kInference].push(nsToMs(nowNs() - sub));
+}
+
+// -----------------------------------------------------------------------------
+// aim loop 侧: 看到了一批新检测(不论是否被消费)。
+//
+// 用来把"瞄准键没按下所以没消费"和"采集/推理真的停更了"区分开 —— 旧日志
+// 两种情况都只打印同一句"采集或推理已停更", 会把人往错的方向引。
+// -----------------------------------------------------------------------------
+inline void noteDetectionSeen()
+{
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    sh.counters.detections_seen++;
 }
 
 // -----------------------------------------------------------------------------
@@ -311,6 +344,7 @@ struct Snapshot
 {
     bool     enabled             = true;
     uint64_t frames_consumed     = 0;
+    uint64_t detections_seen     = 0;
     uint64_t capture_frames      = 0;
     uint64_t dropped_capture     = 0;
     uint64_t stale_consumes      = 0;
@@ -326,6 +360,7 @@ inline Snapshot snapshot()
     std::lock_guard<std::mutex> lk(sh.mu);
     out.enabled             = sh.enabled;
     out.frames_consumed     = sh.counters.frames_consumed;
+    out.detections_seen     = sh.counters.detections_seen;
     out.capture_frames      = sh.counters.capture_frames;
     out.dropped_capture     = sh.counters.dropped_capture;
     out.stale_consumes      = sh.counters.stale_consumes;
@@ -539,13 +574,14 @@ inline std::string summaryLine()
     std::snprintf(
         buf, sizeof(buf),
         "E2E=%.2f avg=%.2f pk=%.2f | cap2det=%.2f infer=%.2f pub2aim=%.2f "
-        "aim2mv=%.2f total=%.2f | src=%.1ffps frames=%llu dropped=%llu stale=%llu",
+        "aim2mv=%.2f total=%.2f | src=%.1ffps frames=%llu seen=%llu dropped=%llu stale=%llu",
         s.stages[kEndToEnd].last_ms, s.stages[kEndToEnd].ema_ms,
         s.stages[kEndToEnd].max_ms,
         s.stages[kCaptureWait].ema_ms, s.stages[kInference].ema_ms,
         s.stages[kPublishToAim].ema_ms, s.stages[kAimToMove].ema_ms,
         s.stages[kTotal].ema_ms,
         s.capture_fps, static_cast<unsigned long long>(s.frames_consumed),
+        static_cast<unsigned long long>(s.detections_seen),
         static_cast<unsigned long long>(s.dropped_capture),
         static_cast<unsigned long long>(s.stale_consumes));
     return buf;
@@ -569,6 +605,7 @@ inline void logWorker(FileLogConfig cfg)
     uint64_t last_dropped = 0;
     uint64_t last_stale   = 0;
     uint64_t last_frames  = 0;
+    uint64_t last_seen    = 0;
 
     const int step_ms = 50;
     int elapsed = 0;
@@ -630,8 +667,22 @@ inline void logWorker(FileLogConfig cfg)
             }
             else if (s.frames_consumed > 0)
             {
-                logLine("IDLE no new frames (采集或推理已停更)");
+                // 区分两种完全不同的"没消费":
+                //   seen 还在涨 -> 检测一直在产, 只是瞄准键没按下;
+                //   seen 也不涨 -> 采集或推理确实停更了。
+                // 旧版两种情况都只写"采集或推理已停更", 会误导排查方向。
+                char buf[224];
+                const uint64_t seen_delta = s.detections_seen - last_seen;
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "IDLE consumed=+0 seen=+%llu -> %s",
+                    static_cast<unsigned long long>(seen_delta),
+                    seen_delta > 0
+                        ? "检测仍在产帧, 仅是瞄准键未按下 (采集/推理正常)"
+                        : "采集或推理确实已停更");
+                logLine(buf);
             }
+            last_seen = s.detections_seen;
         }
 
         for (int i = 0; i < kStageCount; ++i)
@@ -678,6 +729,8 @@ inline bool startFileLog(const FileLogConfig& cfg = FileLogConfig{})
           << "# unit: ms. EXCLUDES capture-card internal HDMI->USB (typ 20-60ms), "
              "so this is a LOWER BOUND." << '\n'
           << "# line kinds: periodic summary | EVENT drop/stale | SPIKE | IDLE" << '\n'
+          << "# frames=aim loop 消费过的批数  seen=aim loop 看到的新检测批数(含未消费)" << '\n'
+          << "# seen 涨而 frames 不涨 = 瞄准键未按下(正常); 两者都不涨 = 采集/推理停更" << '\n'
           << "# started: " << detail::timestampNow() << '\n';
     probe.flush();
     probe.close();

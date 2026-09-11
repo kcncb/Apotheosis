@@ -409,6 +409,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 confidences.resize(aligned);
                 lastVersion = detectionBuffer.version;
                 hasNewDetection = true;
+                // 探针: 记录"看到了一批新检测"。与 markAimConsume(只统计被消费的)
+                // 分开, 这样日志才能区分"瞄准键没按下"和"采集/推理真的停更了"。
+                runtime::latency::noteDetectionSeen();
             }
             detection_interval_ms = detectionBuffer.last_interval_ms;
             if (detectionBuffer.stamp.time_since_epoch().count() != 0)
