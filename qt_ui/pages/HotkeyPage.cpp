@@ -828,7 +828,25 @@ void HotkeyPage::buildBossAimCard()
     const QString lockTip = QString::fromUtf8(
         u8"AVA 的 Kf：决定速度前馈/提前量强度；为 0 时预测速度不会改变输出。");
     const QString predictionTip = QString::fromUtf8(
-        u8"AVA 的 LR：控制 Kf 前馈状态的学习速度，不是独立提前量；需配合非零锁定强度。");
+        u8"AVA 的 LR：控制 Kf 前馈状态的学习速度，不是独立提前量；需配合非零锁定强度。\n"
+        u8"本版给它加了下限，远距离目标也能持续学习速度 —— 原实现在误差大时学习率几乎归零，"
+        u8"于是「必须先贴近了才肯学目标往哪走」，远的/刚见到的目标永远慢半拍。");
+    // 瞄准速度: 控制器内部对比例项有原生标定系数 0.1，所以界面数值与"每帧
+    // 收敛比例"差 10 倍。写清楚换算，用户才不用靠猜来调参。
+    const QString aimSpeedTip = QString::fromUtf8(
+        u8"AVA 的 Kp：每帧向目标推进多少。\n"
+        u8"实际每帧收敛比例 = 本值 × 10%（内部有原生标定系数 0.1）。\n"
+        u8"1.0 → 每帧走掉剩余误差的 10%；10.0 → 约 100%，即一帧到位（此时需靠 Kd 压过冲）。\n"
+        u8"调得越高越「快」，但过冲/摆动也会越明显，配合 Kd 一起加。");
+    // 过冲控制: 本版对微分项加了低通，需要让用户知道行为变了。
+    const QString overshootTip = QString::fromUtf8(
+        u8"AVA 的 Kd：阻尼，抑制高速接近目标时的来回摆动与过冲。\n"
+        u8"本版给微分项加了一阶低通（约 2 帧时间常数）：压掉逐帧毛刺，所以准星更稳、"
+        u8"不再因检测抖动而嗡嗡响；代价是它对突变的反应略慢，过冲明显时把本值继续加大即可。");
+    m_pidfGain[0]->setToolTip(aimSpeedTip);
+    m_pidfGain[1]->setToolTip(aimSpeedTip);
+    m_pidfGain[4]->setToolTip(overshootTip);
+    m_pidfGain[5]->setToolTip(overshootTip);
     m_pidfGain[6]->setToolTip(lockTip);
     m_pidfGain[7]->setToolTip(lockTip);
     m_pidfGain[8]->setToolTip(predictionTip);

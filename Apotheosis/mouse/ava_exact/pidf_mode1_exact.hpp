@@ -1,16 +1,16 @@
 #pragma once
 
-#include "pidf_mode2_exact.hpp"
+#include "pidf_types_exact.hpp"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace cvm::recovered {
 
-// Mode 1 consumes the same 96-byte gain/deadzone/limit configuration and
-// returns the same 48-byte result ABI as Mode 2, but owns a different
-// 704-byte adaptive-controller state.
-using PidfMode1Config = PidfMode2Config;
+// 现役（也是唯一保留）的一套 PIDF：704 字节的自适应控制器状态。
+// 增益/死区/限幅复用共享的 96 字节 PidfConfig，输出复用共享的 48 字节
+// PidfNativeOutput —— 它们原先被定义在 mode2 的头里，被 mode1 反向依赖。
+using PidfMode1Config = PidfConfig;
 
 struct PidfMode1State {
     PidfMode1Config config{};               // +0..+95
@@ -61,7 +61,10 @@ struct PidfMode1State {
     double previous_move_y{};                // +416
     double integral_x{};                     // +424
     double integral_y{};                     // +432
-    std::uint8_t _pad1b8[16]{};              // +440..+455
+    // 原为 _pad1b8[16] 填充(+440..+455)。D 项一阶低通的状态直接复用这 16 字节,
+    // 所以 sizeof(PidfMode1State) 与下面所有 offset 断言都保持不变。
+    double d_filtered_x{};                   // +440
+    double d_filtered_y{};                   // +448
     double previous_error_x{};               // +456
     double previous_error_y{};               // +464
     double residual_x{};                     // +472

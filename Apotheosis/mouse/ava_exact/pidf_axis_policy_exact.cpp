@@ -35,15 +35,4 @@ void apply_pidf_axis_policy(
         state.residual_y = 0.0;
 }
 
-void apply_pidf_axis_policy(
-    PidfMode2State& state,
-    const PidfAxisPolicyDecision& decision) noexcept {
-    state.axis_blocked_x = decision.block_x;
-    state.axis_blocked_y = decision.block_y;
-    if (decision.block_x)
-        state.residual_x = 0.0;
-    if (decision.block_y)
-        state.residual_y = 0.0;
-}
-
 } // namespace cvm::recovered

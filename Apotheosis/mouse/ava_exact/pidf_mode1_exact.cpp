@@ -66,6 +66,23 @@ void compute_gaussian_weights(PidfMode1State& s) noexcept {
     s.gaussian_weight_y = std::exp(zy * zy * -0.5);
 }
 
+// dynamic_lr(前馈速度估计器的学习率) 的权重下限。
+//
+// 原实现直接拿【当前】高斯权重去缩放学习率, 而权重 = exp(-0.5*(err/radius)^2),
+// 误差一大就趋近于 0。于是出现一个鸡生蛋的死结:
+//   · 目标离准星很远时, 恰恰是最需要前馈(提前量)来快速贴上去的时候,
+//     而估计器此时几乎停止学习 —— 必须先贴近了它才肯学目标往哪走;
+//   · 表现就是"第一枪/拉远的目标永远慢半拍", 且 lr 调小会让它更明显。
+// 给一个下限, 让它在远距离也保留最低限度的学习能力。
+//
+// 注意: 前馈的【施加】权重用的是 integral_weight(峰值闩锁), 本来就没有这个
+// 问题; 这里修的只是"学习"侧。
+constexpr double kDynamicLrWeightFloor = 0.25;
+
+double lr_weight(double gaussian_weight) noexcept {
+    return std::max(gaussian_weight, kDynamicLrWeightFloor);
+}
+
 void apply_high_kf_correction(PidfMode1State& s,
                               double dt,
                               double radius,
@@ -152,13 +169,20 @@ void apply_post_limits(PidfMode1State& s,
         s.move_nonzero_y = 0;
     }
     if (s.config.movement_limit_x > 0) {
-        s.move_x = std::clamp(
+        const std::int32_t limited = std::clamp(
             s.move_x, -s.config.movement_limit_x, s.config.movement_limit_x);
+        // 被限幅截掉的部分回灌 residual。
+        // 原样实现直接丢弃, 于是每次触顶都永久少走一段位移 —— 准星会稳定停在
+        // 目标前方一点点、再也补不上来(表现为"永远差最后几像素")。
+        s.residual_x += static_cast<double>(s.move_x - limited);
+        s.move_x = limited;
         s.move_nonzero_x = s.move_x != 0;
     }
     if (s.config.movement_limit_y > 0) {
-        s.move_y = std::clamp(
+        const std::int32_t limited = std::clamp(
             s.move_y, -s.config.movement_limit_y, s.config.movement_limit_y);
+        s.residual_y += static_cast<double>(s.move_y - limited);
+        s.move_y = limited;
         s.move_nonzero_y = s.move_y != 0;
     }
 }
@@ -184,6 +208,7 @@ void reset_pidf_mode1(PidfMode1State& s, double now_seconds) noexcept {
     s.previous_timestamp = now_seconds;
     s.integral_weight_x = s.integral_weight_y = 0.0;
     s.integral_x = s.integral_y = 0.0;
+    s.d_filtered_x = s.d_filtered_y = 0.0;
     reset_feedforward(s);
 }
 
@@ -246,8 +271,8 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.high_kf_enabled_y = s.kf_high_y > 0.0;
     choose_adaptive_radius(s, radius, true);
     compute_gaussian_weights(s);
-    s.dynamic_lr_x = s.gaussian_weight_x * s.base_lr_x;
-    s.dynamic_lr_y = s.gaussian_weight_y * s.base_lr_y;
+    s.dynamic_lr_x = lr_weight(s.gaussian_weight_x) * s.base_lr_x;
+    s.dynamic_lr_y = lr_weight(s.gaussian_weight_y) * s.base_lr_y;
 
     apply_high_kf_correction(
         s, dt, radius, radius * 0.05 + 0.000001);
@@ -281,8 +306,8 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         std::max(s.integral_weight_x, s.gaussian_weight_x);
     s.integral_weight_y =
         std::max(s.integral_weight_y, s.gaussian_weight_y);
-    s.dynamic_lr_x = s.base_lr_x * s.gaussian_weight_x;
-    s.dynamic_lr_y = s.base_lr_y * s.gaussian_weight_y;
+    s.dynamic_lr_x = s.base_lr_x * lr_weight(s.gaussian_weight_x);
+    s.dynamic_lr_y = s.base_lr_y * lr_weight(s.gaussian_weight_y);
 
     if (s.integral_enabled_x)
         s.integral_x +=
@@ -291,20 +316,51 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         s.integral_y +=
             dt * s.corrected_error_y * s.integral_weight_y;
 
-    s.scratch_x =
+    // D 项: 先算原始微分, 再过一阶低通, 用滤波后的值参与求和。
+    //
+    // 原实现在这一项上有两个毛病, 都会直接体现为"准星在身上抖 / 焊不住":
+    //   1) 除以 dt 把手感上最敏感的帧间隔抖动直接放大成输出抖动(dt 就是检测
+    //      间隔, 本身就在抖);
+    //   2) 它是对【误差】求导 —— 目标框一跳(头/身类别翻转、检测抖动、重新
+    //      锁定)就打出一个微分尖峰, 而 Kp 越高这个尖峰越猛。
+    // 低通写成时间常数形式(与 dt 无关), 于是 240fps 和 60fps 的手感一致。
+    // tau 约 2 帧: 既压掉逐帧毛刺, 又保留追踪运动趋势的阻尼作用。
+    constexpr double kDerivativeTauSec = 0.020;
+    const double d_alpha = 1.0 - std::exp(-dt / kDerivativeTauSec);
+    const double d_raw_x =
         (s.corrected_error_x - s.previous_error_x) * s.kd_x / dt;
+    const double d_raw_y =
+        (s.corrected_error_y - s.previous_error_y) * s.kd_y / dt;
+    s.d_filtered_x += (d_raw_x - s.d_filtered_x) * d_alpha;
+    s.d_filtered_y += (d_raw_y - s.d_filtered_y) * d_alpha;
+    s.scratch_x = s.d_filtered_x;
+    s.scratch_y = s.d_filtered_y;
+
     const double proportional_integral_x =
         s.integral_x * s.ki_x + s.corrected_error_x * s.kp_x;
     s.raw_pid_x = s.scratch_x + proportional_integral_x;
-    s.scratch_y =
-        (s.corrected_error_y - s.previous_error_y) * s.kd_y / dt;
     const double proportional_integral_y =
         s.integral_y * s.ki_y + s.corrected_error_y * s.kp_y;
     s.raw_pid_y = s.scratch_y + proportional_integral_y;
 
     update_low_kf_feedforward(s, dt);
+    // frame_divisor 目前没有任何调用方设置(见 pid_input_pipeline.cpp), 所以
+    // frame_scale 恒为 1; 保留是为了不改动原生算式结构。
     const double frame_scale = 1.0 / std::max(
         static_cast<double>(input.frame_divisor) * 0.25, 1.0);
+
+    // ★ 下面的 0.1 是这套控制器的原生增益标定, 【不要】当多余的系数删掉。
+    //
+    // 比例+微分项被乘 0.1, 而前馈项按 integral_weight 全额相加, 两者的相对
+    // 权重是原生设计的一部分:
+    //     每帧位移 = 0.1*(D + Kp*err) + integral_weight*ff
+    // 去掉 0.1 会让比例项比前馈强 10 倍, 前馈(提前量)随之失效 —— 等于把一套
+    // "预测型"控制器改成"反应型", 方向是反的。所以只把刻度写明, 不动它。
+    //
+    // 真实含义: UI 的「瞄准速度」= 实际每帧收敛比例 × 10。
+    //     Kp = 1.0  → 每帧走掉剩余误差的 10%
+    //     Kp = 10.0 → 约 100%, 即一帧到位(此时必须靠 Kd 压过冲)
+    // UI 的提示文案里写了这个换算, 用户不用再猜。
     s.scratch_x = s.integral_weight_x * s.ff_output_x;
     s.raw_pid_x = (s.raw_pid_x * 0.1 + s.scratch_x) * frame_scale;
     s.scratch_y = s.integral_weight_y * s.ff_output_y;
