@@ -37,7 +37,7 @@ cmake -S . -B build/cuda -G "Visual Studio 18 2026" -A x64
 cmake --build build/cuda --config Release --target ai
 ```
 
-产物：`build/cuda/Release/ai.exe`。构建自动部署 Qt、模型推理运行库和界面资源；交付时保留完整输出目录，不只复制 exe。C++ 使用 C++20，CUDA 使用 C++17；MSVC 开启 UTF-8，并禁用原生 `char8_t` 以兼容现有 UTF-8 字符串接口。
+产物：`build/cuda/Release/Apotheosis.exe`（目标名仍是 `ai`，只是产物文件名为 `Apotheosis`）。构建自动部署 Qt、模型推理运行库和界面资源；交付时保留完整输出目录，不只复制 exe。C++ 使用 C++20，CUDA 使用 C++17；MSVC 开启 UTF-8，并禁用原生 `char8_t` 以兼容现有 UTF-8 字符串接口。
 
 当前 CUDA 架构为 `75-real;86-real;86-virtual`。这提供 Turing/Ampere 本机代码及 compute_86 PTX，但实际能否运行仍取决于显卡、驱动和 TensorRT 兼容性。
 

@@ -6,7 +6,7 @@ Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chin
 
 - Windows x64 C++20 / CUDA C++17 application with a Qt6 Widgets UI.
 - Root `CMakeLists.txt` is the main build; recommended generator: Visual Studio 18 2026.
-- Target `ai`, executable `build/cuda/Release/ai.exe`.
+- Target `ai`, executable `build/cuda/Release/Apotheosis.exe`.
 - A single portable binary includes TensorRT and DirectML. Do not restore old multi-build paths.
 - Qt prefix, TensorRT, cuDNN and CRT locations are CMake cache paths. See `docs/build.md` for actual defaults.
 - Ordinary prebuilt OpenCV 4.13.0; GPU operations use `GpuImage`, custom kernels, NPP and nvJPEG. No OpenCV CUDA rebuild is required.

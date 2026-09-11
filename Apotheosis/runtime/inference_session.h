@@ -18,7 +18,7 @@ bool preload_model_metadata(const std::string& model_path, bool persist_config, 
 // Encapsulates the end-to-end inference pipeline: detector creation, capture
 // thread, detector thread and mouse thread. Constructed once (owned by the
 // Launcher UI); start() / stop() can be called multiple times so the user can
-// swap backends between runs without restarting ai.exe.
+// swap backends between runs without restarting Apotheosis.exe.
 class InferenceSession
 {
 public:

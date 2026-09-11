@@ -23,7 +23,7 @@
 
 1. Build solution.
 2. Place required DLLs next to executable.
-3. Run `ai.exe`.
+3. Run `Apotheosis.exe`.
 4. Open overlay with `Home`.
 
 ## FAQ

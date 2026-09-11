@@ -6,7 +6,7 @@ Windows x64 实时视觉检测与鼠标控制程序，使用中文 Qt6 Widgets �
 
 ## 使用
 
-1. 从完整运行目录启动 `ai.exe`，模型放在程序旁的 `models/`。
+1. 从完整运行目录启动 `Apotheosis.exe`，模型放在程序旁的 `models/`。
 2. 在「配置 → 画面采集」选择采集卡及它实际支持的格式、分辨率和帧率。当前支持 NV12、MJPG、YUY2、RGB32；不支持的组合会报错，不会静默切换设备或格式。
 3. 选择模型、推理后端、输入硬件和瞄准热键。采集中心裁切尺寸跟随模型输入尺寸。
 4. 在「概览」启动或停止推理。启停在后台执行，过程中暂时禁用配置修改；关闭窗口会先停止会话。
@@ -16,7 +16,7 @@ Windows x64 实时视觉检测与鼠标控制程序，使用中文 Qt6 Widgets �
 
 ## 构建与验证
 
-- [构建说明](docs/build.md)：VS 2026、x64、Release、`ai` 目标；产物 `build/cuda/Release/ai.exe`。
+- [构建说明](docs/build.md)：VS 2026、x64、Release、`ai` 目标；产物 `build/cuda/Release/Apotheosis.exe`。
 - 一个 portable 主程序同时包含 TensorRT 和 DirectML。选择 DirectML 不代表可以省略这个构建所需的 CUDA 依赖。
 - OpenCV 使用普通预编译包；GPU 图像处理由项目自有 CUDA/NPP/nvJPEG 代码负责，不要求重新编译 OpenCV CUDA 模块。
 - 独立逻辑回归可在 macOS/Linux/Windows 上运行，不需要 CUDA、Qt 或采集卡：
