@@ -130,6 +130,7 @@ set(AVA_EXACT_SOURCES
 # Live application: association/anchor logic only. The legacy PIDF pipeline is
 # retained in AVA_EXACT_SOURCES for reference regressions, not a second runtime.
 set(AVA_TARGET_SOURCES
+    "${SRC_DIR}/mouse/ava_exact/target_region_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
@@ -258,7 +259,7 @@ add_executable(ai WIN32 ${APP_SOURCES})
 # Native code for the deployed Turing/Ampere GPUs; compute_86 PTX provides
 # forward JIT compatibility. TensorRT/driver compatibility is still required.
 set_target_properties(ai PROPERTIES
-    OUTPUT_NAME "ai"
+    OUTPUT_NAME "Apotheosis"
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     # 运行机使用的 CMP 40HX/TU106 是 sm_75，开发机 RTX 3060 是 sm_86。

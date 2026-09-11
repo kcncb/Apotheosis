@@ -314,11 +314,11 @@ void HotkeyPage::buildTriggerCard()
     m_triggerFireDuration   = makeSpin(0,    2000, QStringLiteral(" ms"));
     m_triggerFireInterval   = makeSpin(0,    2000, QStringLiteral(" ms"));
     m_triggerFireDelay->setToolTip(QString::fromUtf8(u8"准星进入命中区后延迟 N ms 才按下, 0 = 立即开火。"));
-    m_triggerFireDuration->setToolTip(QStringLiteral(
+    m_triggerFireDuration->setToolTip(QString::fromUtf8(
         u8"0 = 长按模式: 进入命中区就按住不松手, 直到准星离开命中区\n"
         u8"(目标真的丢了也会松开), 不会出现按-松的连点。\n"
         u8">0 = 连点模式: 每次按住 N ms 后松手, 再等冷却间隔重按。"));
-    m_triggerFireInterval->setToolTip(QStringLiteral(
+    m_triggerFireInterval->setToolTip(QString::fromUtf8(
         u8"连点模式的冷却间隔。\n"
         u8"长按模式下用作准星离开命中区后的最短重按间隔 —— 防止在判定\n"
         u8"边缘反复按松形成连点。"));
@@ -841,8 +841,7 @@ void HotkeyPage::buildBossAimCard()
     // 移动限幅: 实测它对追踪能力的影响比任何参数都直接 —— 因为它是硬约束,
     // 限幅不够时目标速度超过"限幅 x 帧率"就根本追不上。
     const QString limitTip = QString::fromUtf8(
-        u8"每个控制输出周期最多下发的鼠标计数，0 表示不额外限幅。
-"
+        u8"每个控制输出周期最多下发的鼠标计数，0 表示不额外限幅。\n"
         u8"限制作用于曲线整形和像素换算之后；被截掉的位移不会积累成待补发欠账。");
     m_pidfInteger[2]->setToolTip(limitTip);
     m_pidfInteger[3]->setToolTip(limitTip);
