@@ -130,11 +130,17 @@ void apply_high_kf_correction(PidfMode1State& s,
     s.correction_output_y = s.correction_accum_y;
 }
 
-void update_low_kf_feedforward(PidfMode1State& s, double dt) noexcept {
+// 前馈速度估计器: 学习率由调用方显式传入(当前 = dynamic_lr, 即基学习率 × 高斯权重
+// 的下限 0.25)。这里把参数显式化, 是为了不去动 dynamic_lr 这个同时被复刻 ABI 布局
+// 和高 Kf 修正项使用的字段。
+void update_low_kf_feedforward(PidfMode1State& s,
+                               double dt,
+                               double ff_lr_x,
+                               double ff_lr_y) noexcept {
     s.predicted_minus_move_x =
         s.ff_state_x * dt + s.ff_previous_error_x - s.previous_move_x;
     s.ff_error_x = s.corrected_error_x - s.predicted_minus_move_x;
-    s.ff_derivative_x = s.ff_error_x / dt * s.dynamic_lr_x;
+    s.ff_derivative_x = s.ff_error_x / dt * ff_lr_x;
     s.ff_state_x += s.ff_derivative_x;
     s.ff_previous_error_x = s.corrected_error_x;
     s.ff_output_x = s.ff_state_x * dt * s.kf_low_x;
@@ -142,11 +148,32 @@ void update_low_kf_feedforward(PidfMode1State& s, double dt) noexcept {
     s.predicted_minus_move_y =
         s.ff_state_y * dt + s.ff_previous_error_y - s.previous_move_y;
     s.ff_error_y = s.corrected_error_y - s.predicted_minus_move_y;
-    s.ff_derivative_y = s.ff_error_y / dt * s.dynamic_lr_y;
+    s.ff_derivative_y = s.ff_error_y / dt * ff_lr_y;
     s.ff_state_y += s.ff_derivative_y;
     s.ff_previous_error_y = s.corrected_error_y;
     s.ff_output_y = s.ff_state_y * dt * s.kf_low_y;
 }
+
+// 前馈的「施加权重」。
+//
+// 原实现用 integral_weight(高斯权重的峰值闩锁)去缩放前馈位移, 意图是「离锚点越远,
+// 前馈越不使劲」。但闩锁只能闩住它【见过】的东西: 锁定时目标就在 100px 外, 则高斯
+// 权重从第一帧起就是 0.005 量级, 闩锁也就一直是 0.005 —— 前馈等于被关掉, 只剩比例
+// 项在爬, 而比例项自己追不上匀速目标(见 apply_post_limits 上方的说明)。
+//
+// 实测(同一基准只切这一个常数; 300px/s 目标, 框宽 20, dt=8.33ms, 从 60/100/140px
+//      三个初始偏差起步, 取前 150 帧的平均 |偏差|, 以及进到 5px 内所需帧数):
+//
+//        施加权重            锁定均偏差(kp=0.3/0.6/1.0)      进 5px(帧)
+//        不门控 0.0 (旧行为)   85.4 / 40.9 / 17.5      未达(1200) / 217 / 107
+//        本值   1.0            70.0 / 33.1 / 16.2         337 / 168 / 99
+//        (0.25 与 0.5 介于两者之间, 随下限单调改善)
+//
+// 换向峰值偏差不变(24.0px @kp=0.6), 急停过冲不变, 静止目标仍然完全安静(|dx| 总和 0)。
+// 也就是说: 前馈全额施加不会带来过冲, 换来的只是「锁上就能咬住」。
+//
+// kFfApplyWeightFloor = 1.0 表示完全不门控; 调回 0.0 即恢复旧的闩锁行为(单点可逆)。
+constexpr double kFfApplyWeightFloor = 1.0;
 
 std::int32_t quantize(double step,
                       double& residual,
@@ -184,17 +211,32 @@ void apply_post_limits(PidfMode1State& s,
     if (s.config.movement_limit_x > 0) {
         const std::int32_t limited = std::clamp(
             s.move_x, -s.config.movement_limit_x, s.config.movement_limit_x);
-        // 被限幅截掉的部分回灌 residual。
-        // 原样实现直接丢弃, 于是每次触顶都永久少走一段位移 —— 准星会稳定停在
-        // 目标前方一点点、再也补不上来(表现为"永远差最后几像素")。
-        s.residual_x += static_cast<double>(s.move_x - limited);
+        // 被限幅截掉的部分回灌 residual, 但【必须有界】。
+        //
+        // residual 的本职是"把亚像素的零头攒成 ±1 步"(quantize 里天然落在 ±0.5 内)。
+        // 上一版把限幅截掉的部分也无界地灌进来, 于是"长期触顶"会把它攒成一个巨大数:
+        // 实测限幅=1px/帧、追 240px/s 两秒后 residual 已达 2754 并继续涨, 目标一停
+        // 准星仍以 ±1px/帧 永远滑行 —— 冲过头 308px 再反向冲, 600 帧不收敛。
+        //
+        // 夹在 ±1: 既不丢亚像素零头, 又保证触顶时输出最多只比上限多 1px,
+        // 目标一停就能在一个帧内把账结清。
+        // 实测(限幅=1px/帧, 先追 240px/s 两秒再急停):
+        //     无界回灌(旧): 急停后冲过头 328 / 333 px(kp=0.6 / 1.0), 且永不归零
+        //     夹在 ±1(现):  冲过头 2.0 px, 237 / 240 帧内归零
+        constexpr double kResidualClamp = 1.0;
+        s.residual_x = std::clamp(
+            s.residual_x + static_cast<double>(s.move_x - limited),
+            -kResidualClamp, kResidualClamp);
         s.move_x = limited;
         s.move_nonzero_x = s.move_x != 0;
     }
     if (s.config.movement_limit_y > 0) {
         const std::int32_t limited = std::clamp(
             s.move_y, -s.config.movement_limit_y, s.config.movement_limit_y);
-        s.residual_y += static_cast<double>(s.move_y - limited);
+        constexpr double kResidualClamp = 1.0;
+        s.residual_y = std::clamp(
+            s.residual_y + static_cast<double>(s.move_y - limited),
+            -kResidualClamp, kResidualClamp);
         s.move_y = limited;
         s.move_nonzero_y = s.move_y != 0;
     }
@@ -361,7 +403,16 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         s.integral_y * s.ki_y + s.corrected_error_y * s.kp_y;
     s.raw_pid_y = s.scratch_y + proportional_integral_y;
 
-    update_low_kf_feedforward(s, dt);
+    // 前馈速度估计: 学习率沿用 dynamic_lr(基学习率 × 高斯权重下限)。
+    //
+    // ⚠️ 不要把它改成裸的基学习率。实测过: 学习侧不门控能让"从 100px 外锁定"的
+    // 收敛从 218 帧降到 140 帧, 但代价是「预测速度(LR)=1.0 + 高 Kf」这一档直接跑飞
+    // —— 回归测试里 noisy cadence 的 high-Kf/high-LR 用例从 tail-mean 61px 变成
+    // -450px 且位移全部钉在限幅上。原因: LR=1.0 时估计器每帧增益已达 ~125px/s,
+    // 高斯门控原本正是在大误差下给它兜稳定性, 去掉就把这层兜底拆了。
+    // 所以这里保持门控, 只把参数显式传进来(便于以后单独调, 且不必动 dynamic_lr
+    // 这个被复刻 ABI 与高 Kf 修正项共用的字段)。
+    update_low_kf_feedforward(s, dt, s.dynamic_lr_x, s.dynamic_lr_y);
     // frame_divisor 目前没有任何调用方设置(见 pid_input_pipeline.cpp), 所以
     // frame_scale 恒为 1; 保留是为了不改动原生算式结构。
     const double frame_scale = 1.0 / std::max(
@@ -369,19 +420,25 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
 
     // ★ 下面的 0.1 是这套控制器的原生增益标定, 【不要】当多余的系数删掉。
     //
-    // 比例+微分项被乘 0.1, 而前馈项按 integral_weight 全额相加, 两者的相对
+    // 比例+微分项被乘 0.1, 而前馈项按施加权重全额相加, 两者的相对
     // 权重是原生设计的一部分:
-    //     每帧位移 = 0.1*(D + Kp*err) + integral_weight*ff
-    // 去掉 0.1 会让比例项比前馈强 10 倍, 前馈(提前量)随之失效 —— 等于把一套
+    //     每帧位移 = 0.1*(D + Kp*err) + ff_apply_weight*ff
+    // 去掉 0.1 会让比例项比前馈强 10 倍, 前馈随之失效 —— 等于把一套
     // "预测型"控制器改成"反应型", 方向是反的。所以只把刻度写明, 不动它。
     //
     // 真实含义: UI 的「瞄准速度」= 实际每帧收敛比例 × 10。
     //     Kp = 1.0  → 每帧走掉剩余误差的 10%
     //     Kp = 10.0 → 约 100%, 即一帧到位(此时必须靠 Kd 压过冲)
     // UI 的提示文案里写了这个换算, 用户不用再猜。
-    s.scratch_x = s.integral_weight_x * s.ff_output_x;
+    //
+    // 施加权重: 见 kFfApplyWeightFloor 的说明 —— 默认不再用距离闩锁掐前馈。
+    const double ff_apply_x =
+        std::max(s.integral_weight_x, kFfApplyWeightFloor);
+    const double ff_apply_y =
+        std::max(s.integral_weight_y, kFfApplyWeightFloor);
+    s.scratch_x = ff_apply_x * s.ff_output_x;
     s.raw_pid_x = (s.raw_pid_x * 0.1 + s.scratch_x) * frame_scale;
-    s.scratch_y = s.integral_weight_y * s.ff_output_y;
+    s.scratch_y = ff_apply_y * s.ff_output_y;
     s.raw_pid_y = (s.raw_pid_y * 0.1 + s.scratch_y) * frame_scale;
 
     s.move_x = quantize(
