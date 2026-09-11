@@ -68,9 +68,10 @@ void AimMovementPipelineExact::reset_selected_pidf(
 
 PidfNativeOutput AimMovementPipelineExact::update_selected_pidf(
     const PidfInputExact& input,
+    const PidfContextInput& context,
     double now_seconds) noexcept {
     if (config_.pidf_mode == NativePidfMode::mode1)
-        return update_pidf_mode1(mode1_state_, input, now_seconds);
+        return update_pidf_mode1(mode1_state_, input, context, now_seconds);
     return {};
 }
 
@@ -190,8 +191,12 @@ AimMovementFrameTrace AimMovementPipelineExact::step(
         return trace;
     }
 
+    // 本项目为当前上下文补充的输入(非原生): 目前只有提前时间。
+    PidfContextInput pidf_context;
+    pidf_context.lead_time_sec = frame.lead_time_sec;
+
     trace.pidf_output = update_selected_pidf(
-        trace.pidf_input, frame.now_seconds);
+        trace.pidf_input, pidf_context, frame.now_seconds);
     trace.pidf_ran = true;
     if (trace.pidf_output.initialized_this_frame) {
         trace.stop_reason = AimMovementStopReason::pidf_initialization_frame;

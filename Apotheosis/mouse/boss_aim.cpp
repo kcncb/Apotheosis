@@ -310,6 +310,9 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     frame.current_x = static_cast<float>(in.crosshair_x);
     frame.current_y = static_cast<float>(in.crosshair_y);
     frame.qx_stage_selected = false;
+    // 非原生: 把调用方实测的端到端滞后传给控制器前馈, 让它把提前量补到位
+    // (原设计里补这一段的是被关闭的 QX 那一级)。
+    frame.lead_time_sec = in.lead_time_sec;
     frame.target.valid = aimpoint_state_.output_valid != 0;
     // 与 CompleteMovementControllerExact 的 72-byte packing 边界保持一致。
     frame.target.qx_input_blocked = aim_target.target_flag != 0;

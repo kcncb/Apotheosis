@@ -51,6 +51,10 @@ struct EngineInput
     double fov_radius_y = 0.0;
     double image_size = 0.0;
 
+    // 非原生: 端到端提前时间(秒)。由 latency_probe 实测的 total(T3-T0) 每帧提供,
+    // 一路传到 PIDF 的前馈, 用来补偿本链路自己的滞后。0 = 关闭提前量。
+    double lead_time_sec = 0.0;
+
     mover::PidfParams pidf_params{};
 };
 
