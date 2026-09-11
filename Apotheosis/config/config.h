@@ -54,7 +54,10 @@ struct HotkeyProfile
 
     // AVA PIDF Mode 1。AVA 界面只暴露 Kp/Kd/Kf/LR，Ki 固定为 0。
     int pidf_mapping_version = 3;
-    float pidf_kp_x = 1.0f, pidf_kp_y = 1.0f;
+    // 1.0 -> 2.0: 配合下面新增的链路延迟补偿(Smith 预测器)一起调出来的值。
+    // 补偿让回路对延迟不敏感, 因此可以用更硬的 Kp; 两者必须配套 —— 只留 Kp=2.0
+    // 而没有补偿时, 4 帧延迟下综合分会从 22.9 恶化到 67.5(见 pidf_mode1_exact.cpp)。
+    float pidf_kp_x = 2.0f, pidf_kp_y = 2.0f;
     float pidf_ki_x = 0.0f, pidf_ki_y = 0.0f;
     // 前馈三件套必须配套: kf=0 会让 ff_output = ff_state*dt*kf 恒为 0, 即前馈
     // 整条关死, 此时 lr 调多少都没反应(实测: 追横移目标落后 10.4px、摆头咬不住)。

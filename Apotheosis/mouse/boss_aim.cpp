@@ -310,6 +310,7 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     frame.current_x = static_cast<float>(in.crosshair_x);
     frame.current_y = static_cast<float>(in.crosshair_y);
     frame.qx_stage_selected = false;
+    frame.measure_latency_sec = in.measure_latency_sec;
     frame.target.valid = aimpoint_state_.output_valid != 0;
     // 与 CompleteMovementControllerExact 的 72-byte packing 边界保持一致。
     frame.target.qx_input_blocked = aim_target.target_flag != 0;

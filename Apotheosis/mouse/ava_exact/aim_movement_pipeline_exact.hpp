@@ -65,6 +65,10 @@ struct AimMovementFrameInput {
     TargetRegionBoxSelection target_region_boxes{};
     bool external_y_block{};
     AimMovementTargetFrame target{};
+
+    // 链路测量延迟(秒): 采集 -> 控制环拿到这一帧的端到端延迟, 由 latency_probe
+    // 实测填入。0 = 未知/未测到, 此时延迟补偿退化为恒等。
+    double measure_latency_sec{};
 };
 
 enum class AimMovementStopReason : std::uint8_t {
@@ -148,6 +152,7 @@ private:
     ProcessHumanizationState process_state_{};
     QxSigmaState qx_state_{};
     PidfMode1State mode1_state_{};
+    PidfDelayModelExact mode1_delay_{};
 };
 
 } // namespace cvm::recovered

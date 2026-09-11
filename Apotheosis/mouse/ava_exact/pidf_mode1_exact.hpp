@@ -109,6 +109,7 @@ PidfMode1State construct_pidf_mode1(const PidfMode1Config& config,
                                     double now_seconds) noexcept;
 void reset_pidf_mode1(PidfMode1State& state, double now_seconds) noexcept;
 PidfNativeOutput update_pidf_mode1(PidfMode1State& state,
+                                   PidfDelayModelExact& delay,
                                    const PidfInputExact& input,
                                    double now_seconds) noexcept;
 

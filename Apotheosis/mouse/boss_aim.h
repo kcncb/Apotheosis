@@ -50,6 +50,9 @@ struct EngineInput
     double fov_radius_x = 0.0;
     double fov_radius_y = 0.0;
     double image_size = 0.0;
+    // 链路实测延迟(秒): 采集 -> 控制环拿到这一帧的端到端时间, 由 latency_probe
+    // 的 kTotal 提供。0 = 还没测到, 此时延迟补偿自动退化为恒等(安全回退)。
+    double measure_latency_sec = 0.0;
 
     mover::PidfParams pidf_params{};
 };

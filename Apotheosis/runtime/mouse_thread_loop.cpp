@@ -576,6 +576,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.fov_radius_x = fov_rx;
         in.fov_radius_y = fov_ry;
         in.image_size   = static_cast<double>(config_resolution);
+        // 链路实测延迟交给 PIDF 的延迟补偿(Smith 预测器)。
+        // 0 时补偿自动退化为恒等 —— 与不补偿逐位一致, 所以探针没数据也不会变差。
+        in.measure_latency_sec =
+            runtime::latency::snapshot().stages[runtime::latency::kTotal].ema_ms * 0.001;
 
         in.pidf_params.kp_x = profile_ptr->pidf_kp_x; in.pidf_params.kp_y = profile_ptr->pidf_kp_y;
         in.pidf_params.ki_x = profile_ptr->pidf_ki_x; in.pidf_params.ki_y = profile_ptr->pidf_ki_y;

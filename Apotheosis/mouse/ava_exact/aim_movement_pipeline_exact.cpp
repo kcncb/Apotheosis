@@ -62,15 +62,17 @@ void AimMovementPipelineExact::apply_config(
 
 void AimMovementPipelineExact::reset_selected_pidf(
     double now_seconds) noexcept {
-    if (config_.pidf_mode == NativePidfMode::mode1)
+    if (config_.pidf_mode == NativePidfMode::mode1) {
         reset_pidf_mode1(mode1_state_, now_seconds);
+        reset_pidf_delay_model(mode1_delay_);
+    }
 }
 
 PidfNativeOutput AimMovementPipelineExact::update_selected_pidf(
     const PidfInputExact& input,
     double now_seconds) noexcept {
     if (config_.pidf_mode == NativePidfMode::mode1)
-        return update_pidf_mode1(mode1_state_, input, now_seconds);
+        return update_pidf_mode1(mode1_state_, mode1_delay_, input, now_seconds);
     return {};
 }
 
@@ -190,6 +192,10 @@ AimMovementFrameTrace AimMovementPipelineExact::step(
         return trace;
     }
 
+    // 每帧把实测的链路延迟交给补偿模型(latency_probe 的来源见 mouse_thread_loop)。
+    mode1_delay_.measure_latency_sec =
+        frame.measure_latency_sec > 0.0 ? frame.measure_latency_sec : 0.0;
+    // 指令侧延迟(HID + 游戏帧)观测不到, 保持默认的 1 帧下限。
     trace.pidf_output = update_selected_pidf(
         trace.pidf_input, frame.now_seconds);
     trace.pidf_ran = true;

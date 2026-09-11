@@ -17,8 +17,17 @@
 //   1° ≈ 3.56px; 6m 处 5m/s 横移 ≈ 168px/s; 滑铲 8-10m/s ≈ 300-350px/s;
 //   翻滚/dash ≈ 500-750px/s; 喷气横移可到 900px/s 以上。
 //
-// 调参提示(实测): 「过冲控制」kd 在延迟下非常危险 —— kd≥0.1 会让回路发散,
-// 建议保持 0.05 量级; 「预测速度」lr 必须配合非零「锁定强度」kf 才有意义。
+// 调参提示(实测):
+//   · 「锁定强度」kf 必须非零, 否则前馈整条关死(ff_output = ff_state*dt*kf = 0),
+//     此时「预测速度」lr 调多少都没反应; 正确值是 kf=1, >1 会过度提前、全面变差。
+//   · 「过冲控制」kd 在延迟下非常危险 —— kd≥0.1 会让回路发散, 保持 0.05 量级。
+//   · 「预测速度」lr 到 0.05 就基本饱和, 0.10 无进一步收益; 低于 0.02 明显差。
+//   · 「瞄准速度」kp 与链路延迟补偿配套: 补偿开启后 kp=2.0 才安全且最优。
+//
+// 第 8 个可选参数是"补偿假定延迟(帧)", 用来测延迟估计不准时的鲁棒性:
+// 实测(行=真实检测延迟, 列=补偿实际使用的帧数), 过高估计会发散, 低估安全 ——
+//   (真实1帧) 15.6 / 15.4 / 15.3 / 3425(炸)
+//   (真实3帧) 26.3 / 24.4 / 22.4 /  22.1 /  650(炸)
 // =============================================================================
 // =============================================================================
 // 多场景「模拟真实环境」测试台
@@ -89,7 +98,7 @@ struct Metrics {
 };
 
 // ── 单场景闭环 ──────────────────────────────────────────────────────────────
-Metrics runScenario(const Scenario& sc, const Params& p, const Env& e)
+Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc, char** argv)
 {
     PidfMode1Config c{};
     c.kp_x = p.kp; c.kp_y = p.kp;
@@ -98,6 +107,12 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e)
     c.lr_x = p.lr; c.lr_y = p.lr;
     c.movement_limit_x = p.limit; c.movement_limit_y = p.limit;
     PidfMode1State s = construct_pidf_mode1(c, 0.0);
+    PidfDelayModelExact delay{};
+    // 把环境的真实延迟告诉控制器(现实里由 latency_probe 实测给出):
+    // 测量侧 = 检测+发布延迟; 指令侧 = 鼠标+游戏帧延迟。
+    const int assumed_lat = (argc > 8) ? std::atoi(argv[8]) : e.det_lat;
+    delay.measure_latency_sec = static_cast<double>(assumed_lat) * e.dt;
+    delay.command_latency_frames = static_cast<double>(e.mouse_lat);
 
     const bool is_x = (sc.axis == "x");
     const double rx = is_x ? p.box_w : p.box_h;
@@ -162,6 +177,7 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e)
         {
             // 重新锁定: 原生会在新锁定时复位 PIDF
             s = construct_pidf_mode1(c, 0.0);
+            reset_pidf_delay_model(delay);
             pending.clear();
             lost = false;
             relocks++;
@@ -173,7 +189,7 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e)
         in.target_y = 160.0 + (is_x ? 0.0 : predicted);
         in.current_y = 160.0;
         in.radius_x = rx; in.radius_y = ry;
-        const auto out = update_pidf_mode1(s, in, (f + 1) * e.dt);
+        const auto out = update_pidf_mode1(s, delay, in, (f + 1) * e.dt);
         const double dx = is_x ? static_cast<double>(out.dx) : static_cast<double>(out.dy);
         pending.push_back(dx);
 
@@ -297,14 +313,15 @@ int main(int argc, char** argv)
     if (argc > 5) p.limit = std::atoi(argv[5]);
     if (argc > 6) e.det_lat = std::atoi(argv[6]);
     if (argc > 7) e.mouse_lat = std::atoi(argv[7]);
-    std::printf("参数: kp=%.3f kd=%.3f kf=%.3f lr=%.3f 限幅=%d | 环境: %.0fHz 检测延迟%d帧 鼠标延迟%d帧\n",
-                p.kp, p.kd, p.kf, p.lr, p.limit, 1.0 / e.dt, e.det_lat, e.mouse_lat);
+    std::printf("参数: kp=%.3f kd=%.3f kf=%.3f lr=%.3f 限幅=%d | 环境: %.0fHz 检测延迟%d帧 鼠标延迟%d帧 | 补偿假定延迟=%d帧\n",
+                p.kp, p.kd, p.kf, p.lr, p.limit, 1.0 / e.dt, e.det_lat, e.mouse_lat,
+                argc > 8 ? std::atoi(argv[8]) : e.det_lat);
     std::printf("%-16s %8s %8s %8s %8s %8s %5s\n", "场景", "均偏差", "p95", "最大", "锁定率", "抖动", "重锁");
     double score = 0.0; int n = 0;
     for (const auto& sc : scenarios())
     {
         if (sc.name == "检测抖动/丢帧") e.occl_every = 12; else e.occl_every = 0;
-        const Metrics m = runScenario(sc, p, e);
+        const Metrics m = runScenario(sc, p, e, argc, argv);
         std::printf("%-16s %7.2f %8.2f %8.2f %7.1f%% %8.2f %5d\n",
                     sc.name.c_str(), m.mean, m.p95, m.mx, m.locked_ratio * 100.0, m.jitter, m.relocks);
         score += m.p95; ++n;

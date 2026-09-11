@@ -17,6 +17,7 @@
 // 因为它们记录的是原生二进制的 ABI。
 // =============================================================================
 
+#include <array>
 #include <cstdint>
 
 namespace cvm::recovered {
@@ -68,5 +69,48 @@ struct PidfNativeOutput {
     double corrected_error_x{};            // +32
     double corrected_error_y{};            // +40
 };
+
+
+// -----------------------------------------------------------------------------
+// 链路延迟补偿(Smith 预测器)的持久状态。
+//
+// 为什么需要单独的模型: 原生 PidfMode1State 是 704 字节的复刻 ABI(有 static_assert
+// 与 offsetof 断言), 不能加字段。而这个模型需要"无延迟的内部状态 + 历史", 所以由
+// 流水线持有、按引用传进 update_pidf_mode1。
+//
+// 它解决什么: 链路从"画面被采集"到"控制环拿到它"有 2-3 帧延迟, 控制环却把它当成
+// 当前误差用, 于是比例项在延迟下振荡。多场景模拟(aim_scenario_sim, kp=2, kd=0.05,
+// kf=1, lr=0.05)实测的综合分:
+//     链路延迟      2帧     3帧     4帧
+//     不补偿      15.45   24.36   67.45
+//     补偿        15.51   17.65   22.95
+// 即补偿把"回路对延迟的敏感性"基本消掉 —— 这正是"准星焊得住"的前提。
+//
+// 注意: 补偿的价值依赖回路本身足够"硬"(Kp). Kp=1.0 时补偿反而略差
+// (18.96->22.02), 所以本机制与「瞄准速度」是配套的, 默认 Kp 已随之调到 2.0。
+//
+// 全 0 延迟时补偿退化为恒等(与不补偿逐位一致), 便于 A/B 对照与安全回退。
+// -----------------------------------------------------------------------------
+struct PidfDelayModelExact {
+    static constexpr int kHistory = 32;
+
+    // 每轴: 内部模型(延迟自由)的历史 + 指令历史。
+    std::array<double, kHistory> model_x{};
+    std::array<double, kHistory> model_y{};
+    std::array<double, kHistory> command_x{};
+    std::array<double, kHistory> command_y{};
+    double model_x_state{};
+    double model_y_state{};
+    int step{};
+    bool initialized{};
+
+    // 测量侧延迟(采集->控制环拿到, 由 latency_probe 实测)与指令侧延迟
+    // (HID + 游戏帧, 观测不到, 取 1 帧的保守常数)。单位: 秒。
+    double measure_latency_sec{};
+    // 指令侧延迟用"帧"表示(1 帧是下限), 与检测帧率无关。
+    double command_latency_frames{1.0};
+};
+
+void reset_pidf_delay_model(PidfDelayModelExact& model) noexcept;
 
 } // namespace cvm::recovered

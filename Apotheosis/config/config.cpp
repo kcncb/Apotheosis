@@ -541,6 +541,12 @@ bool Config::loadConfig(const std::string& filename)
                     // 阻尼; 0.05 是实测的稳健值。
                     if (hk.pidf_kd_x < 0.02f) hk.pidf_kd_x = 0.05f;
                     if (hk.pidf_kd_y < 0.02f) hk.pidf_kd_y = 0.05f;
+                    // Kp 只在还是老默认 1.0 时才升到 2.0 —— 延迟补偿与 Kp 配套,
+                    // 两者一起才是"焊得住"的组合; 用户自己调过 Kp 的一律不动。
+                    if (hk.pidf_kp_x > 0.99f && hk.pidf_kp_x < 1.01f)
+                        hk.pidf_kp_x = 2.0f;
+                    if (hk.pidf_kp_y > 0.99f && hk.pidf_kp_y < 1.01f)
+                        hk.pidf_kp_y = 2.0f;
                 }
                 hk.pidf_mapping_version = 3;
             }

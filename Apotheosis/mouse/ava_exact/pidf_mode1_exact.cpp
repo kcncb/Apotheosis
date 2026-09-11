@@ -242,6 +242,81 @@ void apply_post_limits(PidfMode1State& s,
     }
 }
 
+// -----------------------------------------------------------------------------
+// 链路延迟补偿(Smith 预测器)
+// -----------------------------------------------------------------------------
+//
+// 误差的演化(在"设定值/输出"意义下)是:
+//     err_{k+1} = err_k + v_k*dt - u_{k-cmd_lat}
+// 其中 v 是目标速度, u 是下发的位移。控制环拿到的测量却是 meas_lat 帧之前的:
+//     y_k = err_{k-meas_lat}
+// 因此可以把它"推算"回当前:
+//     err_k = y_k + Σ_{j=k-meas_lat}^{k-1} (v̂_j*dt - u_{j-cmd_lat})
+// 右边两项都可用: u 是历史指令(精确已知), v̂ 用前馈状态估计。这就是补偿。
+//
+// 直接用这个推算值会很吵(它把 v̂ 的误差按 meas_lat 帧累加), 所以再套一层模型:
+// 内部维护一个延迟自由的模型状态, 每帧先按上式推进, 再按增益 K 向测量修正:
+//     x_k += K * (y_k - model_{k-meas_lat})
+// 这既是标准的 Smith 预测器, 也是"用测量纠正模型、用模型抵抗延迟"的常规做法。
+//
+// K=0.5 是实测值: K>=0.7 在 3 帧以上延迟会发散; K=0.3 过于保守、收益很小。
+// v̂ 另外做了 ±1500px/s 限幅 —— 补偿按 meas_lat 帧累加速度误差, 不限幅的话
+// 一次估计失手就会被放大 meas_lat 倍。
+constexpr double kDelayCompensationGain = 0.5;
+constexpr double kDelayCompensationVelocityCap = 1500.0;
+
+double delay_compensate(double* model_history,
+                        double* command_history,
+                        double& model_state,
+                        bool& initialized,
+                        const int step,
+                        double measured,
+                        double velocity,
+                        const double dt,
+                        const double measure_latency_sec,
+                        const double command_latency_frames) noexcept {
+    constexpr int N = PidfDelayModelExact::kHistory;
+    if (!initialized) {
+        model_state = measured;
+        for (int i = 0; i < N; ++i) {
+            model_history[i] = measured;
+            command_history[i] = 0.0;
+        }
+        initialized = true;
+        return measured;
+    }
+
+    // ⚠️ 这里【向下取整再减 1 帧】, 不是四舍五入 —— 实测(实际延迟 3 帧):
+    //     补偿假定 2 帧 -> 21.9, 3 帧 -> 22.9, 4 帧 -> 24303, 6 帧 -> 8e9(发散)
+    // 高估延迟会让模型去和"更早的模型历史"比较, 相位反向, 直接正反馈; 低估只是
+    // 补偿不足(仍是安全的)。所以宁可少补一帧。
+    int measure_lat = static_cast<int>(measure_latency_sec / dt) - 1;
+    int command_lat = static_cast<int>(command_latency_frames + 0.5);
+    if (measure_lat < 0) measure_lat = 0;
+    if (measure_lat > N - 1) measure_lat = N - 1;
+    if (command_lat < 0) command_lat = 0;
+
+    if (step > 0) {
+        const int command_index = ((step - 1 - command_lat) % N + N) % N;
+        double bounded_velocity = velocity;
+        if (bounded_velocity > kDelayCompensationVelocityCap)
+            bounded_velocity = kDelayCompensationVelocityCap;
+        if (bounded_velocity < -kDelayCompensationVelocityCap)
+            bounded_velocity = -kDelayCompensationVelocityCap;
+        model_state += bounded_velocity * dt - command_history[command_index];
+    }
+
+    // ⚠️ measure_lat == 0 时参照量必须是"本帧推进后的模型值"本身。
+    // 若仍去读历史槽, 读到的会是 N 帧前的残留 —— 纠正项变成噪声, 直接发散
+    // (实测: 假定延迟被安全余量压到 0 时综合分从 15.4 变 742099)。
+    const double reference = (measure_lat == 0)
+        ? model_state
+        : model_history[((step - measure_lat) % N + N) % N];
+    model_state += kDelayCompensationGain * (measured - reference);
+    model_history[((step % N) + N) % N] = model_state;
+    return model_state;
+}
+
 void apply_post_frame_damping(PidfMode1State& s) noexcept {
     if (s.damp_x) {
         s.integral_x *= s.gaussian_weight_x;
@@ -254,6 +329,15 @@ void apply_post_frame_damping(PidfMode1State& s) noexcept {
 }
 
 } // namespace
+
+void reset_pidf_delay_model(PidfDelayModelExact& model) noexcept {
+    model.step = 0;
+    model.initialized = false;
+    model.model_x.fill(0.0);
+    model.model_y.fill(0.0);
+    model.command_x.fill(0.0);
+    model.command_y.fill(0.0);
+}
 
 void reset_pidf_mode1(PidfMode1State& s, double now_seconds) noexcept {
     s.initialized = 0;
@@ -292,12 +376,14 @@ PidfMode1State construct_pidf_mode1(const PidfMode1Config& config,
 }
 
 PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
+                                   PidfDelayModelExact& delay,
                                    const PidfInputExact& input,
                                    double now_seconds) noexcept {
     PidfNativeOutput out{};
     const double dt = now_seconds - s.previous_timestamp;
     if (!input.valid) {
         reset_pidf_mode1(s, now_seconds);
+        reset_pidf_delay_model(delay);
         return out;
     }
 
@@ -310,6 +396,19 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.corrected_error_y = input.target_y - input.current_y;
     out.original_error_x = s.corrected_error_x;
     out.original_error_y = s.corrected_error_y;
+
+    // 链路延迟补偿: 把 meas_lat 帧之前的测量推算回"当前", 供比例/微分/前馈共用。
+    // 延迟为 0 时这里是恒等变换(与原行为逐位一致)。
+    if (delay.measure_latency_sec > 0.0) {
+        s.corrected_error_x = delay_compensate(
+            delay.model_x.data(), delay.command_x.data(), delay.model_x_state,
+            delay.initialized, delay.step, s.corrected_error_x, s.ff_state_x, dt,
+            delay.measure_latency_sec, delay.command_latency_frames);
+        s.corrected_error_y = delay_compensate(
+            delay.model_y.data(), delay.command_y.data(), delay.model_y_state,
+            delay.initialized, delay.step, s.corrected_error_y, s.ff_state_y, dt,
+            delay.measure_latency_sec, delay.command_latency_frames);
+    }
 
     if (!s.initialized) {
         reset_pidf_mode1(s, now_seconds);
@@ -453,6 +552,12 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     out.dy = s.move_y;
     out.has_move = out.dx != 0 || out.dy != 0;
 
+    if (delay.measure_latency_sec > 0.0) {
+        constexpr int N = PidfDelayModelExact::kHistory;
+        delay.command_x[((delay.step % N) + N) % N] = static_cast<double>(out.dx);
+        delay.command_y[((delay.step % N) + N) % N] = static_cast<double>(out.dy);
+        ++delay.step;
+    }
     apply_post_frame_damping(s);
     s.previous_timestamp = now_seconds;
     s.previous_error_x = s.corrected_error_x;
