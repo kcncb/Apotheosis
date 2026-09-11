@@ -841,7 +841,7 @@ void HotkeyPage::buildBossAimCard()
     // 过冲控制: 本版对微分项加了低通，需要让用户知道行为变了。
     const QString overshootTip = QString::fromUtf8(
         u8"AVA 的 Kd：阻尼，抑制高速接近目标时的来回摆动与过冲。\n"
-        u8"本版给微分项加了一阶低通（约 2 帧时间常数）：压掉逐帧毛刺，所以准星更稳、"
+        u8"本版给微分项加了一阶低通（约 1.5 帧时间常数，实测最优）：压掉逐帧毛刺，所以准星更稳、"
         u8"不再因检测抖动而嗡嗡响；代价是它对突变的反应略慢，过冲明显时把本值继续加大即可。");
     m_pidfGain[0]->setToolTip(aimSpeedTip);
     m_pidfGain[1]->setToolTip(aimSpeedTip);
@@ -851,6 +851,19 @@ void HotkeyPage::buildBossAimCard()
     m_pidfGain[7]->setToolTip(lockTip);
     m_pidfGain[8]->setToolTip(predictionTip);
     m_pidfGain[9]->setToolTip(predictionTip);
+
+    // 移动限幅: 实测它对追踪能力的影响比任何参数都直接 —— 因为它是硬约束,
+    // 限幅不够时目标速度超过"限幅 x 帧率"就根本追不上。
+    const QString limitTip = QString::fromUtf8(
+        u8"每一帧最多允许移动多少像素（鼠标计数）。0 = 不限。\n"
+        u8"⚠️ 这是硬约束：能追上的最高目标速度 = 本值 × 检测帧率。\n"
+        u8"实测需要的下限（120Hz 检测）：250px/s 目标需 2.1/帧、750px/s 需 6.3/帧、"
+        u8"950px/s（喷气级）需 7.9/帧；60Hz 检测时全部翻倍。\n"
+        u8"实测综合偏差：不限=12.1，限 15=13.3，限 8=17.2，限 5=38.7，限 3=80.1\n"
+        u8"—— 限 3 时连 550px/s 的滑铲都会掉到 157px 偏差。\n"
+        u8"建议：没有特别需要就保持 0；要限也请给足（120Hz 下 >=15，60Hz 下 >=30）。");
+    m_pidfInteger[2]->setToolTip(limitTip);
+    m_pidfInteger[3]->setToolTip(limitTip);
 
     // AVA 的 Ki 不在界面中出现，并在配置加载时固定为 0。
     m_pidfGain[2]->setParent(card);
