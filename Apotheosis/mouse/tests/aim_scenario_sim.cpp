@@ -457,7 +457,7 @@ std::vector<Scenario> scenarios()
 
 int main(int argc, char** argv)
 {
-    // 参数位: kp kd kf lr 限幅 检测延迟 鼠标延迟 [假定测量延迟 [假定指令延迟 [kf_y [lr_y [噪声px [dt抖动]]]]]]
+    // 参数位: kp kd kf lr 限幅 检测延迟 鼠标延迟 [假定测量延迟 [假定指令延迟 [kf_y [lr_y [噪声px [dt抖动 [检测帧率]]]]]]]
     Params p;
     Env e;
     if (argc > 1) p.kp = std::atof(argv[1]);
@@ -467,6 +467,9 @@ int main(int argc, char** argv)
     if (argc > 5) p.limit = std::atoi(argv[5]);
     if (argc > 6) e.det_lat = std::atoi(argv[6]);
     if (argc > 7) e.mouse_lat = std::atoi(argv[7]);
+    // argv[14] = 检测帧率(Hz), 默认 120。用于验证"秒级常数(tau)"与"帧级定档"在不同
+    // 帧率下的配合 —— 例如 tau=0.0125s 在 60Hz 只有 0.75 帧、在 240Hz 是 3 帧。
+    if (argc > 14) { const double fps = std::atof(argv[14]); if (fps > 1.0) e.dt = 1.0 / fps; }
     std::printf("参数: kp=%.3f kd=%.3f kf=%.3f lr=%.3f 限幅=%d | 环境: %.0fHz 检测延迟%d帧 鼠标延迟%d帧 | 补偿假定延迟=%d帧\n",
                 p.kp, p.kd, p.kf, p.lr, p.limit, 1.0 / e.dt, e.det_lat, e.mouse_lat,
                 argc > 8 ? std::atoi(argv[8]) : e.det_lat);

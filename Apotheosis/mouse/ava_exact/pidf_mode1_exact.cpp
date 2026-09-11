@@ -171,6 +171,34 @@ double adaptive_radius_scale(const PidfDelayModelExact& delay,
     return total_frames <= 4.5 ? 3.0 : 6.0;
 }
 
+// 增益归一化: 把"每帧增益"换算到参考帧率。
+//
+// 为什么必须做: kp / kd / 前馈学习率都是【每帧】增益, 所以它们的【物理】增益
+// ∝ 帧率 —— 同一个界面数值在 240Hz 下相当于 120Hz 的两倍, 在 60Hz 下只有一半。
+// 而前馈位移是 ff_state*dt(物理量, 与帧率无关), 两者语义不一致, 于是同一套参数
+// 在不同检测帧率下表现差异极大。实测(aim_scenario_sim, 同一套参数, 约 25ms 延迟):
+//     帧率    60     90    120    144    240
+//     原     26.75  17.99  11.99   9.63  65.51   <- 两头都差(240Hz 会发散)
+//     归一化 14.50  20.63  11.99  10.71  21.79
+// 即归一化把跨帧率的离散度从 9.6~65.5 收窄到 10.7~21.8, 总体好 1.66 倍。
+// 参考帧率取 120Hz(本项目调参所用的帧率), 于是在 120Hz 下本变换是恒等 ——
+// 既有手感与已验证的调参结论都不变。
+constexpr double kGainReferenceDtSec = 1.0 / 120.0;
+constexpr double kGainRateScaleMin = 0.4;
+constexpr double kGainRateScaleMax = 2.5;
+
+double compute_rate_scale(PidfDelayModelExact& delay, double dt) noexcept {
+    if (dt <= 0.0)
+        return 1.0;
+    // 一阶平滑: 首次直接用当帧值, 之后 0.1 步长(约 10 帧时间常数)
+    delay.frame_dt_ema = (delay.frame_dt_ema <= 0.0)
+        ? dt : (delay.frame_dt_ema * 0.9 + dt * 0.1);
+    double scale = delay.frame_dt_ema / kGainReferenceDtSec;
+    if (scale < kGainRateScaleMin) scale = kGainRateScaleMin;
+    if (scale > kGainRateScaleMax) scale = kGainRateScaleMax;
+    return scale;
+}
+
 double ff_learning_rate_cap(const PidfDelayModelExact& delay,
                             double dt) noexcept {
     const double total_frames = link_latency_frames(delay, dt);
@@ -427,6 +455,7 @@ void apply_post_frame_damping(PidfMode1State& s) noexcept {
 
 void reset_pidf_delay_model(PidfDelayModelExact& model) noexcept {
     model.step = 0;
+    model.frame_dt_ema = 0.0;
     model.initialized = false;
     model.model_x.fill(0.0);
     model.model_y.fill(0.0);
@@ -476,6 +505,8 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
                                    double now_seconds) noexcept {
     PidfNativeOutput out{};
     const double dt = now_seconds - s.previous_timestamp;
+    // 每帧增益归一化到参考帧率(见 compute_rate_scale)
+    const double rate_scale = compute_rate_scale(delay, dt);
     if (!input.valid) {
         reset_pidf_mode1(s, now_seconds);
         reset_pidf_delay_model(delay);
@@ -602,10 +633,10 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     const double d_alpha = 1.0 - std::exp(-dt / kDerivativeTauSec);
     const double d_raw_x =
         (s.corrected_error_x - s.previous_error_x)
-        * std::min(s.kd_x, kd_cap) / dt;
+        * std::min(s.kd_x, kd_cap) * rate_scale / dt;
     const double d_raw_y =
         (s.corrected_error_y - s.previous_error_y)
-        * std::min(s.kd_y, kd_cap) / dt;
+        * std::min(s.kd_y, kd_cap) * rate_scale / dt;
     s.d_filtered_x += (d_raw_x - s.d_filtered_x) * d_alpha;
     s.d_filtered_y += (d_raw_y - s.d_filtered_y) * d_alpha;
     s.scratch_x = s.d_filtered_x;
@@ -615,11 +646,11 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     const double kp_cap = proportional_gain_cap(delay, dt);
     const double proportional_integral_x =
         s.integral_x * s.ki_x
-        + s.corrected_error_x * std::min(s.kp_x, kp_cap);
+        + s.corrected_error_x * std::min(s.kp_x, kp_cap) * rate_scale;
     s.raw_pid_x = s.scratch_x + proportional_integral_x;
     const double proportional_integral_y =
         s.integral_y * s.ki_y
-        + s.corrected_error_y * std::min(s.kp_y, kp_cap);
+        + s.corrected_error_y * std::min(s.kp_y, kp_cap) * rate_scale;
     s.raw_pid_y = s.scratch_y + proportional_integral_y;
 
     // 前馈速度估计: 学习率沿用 dynamic_lr(基学习率 × 高斯权重下限)。
@@ -636,8 +667,8 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     const double ff_lr_cap = ff_learning_rate_cap(delay, dt);
     update_low_kf_feedforward(
         s, dt,
-        lr_weight(s.gaussian_weight_x) * std::min(s.base_lr_x, ff_lr_cap),
-        lr_weight(s.gaussian_weight_y) * std::min(s.base_lr_y, ff_lr_cap));
+        lr_weight(s.gaussian_weight_x) * std::min(s.base_lr_x, ff_lr_cap) * rate_scale,
+        lr_weight(s.gaussian_weight_y) * std::min(s.base_lr_y, ff_lr_cap) * rate_scale);
     // frame_divisor 目前没有任何调用方设置(见 pid_input_pipeline.cpp), 所以
     // frame_scale 恒为 1; 保留是为了不改动原生算式结构。
     const double frame_scale = 1.0 / std::max(

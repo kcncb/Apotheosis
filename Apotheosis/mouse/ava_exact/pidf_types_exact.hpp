@@ -99,6 +99,9 @@ struct PidfDelayModelExact {
     std::array<double, kHistory> model_y{};
     std::array<double, kHistory> command_x{};
     std::array<double, kHistory> command_y{};
+    // 控制周期的一阶平滑(用于把"每帧增益"归一化到参考帧率)。用平滑值而不是
+    // 瞬时 dt, 否则周期抖动会直接变成增益抖动。
+    double frame_dt_ema{};
     double model_x_state{};
     double model_y_state{};
     int step{};
