@@ -20,6 +20,10 @@
 #include "Apotheosis.h"
 #include "runtime/aim_telemetry.h"
 #include "runtime/latency_probe.h"
+#include "runtime/chain_log.h"
+#include <ctime>    // chain log: 时间戳文件名
+// 全链路排查日志(用法见 chain_log.h 头部说明)
+#include <string>   // chain log: 文件路径拼接
 #include "runtime/config_snapshot.h"
 #include "runtime/thread_loops.h"
 
@@ -344,6 +348,127 @@ void publish_boss_debug(const boss::AimEngine& engine)
 
 } // namespace
 
+// ─── 全链路排查日志的辅助函数 ───────────────────────────────────────────────
+// 主循环里只调用下面这些函数, 每个调用点一行 —— 详细字段在这里统一拼装, 免得把
+// 大段格式化代码散落到延迟敏感的主循环里。字段含义见 runtime/chain_log.h。
+namespace chain_detail
+{
+inline std::string dump_path(const char* tag)
+{
+    // 落在 exe 同级的 logs/ 下, 文件名带时间戳与标签, 便于事后认领。
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char stamp[32]{};
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
+    std::string path = "logs/chain_";
+    path += stamp;
+    path += '_';
+    path += tag;
+    path += ".log";
+    return path;
+}
+} // namespace chain_detail
+
+// 有目标、且本帧真的走完了控制与下发流程时调用。
+inline void chain_log_aim_frame(std::int64_t frame_id,
+                                int detection_count,
+                                int resolution,
+                                double detection_interval_ms,
+                                const double* pivot_xy,
+                                bool crosshair_used,
+                                const double* crosshair_xy,
+                                double fov_radius_x,
+                                double fov_radius_y,
+                                int track_id,
+                                const double* anchor_xy,
+                                double box_w,
+                                double box_h,
+                                int engine_dx,
+                                int engine_dy,
+                                bool coasting,
+                                bool motion_suppressed,
+                                int drive_dx,
+                                int drive_dy,
+                                int queue_backlog,
+                                double queue_latency_ms,
+                                int send_failures,
+                                int trigger_phase,
+                                bool trigger_enabled,
+                                bool trigger_in_zone)
+{
+    if (!runtime::chainlog::enabled(runtime::chainlog::SecControl, 2))
+        return;
+    const auto latency = runtime::latency::snapshot();
+    runtime::chainlog::write(
+        runtime::chainlog::SecDetect, 2,
+        ",count=%d,interval_ms=%.2f",
+        detection_count, detection_interval_ms);
+    runtime::chainlog::write(
+        runtime::chainlog::SecCrosshair, 2,
+        ",used=%d,px=%.2f,py=%.2f,cross_x=%.2f,cross_y=%.2f,"
+        "fov_rx=%.1f,fov_ry=%.1f,res=%d",
+        crosshair_used ? 1 : 0, pivot_xy[0], pivot_xy[1],
+        crosshair_xy[0], crosshair_xy[1],
+        fov_radius_x, fov_radius_y, resolution);
+    runtime::chainlog::write(
+        runtime::chainlog::SecControl, 2,
+        ",track_id=%d,anchor_x=%.2f,anchor_y=%.2f,box_w=%.1f,box_h=%.1f,"
+        "err_x=%.2f,err_y=%.2f,dx=%d,dy=%d,coasting=%d,suppressed=%d",
+        track_id, anchor_xy[0], anchor_xy[1], box_w, box_h,
+        anchor_xy[0] - crosshair_xy[0], anchor_xy[1] - crosshair_xy[1],
+        engine_dx, engine_dy, coasting ? 1 : 0, motion_suppressed ? 1 : 0);
+    runtime::chainlog::write(
+        runtime::chainlog::SecExec, 2,
+        ",drive_dx=%d,drive_dy=%d,backlog=%d,queue_ms=%.2f,send_fail=%d",
+        drive_dx, drive_dy, queue_backlog, queue_latency_ms, send_failures);
+    runtime::chainlog::write(
+        runtime::chainlog::SecTrigger, 2,
+        ",enabled=%d,phase=%d,in_zone=%d",
+        trigger_enabled ? 1 : 0, trigger_phase, trigger_in_zone ? 1 : 0);
+    runtime::chainlog::write(
+        runtime::chainlog::SecLatency, 2,
+        ",capture_wait_ms=%.2f,inference_ms=%.2f,publish_to_aim_ms=%.2f,"
+        "aim_to_move_ms=%.2f,total_ms=%.2f,end_to_end_ms=%.2f,"
+        "capture_fps=%.1f,capture_interval_ms=%.2f,frame_age_us=%d,"
+        "frames=%llu,detections=%llu,capture_frames=%llu,dropped=%llu,stale=%llu",
+        latency.stages[runtime::latency::kCaptureWait].ema_ms,
+        latency.stages[runtime::latency::kInference].ema_ms,
+        latency.stages[runtime::latency::kPublishToAim].ema_ms,
+        latency.stages[runtime::latency::kAimToMove].ema_ms,
+        latency.stages[runtime::latency::kTotal].ema_ms,
+        latency.stages[runtime::latency::kEndToEnd].ema_ms,
+        latency.capture_fps, latency.capture_interval_ms,
+        latency.device_frame_age_us,
+        static_cast<unsigned long long>(latency.frames_consumed),
+        static_cast<unsigned long long>(latency.detections_seen),
+        static_cast<unsigned long long>(latency.capture_frames),
+        static_cast<unsigned long long>(latency.dropped_capture),
+        static_cast<unsigned long long>(latency.stale_consumes));
+}
+
+// "这一帧为什么没瞄/为什么松手" —— 排查时最常问的问题, 所以单独记成关键事件。
+inline void chain_log_skip(const char* reason)
+{
+    runtime::chainlog::event(",reason=%s", reason);
+}
+
+// 自动导出最近 N 帧(环形缓冲), 文件名带时间戳; 失败时不抛异常, 只记一条事件。
+inline void chain_log_auto_dump(const char* tag)
+{
+    const std::string path = chain_detail::dump_path(tag);
+    const std::int64_t written = runtime::chainlog::dump(path.c_str());
+    if (written < 0)
+        runtime::chainlog::event(",reason=chain_dump_failed,path=%s", path.c_str());
+    else
+        runtime::chainlog::event(",reason=chain_dumped,path=%s,records=%lld",
+                                 path.c_str(), static_cast<long long>(written));
+}
+
 void mouseThreadFunction(MouseThread& mouseThread)
 {
     int lastVersion = -1;
@@ -510,6 +635,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // PIDF 的 residual 一起清掉, 那正是"逼近锚点后停住不再收敛"的直接原因。
         if (!hasNewDetection)
         {
+            runtime::chainlog::event(",reason=no_new_detection,age_ms=%.2f,"
+                                     "interval_ms=%.2f", detection_age_ms,
+                                     detection_interval_ms);
             const double cadence_ms = (detection_interval_ms > 0.0)
                 ? std::clamp(detection_interval_ms, 1.0, 1000.0)
                 : (1000.0 / 60.0);
@@ -524,6 +652,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 g_pid_last_err_px.store(0.0f);
                 had_lock = false;
             }
+            runtime::chainlog::end_frame();
             continue;
         }
 
@@ -533,6 +662,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
         runtime::latency::markAimConsume(
             probed_frame_capture_ns, probed_publish_ns,
             static_cast<double>(g_mouse_queue_latency_ms.load()));
+
+        // 全链路日志: 开一帧。本帧后续所有记录都会带上同一个 frame= 便于串联。
+        runtime::chainlog::begin_frame(static_cast<std::int64_t>(lastVersion));
 
         const auto pivot = resolve_crosshair_pivot(
             profile_ptr, config_resolution, config_snapshot->crosshair_smooth,
@@ -607,6 +739,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
             had_lock = true;
             int drive_dx = out.dx;
             int drive_dy = out.dy;
+            // 本帧扳机是否在命中区内 —— 扳机 FSM 在后面才算, 这里先给默认值,
+            // 供本帧的全链路日志使用(日志在扳机 FSM 之前落盘)。
+            bool trigger_in_zone = false;
             boss::AimPathDriver::Params path;
             path.mode = static_cast<boss::AimPathDriver::Mode>(
                 std::clamp(profile_ptr->aim_path_mode, 0, 2));
@@ -633,6 +768,35 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // CVM 在短暂丢检期间继续使用 tracker 的预测框驱动 PIDF；
             // coasting 只禁止开火，不再丢弃预测移动或重置控制器历史。
             mouseThread.sendRawMove(drive_dx, drive_dy);
+
+            // 全链路日志: 本帧的完整现场(检测/找色枢轴/锚点/误差/控制器输出/整形后
+            // 位移/队列/扳机相位/延迟探针)。字段含义见 runtime/chain_log.h。
+            {
+                const double pivot_xy[2] = {pivot.x, pivot.y};
+                const double crosshair_xy[2] = {
+                    static_cast<double>(in.crosshair_x),
+                    static_cast<double>(in.crosshair_y)};
+                const double anchor_xy[2] = {
+                    static_cast<double>(out.anchor.x),
+                    static_cast<double>(out.anchor.y)};
+                chain_log_aim_frame(
+                    static_cast<std::int64_t>(lastVersion),
+                    static_cast<int>(precise_boxes.size()),
+                    config_resolution, detection_interval_ms,
+                    pivot_xy, profile_ptr != nullptr && profile_ptr->crosshair_detect_enabled,
+                    crosshair_xy,
+                    in.fov_radius_x, in.fov_radius_y,
+                    out.current_track_id, anchor_xy,
+                    static_cast<double>(out.bbox.width),
+                    static_cast<double>(out.bbox.height),
+                    out.dx, out.dy, out.coasting, out.motion_suppressed,
+                    drive_dx, drive_dy,
+                    movement_feedback.backlog, movement_feedback.latency_ms,
+                    movement_feedback.failed,
+                    static_cast<int>(trigger.phase),
+                    profile_ptr->trigger_enabled,
+                    trigger_in_zone);
+            }
 
             // 扳机模式: 0 = 长按(按住不松手), >0 = 连点(按 duration 后松手)。
             const bool trigger_hold_mode = profile_ptr->trigger_fire_duration <= 0;
@@ -668,6 +832,18 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 const bool inside_body_geometry = (pivot.y >= top_limit) && (pivot.y <= bottom_limit);
 
                 const bool in_zone = in_tolerance && inside_body_geometry;
+
+                // 全链路日志: 扳机为何按下/不按下(容差、人体边界、相位)
+                trigger_in_zone = in_zone;
+                runtime::chainlog::write(
+                    runtime::chainlog::SecTrigger, 2,
+                    ",phase=%d,in_zone=%d,in_tol=%d,in_body=%d,tx=%.1f,ty=%.1f,"
+                    "anchor_x=%.1f,anchor_y=%.1f,pivot_x=%.1f,pivot_y=%.1f",
+                    static_cast<int>(trigger.phase), in_zone ? 1 : 0,
+                    in_tolerance ? 1 : 0, inside_body_geometry ? 1 : 0,
+                    tx_range, ty_range,
+                    static_cast<double>(out.anchor.x),
+                    static_cast<double>(out.anchor.y), pivot.x, pivot.y);
 
                 const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now.time_since_epoch()).count();
@@ -868,5 +1044,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
     }
 
     reset_trigger(mouseThread, trigger);
+
+    // 全链路日志: 一次会话结束时导出最近 N 帧(文件名带时间戳, 落在 logs/ 下)。
+    // 环型缓冲是"一直在写"的, 所以这里导出的是本次会话最后几秒的完整现场。
+    runtime::chainlog::end_frame();
+    chain_log_auto_dump("session_end");
     mouseThread.clearQueuedMoves();
 }
