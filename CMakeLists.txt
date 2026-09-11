@@ -422,6 +422,17 @@ if(MSVC)
     target_compile_options(ava_chain_test PRIVATE /utf-8 /Zc:char8_t-)
 endif()
 
+# 多场景模拟真实环境测试台: 只依赖 ava_exact, 不需要 OpenCV/推理运行时。
+add_executable(aim_scenario_sim EXCLUDE_FROM_ALL
+    "${SRC_DIR}/mouse/tests/aim_scenario_sim.cpp"
+    ${AVA_EXACT_SOURCES})
+target_include_directories(aim_scenario_sim PRIVATE
+    "${SRC_DIR}/mouse")
+target_compile_features(aim_scenario_sim PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(aim_scenario_sim PRIVATE /utf-8 /Zc:char8_t-)
+endif()
+
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_DIR}")
