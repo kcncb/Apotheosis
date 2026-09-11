@@ -56,14 +56,15 @@ void compute_opposition_flags(PidfMode1State& s,
 void choose_adaptive_radius(PidfMode1State& s,
                             double radius_x,
                             double radius_y,
-                            bool consider_high_kf) noexcept {
-    s.adaptive_radius_x = radius_x * 1.5 + 0.000001;
+                            bool consider_high_kf,
+                            double radius_scale) noexcept {
+    s.adaptive_radius_x = radius_x * radius_scale + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_x)
         s.adaptive_radius_x = radius_x * 0.5 + 0.000001;
     if (s.damp_x)
         s.adaptive_radius_x = radius_x * 0.25 + 0.000001;
 
-    s.adaptive_radius_y = radius_y * 1.5 + 0.000001;
+    s.adaptive_radius_y = radius_y * radius_scale + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_y)
         s.adaptive_radius_y = radius_y * 0.5 + 0.000001;
     if (s.damp_y)
@@ -147,6 +148,27 @@ double link_latency_frames(const PidfDelayModelExact& delay,
     if (delay.measure_latency_sec <= 0.0)
         return 1.0e9;
     return delay.measure_latency_sec / dt + delay.command_latency_frames;
+}
+
+// 自适应半径的倍率(高斯门控的尺度): 它决定"误差多大时开始压制前馈"。
+//
+// 为什么它也该按延迟定档: 门控的尺度应当跟着【典型误差量级】走, 而典型误差随延迟
+// 增长 —— 延迟越大, 同样的机动留下的暂态误差越大, 尺度太小就会把前馈整个压掉,
+// 变成"追不上还不敢追"。
+// 实测(aim_scenario_sim, 其余参数走各自定档):
+//     倍率    2帧     3帧     4帧     6帧
+//     1.5   10.44   12.77   15.98   31.20
+//     3.0   10.34   12.85   15.68   27.13
+//     5.0   10.66   13.43   16.21   25.92
+//     6.0   10.63   13.77   16.47   25.66
+//     8.0   10.62   14.09   16.84   25.85
+// 低延迟 3.0 最好(6.0 会明显变差); 6 帧以上 6.0 最好(比 1.5 好 18%)。
+double adaptive_radius_scale(const PidfDelayModelExact& delay,
+                             double dt) noexcept {
+    const double total_frames = link_latency_frames(delay, dt);
+    if (total_frames > 1.0e8)
+        return 3.0;                        // 没有实测延迟: 用全延迟段都稳的 3.0
+    return total_frames <= 4.5 ? 3.0 : 6.0;
 }
 
 double ff_learning_rate_cap(const PidfDelayModelExact& delay,
@@ -500,7 +522,9 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.absolute_error_y = std::fabs(s.corrected_error_y);
     s.high_kf_enabled_x = s.kf_high_x > 0.0;
     s.high_kf_enabled_y = s.kf_high_y > 0.0;
-    choose_adaptive_radius(s, radius_x, radius_y, true);
+    // 门控尺度也按延迟定档(见 adaptive_radius_scale)
+    const double radius_scale = adaptive_radius_scale(delay, dt);
+    choose_adaptive_radius(s, radius_x, radius_y, true, radius_scale);
     compute_gaussian_weights(s);
     s.dynamic_lr_x = lr_weight(s.gaussian_weight_x) * s.base_lr_x;
     s.dynamic_lr_y = lr_weight(s.gaussian_weight_y) * s.base_lr_y;
@@ -518,7 +542,7 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         s.absolute_error_y = std::fabs(s.corrected_error_y);
         compute_opposition_flags(
             s, s.corrected_error_x, s.corrected_error_y, dt);
-        choose_adaptive_radius(s, radius_x, radius_y, true);
+        choose_adaptive_radius(s, radius_x, radius_y, true, radius_scale);
         compute_gaussian_weights(s);
         s.corrected_error_x +=
             s.gaussian_weight_x * s.correction_output_x;
@@ -532,7 +556,7 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.absolute_error_y = std::fabs(s.corrected_error_y);
     compute_opposition_flags(
         s, s.corrected_error_x, s.corrected_error_y, dt);
-    choose_adaptive_radius(s, radius_x, radius_y, false);
+    choose_adaptive_radius(s, radius_x, radius_y, false, radius_scale);
     compute_gaussian_weights(s);
     s.integral_weight_x =
         std::max(s.integral_weight_x, s.gaussian_weight_x);
