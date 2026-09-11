@@ -36,7 +36,20 @@
 //      延迟下有效(翻滚缓 24.85->20.32, 喷气 17.95->15.42), 但会吃掉延迟裕度:
 //      boost=0.3/门槛20px 时 4 帧延迟从 19.55 恶化到 29.77, boost>=0.5 直接发散。
 //      用稳健性换约 2% 综合分不划算, 未采用。
-//   7) 【否定结果】把前馈速度观测器改成"快观测器"(自适应增益/高固定增益/对齐指令
+//   7) 【最重要】"速度估计"确实是当前最大的剩余瓶颈, 但它是【回路】限制而不是算法限制:
+//      给控制器【完美速度信息】(oracle)后, 3 帧延迟下综合分 17.15 -> 7.07(2.42 倍),
+//      翻滚缓 24.85 -> 5.61、喷气 17.95 -> 3.67。即"知道真实速度"值 2.4 倍。
+//      但没有任何因果估计器能拿到它:
+//        · 提高递归增益(lr>=0.10)会失稳(17.1 -> 19.9 -> 40+);
+//        · 自适应增益(用|创新|触发)会失稳(10+ 变体);
+//        · 卡尔曼滤波只是【同一增益的重新参数化】(过程噪声 Q=50 <-> 等效 lr=0.0496,
+//          与手调的 0.05 重合), 在等效增益下并不更好; 按真实机动加速度设的 Q(>=400)
+//          会失稳;
+//        · 把跟踪器卡尔曼平滑后的位置接进来(降低测量噪声)不改变最优 lr, 分数反而
+//          略差(17.15 -> 17.77) —— 跟踪器自身的滞后比它消掉的噪声更贵。
+//      结论: 估计器的速度被【回路延迟裕度】锁死, 不是被信息量锁死。要吃下这 2.4 倍,
+//      只能减少端到端延迟(采集卡/链路), 或整体换成显式建模延迟的状态反馈结构。
+//   8) 【否定结果】把前馈速度观测器改成"快观测器"(自适应增益/高固定增益/对齐指令
 //      时序/去掉反向压制/上述组合, 共 10+ 变体)全部不稳定(综合分 38~182 对 17)。
 //      但零延迟下快观测器明显更优(5.49 对 9.60) —— 说明限制来自【整个回路的延迟
 //      裕度】, 不是观测器自身的数学, 内部怎么改都救不回来。要再快必须动链路延迟
@@ -70,12 +83,14 @@
 //         err += (敌人速度 + 自身位移速度) * dt - 生效的位移
 //   · 自身动作(大跳/跳拉/摆头)表现为【视角先动】: 不经过控制器指令, 直接改误差。
 //   · 遮挡: 若干帧没有测量, 控制器只能靠自身状态外推。
+//   · 目标框经过真实的跟踪器(4 状态卡尔曼平滑)后才给 PIDF —— 与真实链路一致。
 //
 // 单位: 全部在 detection_resolution=320 的图像像素/秒。参考(90°FOV, 320px):
 //   1° ≈ 3.56px; 6m 处 5m/s 横移 ≈ 168px/s; 滑铲 8-10m/s ≈ 300-350px/s;
 //   翻滚/dash ≈ 500-750px/s; 喷气横移可到 900px/s 以上。
 // =============================================================================
 #include "../ava_exact/pidf_mode1_exact.hpp"
+#include "../ava_exact/target_tracker_exact.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -151,6 +166,7 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
     double last_meas = 0.0, last_ev = 0.0, predicted = 0.0;
     int n = 0, locked = 0, coast = 0, relocks = 0;
     bool lost = false;
+    TargetTrackerExact tracker;
 
     const int frames = static_cast<int>(sc.duration / e.dt);
     for (int f = 0; f < frames; ++f)
@@ -177,19 +193,37 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
             pending.pop_front();
         }
 
-        // 真实链路: 丢帧后先是 tracker/engine 用速度外推(cache 帧), 仍然没检测到
-        // 才算丢目标 —— 那时 PIDF 被复位且准星不动(不 tick), 不是每帧喂 valid=0。
-        if (visible)
+        // ── 真实链路: 检测 -> 跟踪器(4 状态卡尔曼, 平滑框中心) -> 锚点 -> PIDF ──
+        // 关键: PIDF 拿到的【不是】带噪声的原始检测, 而是跟踪器卡尔曼平滑后的框。
+        // 之前模拟器把噪声直接喂给 PIDF, 相当于把噪声估高了, 会让调出来的 lr 偏小。
         {
-            coast = 0;
+            const double center = 160.0 + measured_true + nz;
+            SelectedTarget104Abi m{};
+            m.class_id = 0; m.confidence = 0.9f;
+            const double hw = (is_x ? p.box_w : p.box_h) * 0.5;
+            const double hh = (is_x ? p.box_h : p.box_w) * 0.5;
+            m.left = static_cast<float>(center - hw);
+            m.right = static_cast<float>(center + hw);
+            m.top = static_cast<float>(160.0 - hh);
+            m.bottom = static_cast<float>(160.0 + hh);
+            m.effective_width = static_cast<float>(hw * 2.0);
+            m.effective_height = static_cast<float>(hh * 2.0);
+            if (visible) tracker.update(&m);
+            else tracker.update(nullptr);
+            const SelectedTarget104Abi* out = tracker.build_output(nullptr);
+            if (out != nullptr)
+            {
+                coast = 0;
+                predicted = static_cast<double>(out->effective_center_x) - 160.0;
+                visible = true;      // 跟踪器外推中仍算有效(与原代码 engine 的行为一致)
+            }
+            else
+            {
+                ++coast;
+                predicted = last_meas + last_ev * static_cast<double>(coast) * e.dt;
+            }
             last_meas = measured;
             last_ev = enemy_v;
-            predicted = measured;
-        }
-        else
-        {
-            ++coast;
-            predicted = last_meas + last_ev * static_cast<double>(coast) * e.dt;
         }
         if (coast > e.cache)
         {
