@@ -163,8 +163,10 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
     PidfMode1Config c{};
     c.kp_x = p.kp; c.kp_y = p.kp;
     c.kd_x = p.kd; c.kd_y = p.kd;
-    c.kf_x = p.kf; c.kf_y = p.kf;
-    c.lr_x = p.lr; c.lr_y = p.lr;
+    // 第 10/11 个可选参数 = Y 轴的 kf / lr(默认与 X 轴相同)。
+    // 分轴是原生设计的一部分(半径也用框宽/框高分开), 实测两轴最优值确实不同。
+    c.kf_x = p.kf; c.kf_y = (argc > 10) ? std::atof(argv[10]) : p.kf;
+    c.lr_x = p.lr; c.lr_y = (argc > 11) ? std::atof(argv[11]) : p.lr;
     c.movement_limit_x = p.limit; c.movement_limit_y = p.limit;
     PidfMode1State s = construct_pidf_mode1(c, 0.0);
     PidfDelayModelExact delay{};
@@ -428,6 +430,7 @@ std::vector<Scenario> scenarios()
 
 int main(int argc, char** argv)
 {
+    // 参数位: kp kd kf lr 限幅 检测延迟 鼠标延迟 [假定测量延迟 [假定指令延迟 [kf_y [lr_y]]]]
     Params p;
     Env e;
     if (argc > 1) p.kp = std::atof(argv[1]);
