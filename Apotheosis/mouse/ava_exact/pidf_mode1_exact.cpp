@@ -177,10 +177,10 @@ double adaptive_radius_scale(const PidfDelayModelExact& delay,
 // ∝ 帧率 —— 同一个界面数值在 240Hz 下相当于 120Hz 的两倍, 在 60Hz 下只有一半。
 // 而前馈位移是 ff_state*dt(物理量, 与帧率无关), 两者语义不一致, 于是同一套参数
 // 在不同检测帧率下表现差异极大。实测(aim_scenario_sim, 同一套参数, 约 25ms 延迟):
-//     帧率    60     90    120    144    240
-//     原     26.75  17.99  11.99   9.63  65.51   <- 两头都差(240Hz 会发散)
-//     归一化 14.50  20.63  11.99  10.71  21.79
-// 即归一化把跨帧率的离散度从 9.6~65.5 收窄到 10.7~21.8, 总体好 1.66 倍。
+//     帧率       60     90    120    144    240
+//     不归一化 26.75  17.99  11.99   9.63  65.51   <- 两头都差(240Hz 会发散)
+//     sqrt 归一 19.55  18.00  11.99  10.01  14.66   <- 采用
+// 跨帧率离散度从 9.6~65.5 收窄到 10.0~19.6, 总体好 1.78 倍。
 // 参考帧率取 120Hz(本项目调参所用的帧率), 于是在 120Hz 下本变换是恒等 ——
 // 既有手感与已验证的调参结论都不变。
 constexpr double kGainReferenceDtSec = 1.0 / 120.0;
@@ -193,7 +193,15 @@ double compute_rate_scale(PidfDelayModelExact& delay, double dt) noexcept {
     // 一阶平滑: 首次直接用当帧值, 之后 0.1 步长(约 10 帧时间常数)
     delay.frame_dt_ema = (delay.frame_dt_ema <= 0.0)
         ? dt : (delay.frame_dt_ema * 0.9 + dt * 0.1);
-    double scale = delay.frame_dt_ema / kGainReferenceDtSec;
+    // 用【平方根】而不是线性: 线性缩放把"帧率更高 -> 信息更多 -> 可以更激进"这个
+    // 好处也抹掉了。三方案实测(约 25ms 延迟, 逐帧率综合分):
+    //     方案        60Hz    90Hz   120Hz   144Hz   240Hz    和
+    //     线性       14.50   20.63   11.99   10.71   21.79   79.6
+    //     sqrt       19.55   18.00   11.99   10.01   14.66   74.2   <- 采用
+    //     不归一化   26.75   17.99   11.99    9.63   65.51  131.8
+    // sqrt 在中频段与"不归一化"持平(保住了高帧率的好处), 又把 240Hz 从 65.5 压到
+    // 14.7(比线性还好)。120Hz 处 sqrt(1)=1, 仍是恒等。
+    double scale = std::sqrt(delay.frame_dt_ema / kGainReferenceDtSec);
     if (scale < kGainRateScaleMin) scale = kGainRateScaleMin;
     if (scale > kGainRateScaleMax) scale = kGainRateScaleMax;
     return scale;
