@@ -164,7 +164,11 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
     // 测量侧 = 检测+发布延迟; 指令侧 = 鼠标+游戏帧延迟。
     const int assumed_lat = (argc > 8) ? std::atoi(argv[8]) : e.det_lat;
     delay.measure_latency_sec = static_cast<double>(assumed_lat) * e.dt;
-    delay.command_latency_frames = static_cast<double>(e.mouse_lat);
+    // 第 9 个可选参数 = 控制器【假定】的指令延迟(帧), 用于测建模不准时的鲁棒性
+    // argv[9] = 控制器【假定】的指令延迟帧数(默认与真实值一致)
+    delay.command_latency_frames = (argc > 9)
+        ? static_cast<double>(std::atoi(argv[9]))
+        : static_cast<double>(e.mouse_lat);
 
     const bool is_x = (sc.axis == "x");
     const double rx = is_x ? p.box_w : p.box_h;
@@ -197,13 +201,12 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
         const double nz = 0.35 * noise[f % 10];
         const double measured = std::round((measured_true + nz) * 2.0) * 0.5;
 
-        // 指令生效延迟: 队列长度 = mouse_lat+1, 最老的一条本帧生效
+        // 指令生效延迟: 队列长度 = mouse_lat+1, applied = dx_{f-mouse_lat}。
+        // ⚠️ 之前这里是错位的: 实际给出 2 帧延迟却对控制器声明 1 帧
+        // (delay.command_latency_frames = mouse_lat), 于是观测器的模型比真实
+        // 早一帧, 高学习率会把这个系统性创新误差放大到发散 —— 这会让人误以为
+        // "回路的延迟裕度锁死了估计器", 其实是模拟器的建模错误。现在两者一致。
         double applied = 0.0;
-        if (static_cast<int>(pending.size()) > e.mouse_lat)
-        {
-            applied = pending.front();
-            pending.pop_front();
-        }
 
         // ── 真实链路: 检测 -> 跟踪器(4 状态卡尔曼, 平滑框中心) -> 锚点 -> PIDF ──
         // 关键: PIDF 拿到的【不是】带噪声的原始检测, 而是跟踪器卡尔曼平滑后的框。
@@ -265,6 +268,9 @@ Metrics runScenario(const Scenario& sc, const Params& p, const Env& e, int argc,
         const auto out = update_pidf_mode1(s, delay, in, (f + 1) * e.dt);
         const double dx = is_x ? static_cast<double>(out.dx) : static_cast<double>(out.dy);
         pending.push_back(dx);
+        while (static_cast<int>(pending.size()) > e.mouse_lat + 1)
+            pending.pop_front();
+        applied = pending.front();      // = dx 于 mouse_lat 帧之前
 
         // 环境推进: 敌人 + 自身动作改变误差; 已生效的指令把它拉回来
         err += (enemy_v + self_v) * e.dt - applied;

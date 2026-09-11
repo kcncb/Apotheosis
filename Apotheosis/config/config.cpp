@@ -535,8 +535,8 @@ bool Config::loadConfig(const std::string& filename)
                     hk.pidf_kf_x = (hk.pidf_kf_x <= 0.0f) ? 1.0f : hk.pidf_kf_x;
                     hk.pidf_kf_y = (hk.pidf_kf_y <= 0.0f) ? 1.0f : hk.pidf_kf_y;
                     // lr 只在前馈本来就没开时才补, 避免覆盖用户已经选好的值
-                    if (hk.pidf_lr_x <= 0.0f) hk.pidf_lr_x = 0.05f;
-                    if (hk.pidf_lr_y <= 0.0f) hk.pidf_lr_y = 0.05f;
+                    if (hk.pidf_lr_x <= 0.0f) hk.pidf_lr_x = 0.08f;
+                    if (hk.pidf_lr_y <= 0.0f) hk.pidf_lr_y = 0.08f;
                     // 微分项在延迟下 kd>=0.1 会发散(实测), 老默认 0.01 又几乎没有
                     // 阻尼; 0.05 是实测的稳健值。
                     if (hk.pidf_kd_x < 0.02f) hk.pidf_kd_x = 0.05f;

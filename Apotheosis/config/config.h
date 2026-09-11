@@ -64,7 +64,9 @@ struct HotkeyProfile
     // 默认直接给可用值; 多场景模拟综合分 37.8 -> 20.6(见 tests/aim_scenario_sim.cpp)。
     float pidf_kd_x = 0.05f, pidf_kd_y = 0.05f;
     float pidf_kf_x = 1.0f, pidf_kf_y = 1.0f;
-    float pidf_lr_x = 0.05f, pidf_lr_y = 0.05f;
+    // 0.05 -> 0.08(延迟 <=4 帧时的实测最优); 控制器会按实测延迟自动收紧上限,
+    // 所以高延迟场景不会因此变差(见 pidf_mode1_exact.cpp 的 ff_learning_rate_cap)。
+    float pidf_lr_x = 0.08f, pidf_lr_y = 0.08f;
     int pidf_deadzone_x = 0, pidf_deadzone_y = 0;
     int pidf_limit_x = 0, pidf_limit_y = 0;
 

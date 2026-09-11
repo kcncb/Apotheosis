@@ -130,6 +130,26 @@ void apply_high_kf_correction(PidfMode1State& s,
     s.correction_output_y = s.correction_accum_y;
 }
 
+// 前馈学习率的【延迟上限】。
+//
+// 为什么需要: 学习率是"前馈环"的增益, 而那条环路的相位裕度由链路延迟决定 ——
+// 延迟越低, 能承受的学习率越高。aim_scenario_sim 实测(kp=2.0 kd=0.05 kf=1):
+//     总延迟(测量+指令)   2帧     3帧     4帧     5帧
+//     lr=0.05           12.05   14.40   16.22   19.05
+//     lr=0.08           10.44   13.30   15.57   27.62  <- 5 帧开始变差
+// 所以 <=4 帧时放开到 0.08, >=5 帧时收回 0.05。延迟由 latency_probe 每帧实测,
+// 没测到(0)时按保守的 0.05, 与旧默认一致 —— 不会比现在更差。
+//
+// 用户把「预测速度」调得比这个上限更低时, 以用户的值为准(取 min)。
+double ff_learning_rate_cap(const PidfDelayModelExact& delay,
+                            double dt) noexcept {
+    if (delay.measure_latency_sec <= 0.0)
+        return 0.05;                       // 没有实测延迟, 保守
+    const double total_frames =
+        delay.measure_latency_sec / dt + delay.command_latency_frames;
+    return total_frames <= 4.0 ? 0.08 : 0.05;
+}
+
 // 前馈速度估计器: 学习率由调用方显式传入(当前 = dynamic_lr, 即基学习率 × 高斯权重
 // 的下限 0.25)。这里把参数显式化, 是为了不去动 dynamic_lr 这个同时被复刻 ABI 布局
 // 和高 Kf 修正项使用的字段。
@@ -511,7 +531,13 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     // 高斯门控原本正是在大误差下给它兜稳定性, 去掉就把这层兜底拆了。
     // 所以这里保持门控, 只把参数显式传进来(便于以后单独调, 且不必动 dynamic_lr
     // 这个被复刻 ABI 与高 Kf 修正项共用的字段)。
-    update_low_kf_feedforward(s, dt, s.dynamic_lr_x, s.dynamic_lr_y);
+    // 上限作用在【基学习率】上, 再乘高斯门控 —— 这样当上限 <= 用户设定值时,
+    // 前馈学习率与旧行为逐位一致(不会在高延迟场景悄悄放大)。
+    const double ff_lr_cap = ff_learning_rate_cap(delay, dt);
+    update_low_kf_feedforward(
+        s, dt,
+        lr_weight(s.gaussian_weight_x) * std::min(s.base_lr_x, ff_lr_cap),
+        lr_weight(s.gaussian_weight_y) * std::min(s.base_lr_y, ff_lr_cap));
     // frame_divisor 目前没有任何调用方设置(见 pid_input_pipeline.cpp), 所以
     // frame_scale 恒为 1; 保留是为了不改动原生算式结构。
     const double frame_scale = 1.0 / std::max(
