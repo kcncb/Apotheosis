@@ -53,6 +53,10 @@ void compute_opposition_flags(PidfMode1State& s,
 //
 // 输入本来就把两个半径分开带了(PidfInputExact 的 radius_x/radius_y 来自框宽/框高),
 // 这里只是不再把它们合并 —— 与这套控制器"X/Y 各自独立增益"的既有设计保持一致。
+// 高 Kf 路径(仅 kf>1 时启用)与反向(damp)时的半径收缩因子都是 0.25。
+// 实测(kf=2, aim_scenario_sim): 因子 0.25 -> 17.58/27.99(3帧/6帧),
+// 0.5 -> 18.52/30.10, 1.0 -> 18.09/29.40, 故统一用 0.25。
+// 注意这条分支在 kf<=1(默认值)时不会进入, 所以该改动对默认手感零影响。
 void choose_adaptive_radius(PidfMode1State& s,
                             double radius_x,
                             double radius_y,
@@ -60,13 +64,13 @@ void choose_adaptive_radius(PidfMode1State& s,
                             double radius_scale) noexcept {
     s.adaptive_radius_x = radius_x * radius_scale + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_x)
-        s.adaptive_radius_x = radius_x * 0.5 + 0.000001;
+        s.adaptive_radius_x = radius_x * 0.25 + 0.000001;
     if (s.damp_x)
         s.adaptive_radius_x = radius_x * 0.25 + 0.000001;
 
     s.adaptive_radius_y = radius_y * radius_scale + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_y)
-        s.adaptive_radius_y = radius_y * 0.5 + 0.000001;
+        s.adaptive_radius_y = radius_y * 0.25 + 0.000001;
     if (s.damp_y)
         s.adaptive_radius_y = radius_y * 0.25 + 0.000001;
 }
