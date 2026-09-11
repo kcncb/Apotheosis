@@ -50,6 +50,7 @@ Result simulate(double gain, double speed, bool jitter, bool rejected, bool vert
 }
 int main()
 {
+    std::cout<<std::unitbuf;   // 崩溃时也能看到已经跑到哪一步
     for(double gain:{.5,1.0,2.0}) for(double speed:{0.0,250.0,750.0})
     {
         auto r=simulate(gain,speed,true,true);
@@ -83,5 +84,40 @@ int main()
     CHECK(sum==1);
     for(int i=0;i<100;++i)CHECK(mapper.map({1000,0},{},1,1)[0]==1);
     CHECK(mapper.map({0,0},{},1,1)[0]==0);
+    // 位置抖动回归: 静止目标的检测框在锚点两侧逐帧来回跳 ±2.5px, 而框面积不变
+    // (所以传给观察器的方差恒为 1)。修复前: 新息逐帧变号被当成"机动", 位置被吸附
+    // 到测量值并注入 measured_velocity(5px/8.33ms ≈ 600px/s), 输出反复朝跳变方向
+    // 下发, 形成锚点附近的极限环 —— 就是实机上看到的抖动。修复后判为抖动, 抬高观测
+    // 方差让增益下降去平滑, 速度不再被污染。
+    {
+        auto jitter_journal=std::make_shared<CommandJournal>();
+        PredictiveController jitter_controller(jitter_journal);
+        ControlConfig jitter_cfg;jitter_cfg.deadzone={5,5};
+        jitter_controller.configure(jitter_cfg);
+        const Vec reference{100,100};Time now=1'000'000'000;
+        double worst_pixels=0,worst_speed=0,tail_pixels=0,tail_speed=0;int worst_at=-1;
+        for(int i=0;i<400;++i)
+        {
+            const bool flip=(i%2)!=0;
+            const Vec jittered{100+(flip?2.5:-2.5),100+(flip?-2.5:2.5)};
+            jitter_controller.observe({uint64_t(i+1),now,jittered,1.0},now);
+            const auto jitter_out=jitter_controller.advance(now,reference);
+            const auto jitter_v=jitter_controller.velocity();
+            const double pixels=std::hypot(jitter_out.pixels.x,jitter_out.pixels.y);
+            const double speed=std::hypot(jitter_v.x,jitter_v.y);
+            if(jitter_out.due)worst_pixels=std::max(worst_pixels,pixels);
+            if(speed>worst_speed){worst_speed=speed;worst_at=i;}
+            if(i>=200){tail_pixels=std::max(tail_pixels,pixels);tail_speed=std::max(tail_speed,speed);}
+            now+=8'333'333;
+        }
+        std::cout<<"position jitter worst_pixels="<<worst_pixels<<" worst_speed="<<worst_speed
+                 <<"@"<<worst_at<<" tail_pixels="<<tail_pixels<<" tail_speed="<<tail_speed<<'\n';
+        // 有区分度的是稳态: 修复前 tail 恒等于 worst(tail_pixels=12.37/tail_speed=848.5),
+        // 也就是极限环永不收敛 —— 实机上就是"锚点附近一直抖"; 修复后 tail_pixels=0。
+        // 前几帧允许有瞬态(新息的变号估计需要几帧才稳), 所以只对 worst 做防爆炸约束。
+        CHECK(tail_pixels<0.01);
+        CHECK(tail_speed<50);
+        CHECK(worst_speed<1500);
+    }
     std::cout<<"predictive closed loop passed\n";
 }

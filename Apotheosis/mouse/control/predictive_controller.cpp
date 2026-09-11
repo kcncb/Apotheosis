@@ -14,6 +14,9 @@ constexpr double kManeuverInnovationSquared = 9.0;
 constexpr double kPositionJumpInnovationSquared = 100.0;
 constexpr double kManeuverHoldSec = .025;
 constexpr double kVelocityLimit = 3000.0;
+// 连续多少次新息变号才认定"检测框在抖"。真实换向/急停只会变一次号(随后同号),
+// 抖动则连续变号; 取 2 可以把"换向那一帧"留给原逻辑, 避免把真实换向当抖动平滑掉。
+constexpr int kJitterFlipRun = 2;
 constexpr double kAccelerationLimit = 20000.0;
 constexpr double kCovarianceFloor = 1e-9;
 
@@ -151,6 +154,16 @@ void PredictiveController::updateAxis(Axis& a, double z, double moved, double dt
     a.p += a.v * dt + .5 * a.acceleration * dt2 - moved;
     a.v += a.acceleration * dt;
     const double innovation = z - a.p;
+    // 检测框"位置在跳、面积不变"时的抖动特征: 新息逐帧变号。真实换向/急停只会
+    // 变一次号然后持续同号, 所以统计"连续变号次数"就能把两者分开。
+    // 注意[不要]用新息幅度去抬高观测方差: 目标真实的急停/换向同样产生大幅度新息,
+    // 抬高方差会把本该做的位置吸附一起平滑掉 —— 实测那样改会让
+    // continuous_tracking_test 的 reverse 场景 p95 从 4.35px 退化到 14.75px。
+    const double prior_innovation = a.prev_innovation;
+    a.prev_innovation = innovation;
+    if (prior_innovation != 0.0 && innovation * prior_innovation < 0.0) ++a.flip_run;
+    else a.flip_run = 0;
+    const bool jitter_like = a.flip_run >= kJitterFlipRun;
     const double variance = prior[0] + noise;
     // Correct the interval velocity for our own camera motion. A significant
     // model break gets a causal velocity estimate immediately; carrying the old
@@ -173,10 +186,28 @@ void PredictiveController::updateAxis(Axis& a, double z, double moved, double dt
     if (innovation * innovation > kManeuverInnovationSquared * variance)
     {
         a.p = z;
-        a.v = measured_velocity;
+        // 机动分支的速度处理见上面的 jitter_like 判别: 连续变号(检测框在抖)时
+        // 速度归零且不放大速度协方差; 只变一次号时按原逻辑取因果速度估计,
+        // 所以真实换向/急停的行为与改动前一致。
+        if (jitter_like)
+        {
+            // 连续变号 = 检测框在抖。这里既不把单帧位移当成速度, 也不能放大速度
+            // 协方差: 协方差一旦被放大, 随后正常路径的速度增益会变成约 1/dt
+            // (实测 gain[1]≈120), 把 ±2.5px 的抖动直接灌成几百 px/s 的速度, 而且
+            // 每帧重来一次 —— 那正是"锚点附近永不收敛"的极限环来源。
+            // 速度归零后 |v| < sqrt(cov) 仍成立, 所以抖动也不会被外推出去。
+            a.v = 0.0;
+        }
+        else
+        {
+            // 只变一次号: 按原逻辑当成真实换向/急停的因果速度估计。
+            a.v = measured_velocity;
+        }
         a.acceleration = 0;
         a.maneuver_hold_sec = kManeuverHoldSec;
-        const double velocity_variance = std::min(1e8, 2 * noise / dt2);
+        const double velocity_variance = jitter_like
+            ? std::min(1e8, noise)
+            : std::min(1e8, 2 * noise / dt2);
         a.covariance = {noise,0,0, 0,velocity_variance,0, 0,0,1e8};
         return;
     }

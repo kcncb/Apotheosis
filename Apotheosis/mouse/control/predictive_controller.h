@@ -96,6 +96,11 @@ private:
         double last_observation = 0, maneuver_hold_sec = 0;
         // Position / velocity / acceleration covariance at the capture time.
         std::array<double, 9> covariance{1,0,0, 0,1e5,0, 0,0,1e8};
+        // 抖动判别(见 updateAxis): prev_innovation 记上一帧新息, flip_run 记
+        // "新息连续变号"的次数。检测框位置抖动会连续变号, 真实换向只变一次。
+        // reset() 会随 axes_ 一起清零。
+        double prev_innovation = 0.0;
+        int flip_run = 0;
     };
     void updateAxis(Axis& a, double observed, double movement, double dt, double noise, double learning);
     std::shared_ptr<CommandJournal> journal_;
