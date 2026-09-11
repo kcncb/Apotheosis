@@ -583,7 +583,18 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     // tau 约 2 帧: 既压掉逐帧毛刺, 又保留追踪运动趋势的阻尼作用。
     // 高延迟时把 kd 也收到安全档(见 derivative_gain_cap)
     const double kd_cap = derivative_gain_cap(delay, dt);
-    constexpr double kDerivativeTauSec = 0.020;
+    // 实测(aim_scenario_sim, 其余参数走各自定档):
+    //     tau     2帧     3帧     6帧    静止抖动  丢帧抖动
+    //     0.020  10.34   12.85   25.66    0.00     0.68   <- 原值
+    //     0.010   9.41   11.76   25.21    0.00     0.61
+    //     0.005   9.18   11.32   24.88    0.00     0.56   <- 最优
+    //     0.002   9.06   11.27   26.23    0.00     0.72
+    //     0.0005  9.06   11.31   26.16    0.00     0.94
+    // 短到 0.005(约 0.6 帧)最好: 既压掉逐帧毛刺, 又保留足够的阻尼作用。
+    // 更短(0.002 以下)在长延迟档反而变差、丢帧抖动也上升。原值 0.020(约 2 帧)
+    // 当初是为了压高 kd 下的微分尖峰, 但现在 kd 已被延迟定档限在 0.05 以内,
+    // 那个顾虑不再成立。静止场景在全部取值下抖动均为 0.00(不抖)。
+    constexpr double kDerivativeTauSec = 0.005;
     const double d_alpha = 1.0 - std::exp(-dt / kDerivativeTauSec);
     const double d_raw_x =
         (s.corrected_error_x - s.previous_error_x)
