@@ -577,20 +577,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.fov_radius_y = fov_ry;
         in.image_size   = static_cast<double>(config_resolution);
 
-        // 提前量: 直接取延迟探针【实测】的 total(T3-T0)。
-        //
-        // total 的定义就是"像素进入本进程 -> 控制环消费到它"这段自有滞后, 也正是
-        // 前馈需要提前补掉的那一段 —— 原设计里补这一段的是被关闭的 QX 弹道预测级。
-        //
-        // 刻意不写死常数: 采集帧率 / 分辨率 / 模型 / 数据集一变, total 自己就跟着变,
-        // 提前量随之自动跟上, 不需要谁再去手工标定一次。取 ema 而不是 last, 是为了
-        // 不被单帧尖峰带着走。
-        //
-        // 探针尚未出数据时 ema 为 0 -> 提前量关闭 -> 行为与原生实现逐位一致,
-        // 所以这一项随时可以 A/B。
-        in.lead_time_sec =
-            runtime::latency::snapshot().stages[runtime::latency::kTotal].ema_ms * 0.001;
-
         in.pidf_params.kp_x = profile_ptr->pidf_kp_x; in.pidf_params.kp_y = profile_ptr->pidf_kp_y;
         in.pidf_params.ki_x = profile_ptr->pidf_ki_x; in.pidf_params.ki_y = profile_ptr->pidf_ki_y;
         in.pidf_params.kd_x = profile_ptr->pidf_kd_x; in.pidf_params.kd_y = profile_ptr->pidf_kd_y;

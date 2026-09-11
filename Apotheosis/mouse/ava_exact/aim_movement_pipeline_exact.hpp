@@ -65,11 +65,6 @@ struct AimMovementFrameInput {
     TargetRegionBoxSelection target_region_boxes{};
     bool external_y_block{};
     AimMovementTargetFrame target{};
-
-    // 非原生: 端到端提前时间(秒)。由 latency_probe 实测的 total(T3-T0) 每帧提供,
-    // 用于让前馈补偿"像素进入本进程到控制环消费到它"这段自有滞后 —— 原设计里
-    // 补这一段的是被关闭的 QX 那一级。0 = 关闭提前量, 与原生行为一致。
-    double lead_time_sec{};
 };
 
 enum class AimMovementStopReason : std::uint8_t {
@@ -146,7 +141,6 @@ public:
 private:
     void reset_selected_pidf(double now_seconds) noexcept;
     PidfNativeOutput update_selected_pidf(const PidfInputExact& input,
-                                          const PidfContextInput& context,
                                           double now_seconds) noexcept;
 
     AimMovementPipelineConfig config_{};

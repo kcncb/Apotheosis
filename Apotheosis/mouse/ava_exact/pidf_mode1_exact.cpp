@@ -130,29 +130,14 @@ void apply_high_kf_correction(PidfMode1State& s,
     s.correction_output_y = s.correction_accum_y;
 }
 
-// 前馈位移 = 估计速度 × 前视时间。
-//
-// 原生算式是 `速度 × dt × kf_low`: 即只把误差预测【一帧】那么远, 恰好抵消
-// 目标在一帧内的移动。但整条链路还有一段自己的滞后(采集卡内部 + 解码 + 推理
-// + 发布 + 控制环唤醒, 即探针的 total = T3-T0), 那一段没人补 —— 原设计里补它的
-// 是被单独一级 QX 弹道预测, 而当前集成把 QX 关掉了。
-//
-// 所以这里把前视时间从 dt 扩成 (dt + lead_time_sec): 得到的位移正好是
-// "目标在 dt 内会走多远" + "目标在这条链路的滞后里会走多远", 后者就是补偿。
-// lead_time_sec 由 latency_probe 每帧实测给出, 不是常数。
-//
-// lead_time_sec = 0 时 (dt + 0) == dt, 与原生实现逐位一致 —— 便于 A/B 对照。
-void update_low_kf_feedforward(PidfMode1State& s,
-                               double dt,
-                               double lead_time_sec) noexcept {
-    const double lookahead = dt + lead_time_sec;
+void update_low_kf_feedforward(PidfMode1State& s, double dt) noexcept {
     s.predicted_minus_move_x =
         s.ff_state_x * dt + s.ff_previous_error_x - s.previous_move_x;
     s.ff_error_x = s.corrected_error_x - s.predicted_minus_move_x;
     s.ff_derivative_x = s.ff_error_x / dt * s.dynamic_lr_x;
     s.ff_state_x += s.ff_derivative_x;
     s.ff_previous_error_x = s.corrected_error_x;
-    s.ff_output_x = s.ff_state_x * lookahead * s.kf_low_x;
+    s.ff_output_x = s.ff_state_x * dt * s.kf_low_x;
 
     s.predicted_minus_move_y =
         s.ff_state_y * dt + s.ff_previous_error_y - s.previous_move_y;
@@ -160,7 +145,7 @@ void update_low_kf_feedforward(PidfMode1State& s,
     s.ff_derivative_y = s.ff_error_y / dt * s.dynamic_lr_y;
     s.ff_state_y += s.ff_derivative_y;
     s.ff_previous_error_y = s.corrected_error_y;
-    s.ff_output_y = s.ff_state_y * lookahead * s.kf_low_y;
+    s.ff_output_y = s.ff_state_y * dt * s.kf_low_y;
 }
 
 std::int32_t quantize(double step,
@@ -266,20 +251,9 @@ PidfMode1State construct_pidf_mode1(const PidfMode1Config& config,
 
 PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
                                    const PidfInputExact& input,
-                                   const PidfContextInput& context,
                                    double now_seconds) noexcept {
     PidfNativeOutput out{};
     const double dt = now_seconds - s.previous_timestamp;
-
-    // 提前时间: 取实测值, 但夹一个上限。
-    //
-    // 上限是安全阀而不是标定值: 探针在启动初期、采集抖动、或统计被污染时可能
-    // 给出离谱的数, 而前视时间是直接乘在位移上的 —— 不夹住的话一次异常读数就
-    // 会把准星甩到目标前面很远。0.2s 远大于任何合理链路延迟。
-    constexpr double kMaxLeadTimeSec = 0.20;
-    const double lead_time_sec =
-        std::clamp(context.lead_time_sec, 0.0, kMaxLeadTimeSec);
-
     if (!input.valid) {
         reset_pidf_mode1(s, now_seconds);
         return out;
@@ -387,7 +361,7 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         s.integral_y * s.ki_y + s.corrected_error_y * s.kp_y;
     s.raw_pid_y = s.scratch_y + proportional_integral_y;
 
-    update_low_kf_feedforward(s, dt, lead_time_sec);
+    update_low_kf_feedforward(s, dt);
     // frame_divisor 目前没有任何调用方设置(见 pid_input_pipeline.cpp), 所以
     // frame_scale 恒为 1; 保留是为了不改动原生算式结构。
     const double frame_scale = 1.0 / std::max(

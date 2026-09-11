@@ -110,7 +110,6 @@ PidfMode1State construct_pidf_mode1(const PidfMode1Config& config,
 void reset_pidf_mode1(PidfMode1State& state, double now_seconds) noexcept;
 PidfNativeOutput update_pidf_mode1(PidfMode1State& state,
                                    const PidfInputExact& input,
-                                   const PidfContextInput& context,
                                    double now_seconds) noexcept;
 
 } // namespace cvm::recovered
