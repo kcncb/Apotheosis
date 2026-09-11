@@ -43,20 +43,31 @@ void compute_opposition_flags(PidfMode1State& s,
     s.damp_y = s.integral_opposes_error_y || s.ff_opposes_error_y;
 }
 
+// 每轴各用自己的尺度。
+//
+// 原实现在入口把输入里的两个半径塌成了 min(radius_x, radius_y), 于是两个轴共用
+// 同一个尺度 —— 对人形框(例如 30 宽 × 80 高)就是【纵向的尺度被横向上限决定】:
+// min 取到 30, 开锁定强度时自适应半径 = 15px, 也就是说纵向只要偏 15px 增益就塌掉,
+// 而那个框有 80 高、人还在身上。
+// 后果: 纵向的增益/前馈权限远弱于横向 → 上下移动的目标(起跳、蹲起)咬不住。
+//
+// 输入本来就把两个半径分开带了(PidfInputExact 的 radius_x/radius_y 来自框宽/框高),
+// 这里只是不再把它们合并 —— 与这套控制器"X/Y 各自独立增益"的既有设计保持一致。
 void choose_adaptive_radius(PidfMode1State& s,
-                            double radius,
+                            double radius_x,
+                            double radius_y,
                             bool consider_high_kf) noexcept {
-    s.adaptive_radius_x = radius * 1.5 + 0.000001;
+    s.adaptive_radius_x = radius_x * 1.5 + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_x)
-        s.adaptive_radius_x = radius * 0.5 + 0.000001;
+        s.adaptive_radius_x = radius_x * 0.5 + 0.000001;
     if (s.damp_x)
-        s.adaptive_radius_x = radius * 0.25 + 0.000001;
+        s.adaptive_radius_x = radius_x * 0.25 + 0.000001;
 
-    s.adaptive_radius_y = radius * 1.5 + 0.000001;
+    s.adaptive_radius_y = radius_y * 1.5 + 0.000001;
     if (consider_high_kf && s.high_kf_enabled_y)
-        s.adaptive_radius_y = radius * 0.5 + 0.000001;
+        s.adaptive_radius_y = radius_y * 0.5 + 0.000001;
     if (s.damp_y)
-        s.adaptive_radius_y = radius * 0.25 + 0.000001;
+        s.adaptive_radius_y = radius_y * 0.25 + 0.000001;
 }
 
 void compute_gaussian_weights(PidfMode1State& s) noexcept {
@@ -85,8 +96,10 @@ double lr_weight(double gaussian_weight) noexcept {
 
 void apply_high_kf_correction(PidfMode1State& s,
                               double dt,
-                              double radius,
-                              double smoothing_radius) noexcept {
+                              double radius_x,
+                              double radius_y,
+                              double smoothing_radius_x,
+                              double smoothing_radius_y) noexcept {
     if (s.kf_high_x == 0.0 && s.kf_high_y == 0.0) {
         s.correction_output_x = s.correction_output_y = 0.0;
         s.correction_accum_x = s.correction_accum_y = 0.0;
@@ -97,8 +110,8 @@ void apply_high_kf_correction(PidfMode1State& s,
     s.ff_output_y = s.ff_state_y * dt;
 
     s.correction_ratio_x =
-        std::tanh(std::fabs(s.ff_output_x) / smoothing_radius);
-    s.correction_target_x = signum(s.ff_state_x) * radius;
+        std::tanh(std::fabs(s.ff_output_x) / smoothing_radius_x);
+    s.correction_target_x = signum(s.ff_state_x) * radius_x;
     s.correction_delta_x =
         (((s.correction_target_x - s.ff_output_x) * s.correction_ratio_x
           + s.ff_output_x) * s.kf_high_x - s.correction_accum_x)
@@ -107,8 +120,8 @@ void apply_high_kf_correction(PidfMode1State& s,
     s.correction_output_x = s.correction_accum_x;
 
     s.correction_ratio_y =
-        std::tanh(std::fabs(s.ff_output_y) / smoothing_radius);
-    s.correction_target_y = signum(s.ff_state_y) * radius;
+        std::tanh(std::fabs(s.ff_output_y) / smoothing_radius_y);
+    s.correction_target_y = signum(s.ff_state_y) * radius_y;
     s.correction_delta_y =
         (((s.correction_target_y - s.ff_output_y) * s.correction_ratio_y
           + s.ff_output_y) * s.kf_high_y - s.correction_accum_y)
@@ -246,7 +259,11 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         return out;
     }
 
-    const double radius = std::min(input.radius_x, input.radius_y);
+    // 每轴各用自己的尺度, 不再塌成 min(radius_x, radius_y)。
+    // 输入给的是框宽/框高; 退化框(宽或高为 0)时兜到 1px, 避免自适应半径变成 ~0
+    // 从而把高斯权重直接压成 0(原实现在这种情况下会静默失去前馈)。
+    const double radius_x = std::max(1.0, input.radius_x);
+    const double radius_y = std::max(1.0, input.radius_y);
     s.corrected_error_x = input.target_x - input.current_x;
     s.corrected_error_y = input.target_y - input.current_y;
     out.original_error_x = s.corrected_error_x;
@@ -269,13 +286,14 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.absolute_error_y = std::fabs(s.corrected_error_y);
     s.high_kf_enabled_x = s.kf_high_x > 0.0;
     s.high_kf_enabled_y = s.kf_high_y > 0.0;
-    choose_adaptive_radius(s, radius, true);
+    choose_adaptive_radius(s, radius_x, radius_y, true);
     compute_gaussian_weights(s);
     s.dynamic_lr_x = lr_weight(s.gaussian_weight_x) * s.base_lr_x;
     s.dynamic_lr_y = lr_weight(s.gaussian_weight_y) * s.base_lr_y;
 
     apply_high_kf_correction(
-        s, dt, radius, radius * 0.05 + 0.000001);
+        s, dt, radius_x, radius_y,
+        radius_x * 0.05 + 0.000001, radius_y * 0.05 + 0.000001);
     if (s.kf_high_x == 0.0 && s.kf_high_y == 0.0) {
         s.corrected_error_x += s.correction_output_x;
         s.corrected_error_y += s.correction_output_y;
@@ -286,7 +304,7 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
         s.absolute_error_y = std::fabs(s.corrected_error_y);
         compute_opposition_flags(
             s, s.corrected_error_x, s.corrected_error_y, dt);
-        choose_adaptive_radius(s, radius, true);
+        choose_adaptive_radius(s, radius_x, radius_y, true);
         compute_gaussian_weights(s);
         s.corrected_error_x +=
             s.gaussian_weight_x * s.correction_output_x;
@@ -300,7 +318,7 @@ PidfNativeOutput update_pidf_mode1(PidfMode1State& s,
     s.absolute_error_y = std::fabs(s.corrected_error_y);
     compute_opposition_flags(
         s, s.corrected_error_x, s.corrected_error_y, dt);
-    choose_adaptive_radius(s, radius, false);
+    choose_adaptive_radius(s, radius_x, radius_y, false);
     compute_gaussian_weights(s);
     s.integral_weight_x =
         std::max(s.integral_weight_x, s.gaussian_weight_x);
