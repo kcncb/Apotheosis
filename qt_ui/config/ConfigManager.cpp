@@ -499,7 +499,6 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "keys", data.keys.join(","));
     m_settings->setValue(prefix + "fovX", data.fovX);
     m_settings->setValue(prefix + "fovY", data.fovY);
-    m_settings->setValue(prefix + "lost_target_cache_frames", data.lostTargetCacheFrames);
     m_settings->setValue(prefix + "trigger_enabled",     data.triggerEnabled);
     m_settings->setValue(prefix + "trigger_fire_delay",  data.triggerFireDelay);
     m_settings->setValue(prefix + "trigger_fire_duration", data.triggerFireDuration);
@@ -530,7 +529,6 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.keys = m_settings->value(prefix + "keys", "RightMouseButton").toString().split(",", Qt::SkipEmptyParts);
     data.fovX = m_settings->value(prefix + "fovX", 106).toInt();
     data.fovY = m_settings->value(prefix + "fovY", 74).toInt();
-    data.lostTargetCacheFrames = m_settings->value(prefix + "lost_target_cache_frames", 5).toInt();
     data.triggerEnabled      = m_settings->value(prefix + "trigger_enabled", false).toBool();
     data.triggerFireDelay    = m_settings->value(prefix + "trigger_fire_delay", 0).toInt();
     data.triggerFireDuration = m_settings->value(prefix + "trigger_fire_duration", 0).toInt();

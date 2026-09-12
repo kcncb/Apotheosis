@@ -56,10 +56,10 @@ ctest --test-dir build/logic-tests -C Release --output-on-failure
 Windows 主构建也可构建并运行这些测试：
 
 ```powershell
-cmake --build build/cuda --config Release --target latency_probe_test capture_card_caps_test device_frame_age_test interruptible_slot_test gpu_ready_event_test raw_frame_layout_test latest_move_slot_test predictive_controller_test aim_engine_test continuous_tracking_test
+cmake --build build/cuda --config Release --target latency_probe_test capture_card_caps_test device_frame_age_test interruptible_slot_test gpu_ready_event_test raw_frame_layout_test latest_move_slot_test
 ctest --test-dir build/cuda -C Release --output-on-failure
 ```
 
-控制链回归 `ava_chain_test` 使用实际 OpenCV。便携入口 `aim_engine_test` 使用几何类型替身并调用相同生产控制代码。`aim_scenario_sim` 是旧 PIDF 的参考实验，不代表当前主程序的算法。三者不随 `ai` 目标构建。
+控制链的回归入口(`ava_chain_test` / `aim_engine_test` / `predictive_controller_test` / `continuous_tracking_test` 以及 `aim_scenario_sim`, 还有 `tests/reference` 里的冻结副本)已随旧 PID 一起删除。新 PID 写好后应在这里补回对应目标 —— 至少覆盖: 静止目标的收敛与稳态误差、匀速/横移目标的滞后量、换目标身份时的历史重置、输出限幅与整数取整的分数余量。
 
 逻辑测试不能验证 MF 驱动、实际 CUDA kernel、HID 硬件或完整 UI。Windows 实机还需验证：TRT/DML 启停、启动中关闭窗口、断开采集卡后停止/重连、运行中更换采集格式及输入设备、中文模型路径、延迟分段和设备帧龄失效显示。

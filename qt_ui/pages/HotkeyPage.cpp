@@ -322,7 +322,7 @@ void HotkeyPage::buildTriggerCard()
         u8"连点模式的冷却间隔。\n"
         u8"长按模式下用作准星离开命中区后的最短重按间隔 —— 防止在判定\n"
         u8"边缘反复按松形成连点。"));
-    m_triggerYPercent       = makeSpin(10,    300, QStringLiteral(" %"));
+    m_triggerYPercent       = makeSpin(10,   1000, QStringLiteral(" %"));
     m_triggerDelayJitter    = makeSpin(0,     100, QStringLiteral(" ms"));
     m_triggerDurationJitter = makeSpin(0,     100, QStringLiteral(" ms"));
     m_triggerIntervalJitter = makeSpin(0,     100, QStringLiteral(" ms"));
@@ -396,17 +396,8 @@ void HotkeyPage::buildAimClassCard()
     hint->setProperty("class", "hint");
     cl->addWidget(hint);
 
-    m_lostTargetCacheFrames = new QSpinBox;
-    m_lostTargetCacheFrames->setRange(0, 240);
-    m_lostTargetCacheFrames->setValue(5);
-    m_lostTargetCacheFrames->setSuffix(QString::fromUtf8(u8" 帧"));
-    m_lostTargetCacheFrames->setMinimumHeight(30);
-    m_lostTargetCacheFrames->setToolTip(QString::fromUtf8(
-        u8"检测暂时丢失时保留同一目标的帧数；0 = 当帧释放。"));
-    cl->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"丢失目标缓存"), m_lostTargetCacheFrames));
-    connect(m_lostTargetCacheFrames, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &HotkeyPage::saveUiToCurrentProfile);
+    // 「丢失目标缓存」已按需求删除(2026-09-12): 检测丢了就立刻释放, 不留缓存。
+    // 运行时固定用 0(见 mouse_thread_loop.cpp), 不再有界面项与配置项。
 
     // 优先级列表: 普通 QVBoxLayout 承载自定义行卡片。不再用 QListWidget +
     // setItemWidget + InternalMove —— 那套会压扁行 / 横向溢出 / 拖拽后留空行。
@@ -811,53 +802,99 @@ void HotkeyPage::buildBossAimCard()
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
 
-    const double defaults[10] = {2, 2, 0, 0, .05, .05, 1, 1, .08, .08};
+    // 槽位语义(新控制器 mouse/aim_pid.h):
+    //   [0][1] 瞄准速度 Kp   [2][3] 积分强度 Ki   [4][5] 过冲控制 Kd
+    //   [6][7] 提前量(秒)    [8][9] 延迟预测(秒)
+    const double defaults[10] = {20, 20, 1, 1, .01, .01, 0, 0, .05, .05};
     for (int i = 0; i < 10; ++i)
     {
-        const int decimals = (i == 0 || i == 1 || i == 6 || i == 7) ? 2 : 3;
-        const double maximum = i < 2 ? 8.0 : i < 4 ? 0.0 : i < 6 ? .25 : i < 8 ? 2.0 : .32;
+        const int decimals = (i == 0 || i == 1) ? 1 : (i < 4) ? 2 : 3;
+        // Kp 计数/(像素*秒); Ki 1/秒; Kd 秒; 提前量 / 延迟预测 秒。
+        const double maximum = (i < 2) ? 400.0 : (i < 4) ? 60.0 : (i < 6) ? 0.3 : 0.6;
         m_pidfGain[i] = makeDouble(0.0, maximum, defaults[i], 0.001, decimals);
     }
     for (int i = 0; i < 4; ++i)
         m_pidfInteger[i] = makeInt(0, 1000, 0);
 
-    const QString lockTip = QString::fromUtf8(
-        u8"Kf：目标状态估计器的速度前馈强度。实际位移反馈用于区分目标运动与自身视角运动。");
-    const QString predictionTip = QString::fromUtf8(
-        u8"LR：目标速度观测器的响应程度。只在新图像观测到达时学习；不重复使用旧检测。");
     const QString aimSpeedTip = QString::fromUtf8(
-        u8"Kp：位置误差修正强度。控制器按接近、收敛、跟随阶段连续控制，并扣除在途指令；不再按固定每帧百分比解释。");
+        u8"Kp：回路速度，单位 计数/(像素*秒)。唯一与游戏灵敏度挂钩的旋钮 —— 换档次/换游戏"
+        u8"时它需要的值差好几倍。手感拖沓就往上加(每次 +50%)，开始抖或绕着目标画圈就退回来。\n"
+        u8"★ 物理上限：链路死区实测 ≈46ms。没有在途补偿时，临界值只有 Kp≈50 —— 超过必定"
+        u8"以 ~5Hz、±150px 的幅度来回摆(实机日志里的\"抽搐\"就是这个)。程序现在带在途自身位移"
+        u8"补偿，100 也能稳；真觉得抖就先降到 80/60 试。");
+    const QString integralTip = QString::fromUtf8(
+        u8"Ki：积分速率，单位 1/秒，Ti = 1/Ki。负责磨掉匀速移动目标的滞后和残余偏置"
+        u8"(“落不到位”就是缺这一项)。调太大会在目标附近来回摆，建议 0.5~4。");
     const QString overshootTip = QString::fromUtf8(
-        u8"Kd：提高输出偏离预测运动趋势的代价，让纠偏更平稳；不直接对检测框跳动求导。");
+        u8"Kd：微分时间，单位 秒，压过冲用。检测框每动一个鼠标计数就是一个台阶，微分会把它"
+        u8"看成几十像素/秒的尖峰，所以这个值要小(默认 0.01)，调大反而更容易抖。");
+    const QString leadTip = QString::fromUtf8(
+        u8"提前量：主动瞄准目标的未来位置，单位 秒，0 = 关闭(默认)。稳态下就是 v*提前量 的"
+        u8"提前偏移，用来打移动靶或按弹道飞行时间提前。\n"
+        u8"2026-09-12 起：只有目标【真的在动】时才生效 —— |目标速度| 低于 60px/s 时整项为 0，"
+        u8"110px/s 以上才满额(日志 fsx/fsy 就是这个 0~1 的门)。因为静止目标的“速度”全是检测框"
+        u8"抖出来的噪声(实测 p99 46px/s)，乘上这个秒数会变成一两像素的假误差，高增益下就是"
+        u8"瞄点上嗡嗡抖。");
+    const QString predictTip = QString::fromUtf8(
+        u8"延迟预测：链路延迟补偿，单位 秒。补的是这段时间里【目标走掉的距离】"
+        u8"(自身位移的扣除由程序内的在途补偿按实测死区做了，不用在这里再补)。\n"
+        u8"★ 推荐值就是实测链路死区 ≈ 0.046 秒(采集+推理+HID+游戏+显示)。填得比它大 = "
+        u8"额外的提前量(打静止/慢速目标时等于把瞄点顶偏)，填小 = 跟移动靶时多落后一点。"
+        u8"和「提前量」共用同一个速度噪声门。");
     m_pidfGain[0]->setToolTip(aimSpeedTip);
     m_pidfGain[1]->setToolTip(aimSpeedTip);
+    m_pidfGain[2]->setToolTip(integralTip);
+    m_pidfGain[3]->setToolTip(integralTip);
     m_pidfGain[4]->setToolTip(overshootTip);
     m_pidfGain[5]->setToolTip(overshootTip);
-    m_pidfGain[6]->setToolTip(lockTip);
-    m_pidfGain[7]->setToolTip(lockTip);
-    m_pidfGain[8]->setToolTip(predictionTip);
-    m_pidfGain[9]->setToolTip(predictionTip);
+    m_pidfGain[6]->setToolTip(leadTip);
+    m_pidfGain[7]->setToolTip(leadTip);
+    m_pidfGain[8]->setToolTip(predictTip);
+    m_pidfGain[9]->setToolTip(predictTip);
 
     // 移动限幅: 实测它对追踪能力的影响比任何参数都直接 —— 因为它是硬约束,
     // 限幅不够时目标速度超过"限幅 x 帧率"就根本追不上。
     const QString limitTip = QString::fromUtf8(
-        u8"每个控制输出周期最多下发的鼠标计数，0 表示不额外限幅。\n"
-        u8"限制作用于曲线整形和像素换算之后；被截掉的位移不会积累成待补发欠账。");
+        u8"每个控制输出周期最多下发的鼠标计数，0 表示用内置上限(200)。\n"
+        u8"限制作用于曲线整形之后；被截掉的位移不会积累成待补发欠账。");
     m_pidfInteger[2]->setToolTip(limitTip);
     m_pidfInteger[3]->setToolTip(limitTip);
 
-    // AVA 的 Ki 不在界面中出现，并在配置加载时固定为 0。
-    m_pidfGain[2]->setParent(card);
-    m_pidfGain[3]->setParent(card);
-    m_pidfGain[2]->hide();
-    m_pidfGain[3]->hide();
+    const QString deadzoneTip = QString::fromUtf8(
+        u8"误差死区，单位 像素，0 = 关闭(默认)。控制器全程用浮点像素计算、只在下发时取整，"
+        u8"差 0.4 像素也会攒到下一拍发出去，所以不需要靠死区防抖；死区等于主动丢精度。");
+    m_pidfInteger[0]->setToolTip(deadzoneTip);
+    m_pidfInteger[1]->setToolTip(deadzoneTip);
 
-    const std::array<std::pair<const char*, QWidget*>, 12> fields = {{
+    // 「每计数像素」: 手填就用, 0 = 自动估算。
+    // 加这一项的原因: 自动估算只认"干净窗口"(我们自己猛动、画面跟着猛变), 换目标抽搐
+    // 那种乱画面会被判无效, 于是估不出来 -> 提前量/延迟预测整条被关掉 -> 手感突然换成
+    // "没有预判"的另一套。手填一个值就不会再出现这种"参数没变手感却变了"。
+    for (int i = 0; i < 2; ++i)
+        m_pxPerCount[i] = makeDouble(0.0, 20.0, 0.0, 0.001, 3);
+    const QString pxPerCountTip = QString::fromUtf8(
+        u8"每计数像素 = 鼠标动一格，画面动多少像素。这是游戏属性(灵敏度/开镜倍率)。\n"
+        u8"• 0 = 自动估算(默认)：程序在自己甩枪时顺手量，但画面一乱(比如换目标抽搐)就量不出来，"
+        u8"此时「提前量 / 延迟预测」会整条关闭 —— 手感会悄悄换成「没有预判」的另一套。\n"
+        u8"• >0 = 用你填的值：立刻生效，不受画面乱影响。日志里的 k_x/k_y 就是程序自动量到的值，"
+        u8"可以直接抄过来（这套设置实测约 0.59）。\n"
+        u8"换灵敏度/换开镜倍率要重设。");
+    m_pxPerCount[0]->setToolTip(pxPerCountTip);
+    m_pxPerCount[1]->setToolTip(pxPerCountTip);
+
+    // 瞄点滤波(anchor_filter_ms) 已于 2026-09-12 移除: 位置不再平滑, 控制器吃原始瞄点
+    // (甩到瞄点永远是一拍); "框在抖"改由观测器的【速度低通 + 速度前馈噪声门】解决 ——
+    // 速度只喂前馈, 不进位置回路, 所以估错了也不会让准星抽。
+
+    const std::array<std::pair<const char*, QWidget*>, 16> fields = {{
         {u8"瞄准速度 X", m_pidfGain[0]}, {u8"瞄准速度 Y", m_pidfGain[1]},
+        {u8"积分强度 X", m_pidfGain[2]}, {u8"积分强度 Y", m_pidfGain[3]},
         {u8"过冲控制 X", m_pidfGain[4]}, {u8"过冲控制 Y", m_pidfGain[5]},
-        {u8"锁定强度 X", m_pidfGain[6]}, {u8"锁定强度 Y", m_pidfGain[7]},
-        {u8"预测速度 X", m_pidfGain[8]}, {u8"预测速度 Y", m_pidfGain[9]},
-        {u8"移动死区 X", m_pidfInteger[0]}, {u8"移动死区 Y", m_pidfInteger[1]},
+        {u8"提前量 X", m_pidfGain[6]}, {u8"提前量 Y", m_pidfGain[7]},
+        {u8"延迟预测 X", m_pidfGain[8]}, {u8"延迟预测 Y", m_pidfGain[9]},
+        {u8"每计数像素 X", m_pxPerCount[0]}, {u8"每计数像素 Y", m_pxPerCount[1]},
+        {u8"移动死区 X", m_pidfInteger[0]},
+        {u8"移动死区 Y", m_pidfInteger[1]},
         {u8"移动限幅 X", m_pidfInteger[2]}, {u8"移动限幅 Y", m_pidfInteger[3]}
     }};
     for (int i = 0; i < static_cast<int>(fields.size()); ++i)
@@ -866,6 +903,9 @@ void HotkeyPage::buildBossAimCard()
     layout->addLayout(grid);
 
     for (auto* spin : m_pidfGain)
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &HotkeyPage::saveUiToCurrentProfile);
+    for (auto* spin : m_pxPerCount)
         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
     for (auto* spin : m_pidfInteger)
@@ -1033,14 +1073,14 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
 
     m_crosshairDetect->setChecked(hp.crosshair_detect_enabled);
 
-    const float pg[10] = {hp.pidf_kp_x,hp.pidf_kp_y,0.0f,0.0f,hp.pidf_kd_x,
+    const float pg[10] = {hp.pidf_kp_x,hp.pidf_kp_y,hp.pidf_ki_x,hp.pidf_ki_y,hp.pidf_kd_x,
                           hp.pidf_kd_y,hp.pidf_kf_x,hp.pidf_kf_y,hp.pidf_lr_x,hp.pidf_lr_y};
     for (int i=0;i<10;++i) m_pidfGain[i]->setValue(pg[i]);
+    m_pxPerCount[0]->setValue(hp.aim_px_per_count_x);
+    m_pxPerCount[1]->setValue(hp.aim_px_per_count_y);
     const int pi[4] = {hp.pidf_deadzone_x,hp.pidf_deadzone_y,
                        hp.pidf_limit_x,hp.pidf_limit_y};
     for (int i=0;i<4;++i) m_pidfInteger[i]->setValue(pi[i]);
-
-    m_lostTargetCacheFrames->setValue(hp.lost_target_cache_frames);
 
     // ── Trigger ──
     m_triggerEnabled->setChecked(hp.trigger_enabled);
@@ -1091,14 +1131,14 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.dynamic_fov_strength = static_cast<float>(m_dynamicFovMargin->value());
     hp.crosshair_detect_enabled  = m_crosshairDetect->isChecked();
     hp.pidf_kp_x=m_pidfGain[0]->value(); hp.pidf_kp_y=m_pidfGain[1]->value();
-    hp.pidf_ki_x=0.0f; hp.pidf_ki_y=0.0f;
+    hp.pidf_ki_x=m_pidfGain[2]->value(); hp.pidf_ki_y=m_pidfGain[3]->value();
     hp.pidf_kd_x=m_pidfGain[4]->value(); hp.pidf_kd_y=m_pidfGain[5]->value();
     hp.pidf_kf_x=m_pidfGain[6]->value(); hp.pidf_kf_y=m_pidfGain[7]->value();
     hp.pidf_lr_x=m_pidfGain[8]->value(); hp.pidf_lr_y=m_pidfGain[9]->value();
+    hp.aim_px_per_count_x = static_cast<float>(m_pxPerCount[0]->value());
+    hp.aim_px_per_count_y = static_cast<float>(m_pxPerCount[1]->value());
     hp.pidf_deadzone_x=m_pidfInteger[0]->value(); hp.pidf_deadzone_y=m_pidfInteger[1]->value();
     hp.pidf_limit_x=m_pidfInteger[2]->value(); hp.pidf_limit_y=m_pidfInteger[3]->value();
-
-    hp.lost_target_cache_frames = m_lostTargetCacheFrames->value();
 
     // ── Trigger ──
     hp.trigger_enabled       = m_triggerEnabled->isChecked();

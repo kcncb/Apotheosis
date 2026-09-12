@@ -68,18 +68,19 @@
 namespace runtime::chainlog {
 
 // ── 配置 ────────────────────────────────────────────────────────────────────
+// 段号只保留【确实会写入】的那几个。编号刻意留出不连续的空洞(0/2/3),
+// 这样段号与历史日志仍可对应, 不必因为删除而整体重排。
 enum Section : int
 {
-    SecCapture = 0,     // 采集: 帧号/时间戳/分辨率/后端/FPS
-    SecDetect,          // 推理: 模型/耗时/检测数/框明细
-    SecSelect,          // 选择与跟踪: 候选/命中槽位/代数/跟踪器状态
-    SecAimpoint,        // 瞄点: 框 -> 锚点(比例/模式)
-    SecCrosshair,       // 找色: 枢轴/命中/平滑状态
-    SecControl,         // 控制器: 误差/PIDF 内部/生效增益/输出
-    SecExec,            // 下发: 限幅/曲线整形/队列/实际发送
-    SecTrigger,         // 自动扳机: 状态机/命中区判定/按下松开
-    SecLatency,         // 延迟探针: 各阶段耗时
-    SecCount
+    SecDetect = 1,      // 推理: 检测数/间隔
+    SecPid = 2,         // 控制器内部: dt/k̂/v̂/前馈/误差/各分项(排查抽动用)
+    SecSelect = 3,      // 选择: 每个候选检测的框/类别/置信度 + 本帧选中了哪个
+    SecCrosshair = 4,   // 找色: 枢轴/命中/视野/分辨率
+    SecControl = 5,     // 控制: 锁定/锚点/误差/引擎输出/整形后位移
+    SecExec = 6,        // 下发: 队列积压/延迟/发送失败
+    SecTrigger = 7,     // 自动扳机: 相位/命中区判定
+    SecLatency = 8,     // 延迟探针: 各阶段耗时
+    SecCount = 9        // 哨兵
 };
 
 // 记录上限(超过则覆盖最旧)。8192 条在 120Hz、10 条/帧下 ≈ 6.8 秒现场。
@@ -110,7 +111,9 @@ inline int& level()
     if (value < 0)
     {
         const char* env = std::getenv("APOTH_CHAINLOG");
-        value = (env != nullptr) ? std::atoi(env) : 2;
+        // 默认 3(逐帧全量 + 候选目标明细): 排查"抽一下/冲过头"这类问题必须能看到
+        // 每个候选检测和控制器内部量, 少一段就得多复现一次。嫌吵可用环境变量降级。
+        value = (env != nullptr) ? std::atoi(env) : 3;
         if (value < 0) value = 0;
         if (value > 3) value = 3;
     }
@@ -157,7 +160,7 @@ inline void end_frame()
 
 // ── 落盘 ────────────────────────────────────────────────────────────────────
 // 与内存环形缓冲并行的第二条通路: 追加写到文件, 崩溃也留得下现场。
-inline constexpr long long kFileLimitBytes = 64ll * 1024 * 1024;   // 单文件上限
+inline constexpr long long kFileLimitBytes = 256ll * 1024 * 1024;   // 单文件上限(调详细后放宽)
 inline constexpr int kFlushEveryRecords = 256;                     // 多少条 flush 一次
 
 struct FileSink
@@ -370,8 +373,7 @@ inline std::int64_t dump(const char* path)
                  static_cast<long long>(s.written - total));
     std::fprintf(file,
                  "# 格式: L,<段>,frame=<帧号>,t=<秒>,key=value,...\n"
-                 "# 段: 0采集 1推理 2选择/跟踪 3瞄点 4找色 5控制 6下发 7扳机 8延迟; "
-                 "event=关键事件\n");
+                 "# 段: 1推理 4找色 5控制 6下发 7扳机 8延迟; event=关键事件\n");
     for (std::int64_t i = first; i < s.sequence; ++i)
     {
         const std::int64_t slot = i % kCapacity;

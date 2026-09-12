@@ -102,40 +102,19 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 set(QT_UI_DIR "${CMAKE_SOURCE_DIR}/qt_ui")
 
-set(AVA_EXACT_SOURCES
-    "${SRC_DIR}/mouse/ava_exact/aim_key_selector.cpp"
-    "${SRC_DIR}/mouse/ava_exact/aim_movement_pipeline_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/controller_orchestration_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/hotkey_eval_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/key_vk_table_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/humanization_math_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/process_humanization_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_region_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selector_top_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/pid_input_pipeline.cpp"
-    "${SRC_DIR}/mouse/ava_exact/qx_curve_config_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/qx_curve_target_reset_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/qx_curve_step_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/pidf_types_exact.hpp"
-    "${SRC_DIR}/mouse/ava_exact/pidf_mode1_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/pidf_axis_policy_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/mouse_output_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/timed_button_exact.cpp"
-)
-
-# Live application: association/anchor logic only. The legacy PIDF pipeline is
-# retained in AVA_EXACT_SOURCES for reference regressions, not a second runtime.
+# 目标关联 + 瞄点(锁谁 / 瞄框内哪个点)。这部分与 PID 无关, 予以保留。
+# 原 AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、
+# aim_movement_pipeline、controller_orchestration、pid_input、qx_curve、
+# process_humanization、humanization_math、热键旁路、mouse_output、timed_button)
+# 已全部删除, 由新写的 PID 取代 —— 接入点在 mouse/boss_aim.cpp 的 tick()。
 set(AVA_TARGET_SOURCES
     "${SRC_DIR}/mouse/ava_exact/target_region_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
     "${SRC_DIR}/mouse/ava_exact/target_selector_top_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp")
+    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp"
+)
 
 set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
@@ -168,8 +147,9 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
+    "${SRC_DIR}/mouse/aim_motion.cpp"
+    "${SRC_DIR}/mouse/aim_pid.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
-    "${SRC_DIR}/mouse/control/predictive_controller.cpp"
     ${AVA_TARGET_SOURCES}
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/MakcuNew.cpp"
@@ -410,31 +390,6 @@ add_custom_command(TARGET ai POST_BUILD
             "${QT_UI_DIR}/assets/tabler-icons.ttf"
             "$<TARGET_FILE_DIR:ai>/assets/tabler-icons.ttf"
     VERBATIM)
-
-add_executable(ava_chain_test EXCLUDE_FROM_ALL
-    "${SRC_DIR}/mouse/tests/ava_chain_regression_test.cpp"
-    "${SRC_DIR}/mouse/boss_aim.cpp"
-    "${SRC_DIR}/mouse/control/predictive_controller.cpp"
-    ${AVA_EXACT_SOURCES})
-target_include_directories(ava_chain_test PRIVATE
-    "${SRC_DIR}/mouse"
-    "${OPENCV_INCLUDE_DIR}")
-target_link_libraries(ava_chain_test PRIVATE "${OPENCV_LIB}" user32)
-target_compile_features(ava_chain_test PRIVATE cxx_std_20)
-if(MSVC)
-    target_compile_options(ava_chain_test PRIVATE /utf-8 /Zc:char8_t-)
-endif()
-
-# 多场景模拟真实环境测试台: 只依赖 ava_exact, 不需要 OpenCV/推理运行时。
-add_executable(aim_scenario_sim EXCLUDE_FROM_ALL
-    "${SRC_DIR}/mouse/tests/aim_scenario_sim.cpp"
-    ${AVA_EXACT_SOURCES})
-target_include_directories(aim_scenario_sim PRIVATE
-    "${SRC_DIR}/mouse")
-target_compile_features(aim_scenario_sim PRIVATE cxx_std_20)
-if(MSVC)
-    target_compile_options(aim_scenario_sim PRIVATE /utf-8 /Zc:char8_t-)
-endif()
 
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")

@@ -128,7 +128,6 @@ public:
         QString group;
         QStringList keys;
         int fovX = 106, fovY = 74;
-        int lostTargetCacheFrames = 5;
         bool triggerEnabled = false;
         int triggerFireDelay = 0;
         // 0 = 长按模式(按住不松手, 准星离开命中区才松开); >0 = 连点模式。

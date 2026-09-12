@@ -52,23 +52,42 @@ struct HotkeyProfile
     int fovX = 106;
     int fovY = 74;
 
-    // AVA PIDF Mode 1。AVA 界面只暴露 Kp/Kd/Kf/LR，Ki 固定为 0。
-    int pidf_mapping_version = 3;
-    // 1.0 -> 2.0: 配合下面新增的链路延迟补偿(Smith 预测器)一起调出来的值。
-    // 补偿让回路对延迟不敏感, 因此可以用更硬的 Kp; 两者必须配套 —— 只留 Kp=2.0
-    // 而没有补偿时, 4 帧延迟下综合分会从 22.9 恶化到 67.5(见 pidf_mode1_exact.cpp)。
-    float pidf_kp_x = 2.0f, pidf_kp_y = 2.0f;
-    float pidf_ki_x = 0.0f, pidf_ki_y = 0.0f;
-    // 前馈三件套必须配套: kf=0 会让 ff_output = ff_state*dt*kf 恒为 0, 即前馈
-    // 整条关死, 此时 lr 调多少都没反应(实测: 追横移目标落后 10.4px、摆头咬不住)。
-    // 默认直接给可用值; 多场景模拟综合分 37.8 -> 20.6(见 tests/aim_scenario_sim.cpp)。
-    float pidf_kd_x = 0.05f, pidf_kd_y = 0.05f;
-    float pidf_kf_x = 1.0f, pidf_kf_y = 1.0f;
-    // 0.05 -> 0.08(延迟 <=4 帧时的实测最优); 控制器会按实测延迟自动收紧上限,
-    // 所以高延迟场景不会因此变差(见 pidf_mode1_exact.cpp 的 ff_learning_rate_cap)。
-    float pidf_lr_x = 0.08f, pidf_lr_y = 0.08f;
+    // ── 瞄准控制器 (mouse/aim_pid.h + mouse/aim_motion.h) ───────────────────
+    // 旧 AVA PIDF 管线已整条删除, 这几个槽位沿用下来但语义已换, 单位都带时间量纲
+    // (u = dt*Kp*[e + Ki*∫e + Kd*e'], 所以换帧率不用重调):
+    //   pidf_kp_*   Kp 计数/(像素*秒) —— 回路速度。唯一与游戏灵敏度挂钩的旋钮:
+    //              手感拖沓就往上加(每次 +50%), 开始抖/画圈就退回来。
+    //   pidf_ki_*   Ki 1/秒 —— 积分速率(Ti = 1/Ki), 磨掉匀速目标的滞后与残余偏置。
+    //   pidf_kd_*   Kd 秒 —— 微分时间, 压过冲。检测框每个计数台阶在微分眼里都是
+    //              几十像素/秒的尖峰, 所以默认很小。
+    //   pidf_lr_*   延迟预测 秒 —— 补偿链路盲区(在途自身位移 + 盲区里目标的位移)。
+    //              稳态下两项抵消, 只影响甩枪/机动瞬态。量级 = 采集到指令生效的总延迟。
+    //   pidf_kf_*   主动提前量 秒 —— 稳态下就是 v*lead 的提前偏移, 用来打移动靶。
+    //              默认 0(关): 它按武器飞行时间定, 属于用户按需开的东西。
+    //   pidf_deadzone_* 误差死区 像素(0 = 关, 默认关: 死区等于主动丢精度)
+    //   pidf_limit_*    每拍计数上限(0 = 内置 200)
+    // 默认值由闭环回归(每计数 0.25 像素 + 50ms 死区)扫出来的稳定边界决定, 见
+    // tests/aim_pid_test.cpp。
+    int pidf_mapping_version = 4;
+    float pidf_kp_x = 20.0f, pidf_kp_y = 20.0f;
+    float pidf_ki_x = 1.0f, pidf_ki_y = 1.0f;
+    float pidf_kd_x = 0.01f, pidf_kd_y = 0.01f;
+    float pidf_kf_x = 0.0f, pidf_kf_y = 0.0f;
+    float pidf_lr_x = 0.05f, pidf_lr_y = 0.05f;
     int pidf_deadzone_x = 0, pidf_deadzone_y = 0;
     int pidf_limit_x = 0, pidf_limit_y = 0;
+
+    // 每计数像素(px/count) = "鼠标动一格, 画面动多少像素"。这是游戏属性(灵敏度/开镜倍率),
+    // 前馈(延迟预测/提前量)必须知道它才能工作。
+    //   0   = 自动在线估算(默认)。程序只在"我们自己猛动、画面跟着猛变"的干净窗口里量,
+    //         量不出来前馈就一直关闭 —— 手感会悄悄换成"没有预判"的另一套。
+    //   >0  = 用你填的值, 立刻生效, 不等标定, 也不会因为画面乱就关掉。
+    // 换游戏/换灵敏度/换开镜倍率时要重设。
+    float aim_px_per_count_x = 0.0f, aim_px_per_count_y = 0.0f;
+
+    // 瞄点滤波(anchor_filter_ms) 已于 2026-09-12 移除 —— 位置不再平滑, 控制器吃原始
+    // 瞄点(甩到瞄点永远是一拍); "框在抖"改由【速度低通 + 速度前馈噪声门】解决, 见
+    // mouse/anchor_observer.h 与 mouse/aim_pid.cpp。
 
     // 用户 AimPath：在 AVA PIDF 输出后执行轨迹整形。
     int   aim_path_mode = 0;
@@ -88,10 +107,6 @@ struct HotkeyProfile
 
     // ─────────────────────────────────────────────────────────────────────
     // ─────────────────────────────────────────────────────────────────────
-
-    // 检测暂时丢失时继续保留同一 track 的帧数。期间不发送旧坐标移动，
-    // 只等待同一目标重新出现；0 = 当帧丢失即释放，默认 5 与旧行为一致。
-    int   lost_target_cache_frames = 5;
 
     // ─────────────────────────────────────────────────────────────────────
     // 扳机 — 5 态状态机 (idle/delay/pressed/cooldown/switch_cd)。
@@ -189,10 +204,10 @@ public:
 
     // Hardware
     std::string input_method = "MAKCU"; // MAKCU | MAKCUNEW
-    // Physical mapping and delay estimates used by the execution model.
-    double mouse_pixels_per_count_x = 1.0, mouse_pixels_per_count_y = 1.0;
-    double mouse_effect_delay_ms = 8.333333;
-    double mouse_effect_uncertainty_ms = 2.0;
+    // 采集回调之前的未知帧龄估计; 只用于延迟遥测的时间戳修正, 不参与控制。
+    // 注: 曾有 mouse_pixels_per_count_x/y 与 mouse_effect_delay/uncertainty_ms 四项,
+    // 供重构版 predictive_controller 扣除自身在途指令的像素位移。现役控制链已切回
+    // AVA PIDF 管线(全程鼠标计数域, 不需要像素<->计数换算), 那四项已删除。
     double capture_age_offset_ms = 0.0; // unknown pre-callback age, not a measured zero
     int makcu_baudrate = 115200;
     std::string makcu_port = "COM0";

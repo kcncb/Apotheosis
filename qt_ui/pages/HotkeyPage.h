@@ -94,10 +94,14 @@ private:
     // Card 3: Crosshair detect
     ToggleSwitch* m_crosshairDetect{};
 
-    // AVA PIDF Mode 1：Kp/Ki/Kd/Kf/Lr 各 XY，及移动死区/限幅。
+    // 控制器参数(mouse/aim_pid.h): [0][1] 瞄准速度 Kp  [2][3] 积分强度 Ki
+    // [4][5] 过冲控制 Kd  [6][7] 提前量(秒)  [8][9] 延迟预测(秒);
+    // 整数行: 移动死区 X/Y(像素)、移动限幅 X/Y(计数/拍)。
     std::array<QDoubleSpinBox*, 10> m_pidfGain{};
     std::array<QSpinBox*, 4> m_pidfInteger{};
-    QSpinBox*       m_lostTargetCacheFrames{};
+    // 「每计数像素」X/Y: 手填就用, 0 = 自动估算(见 config.h 的 aim_px_per_count_*)。
+    std::array<QDoubleSpinBox*, 2> m_pxPerCount{};
+    // 瞄点滤波(anchor_filter_ms) 已于 2026-09-12 移除: 位置不再平滑, 见 boss_aim.h。
 
     // Card: 扳机 (trigger FSM)
     ToggleSwitch*   m_triggerEnabled{};

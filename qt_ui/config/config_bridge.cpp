@@ -261,7 +261,6 @@ void ConfigBridge::syncFromRuntime()
             hd.keys.push_back(qstr(k));
         hd.fovX = hp.fovX;
         hd.fovY = hp.fovY;
-        hd.lostTargetCacheFrames = hp.lost_target_cache_frames;
         hd.triggerEnabled      = hp.trigger_enabled;
         hd.triggerFireDelay    = hp.trigger_fire_delay;
         hd.triggerFireDuration = hp.trigger_fire_duration;

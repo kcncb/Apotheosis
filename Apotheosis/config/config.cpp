@@ -191,9 +191,6 @@ void Config::writeDefaultsInPlace()
     // Most members already initialized via C++ default initializers in the
     // header; this routine only fixes up the fields that want non-default
     // values when a brand-new config.ini is generated.
-    mouse_pixels_per_count_x = mouse_pixels_per_count_y = 1.0;
-    mouse_effect_delay_ms = 8.333333;
-    mouse_effect_uncertainty_ms = 2.0;
     capture_age_offset_ms = 0.0;
     capture_device = "";
     capture_format = "";
@@ -311,10 +308,6 @@ bool Config::loadConfig(const std::string& filename)
         const double value = get_double("", key, fallback);
         return std::isfinite(value) ? std::clamp(value, low, high) : fallback;
     };
-    mouse_pixels_per_count_x = finiteSetting("mouse_pixels_per_count_x", 1.0, .01, 100.0);
-    mouse_pixels_per_count_y = finiteSetting("mouse_pixels_per_count_y", 1.0, .01, 100.0);
-    mouse_effect_delay_ms = finiteSetting("mouse_effect_delay_ms", 8.333333, 0, 100);
-    mouse_effect_uncertainty_ms = finiteSetting("mouse_effect_uncertainty_ms", 2, 0, 50);
     capture_age_offset_ms = finiteSetting("capture_age_offset_ms", 0, 0, 100);
     makcu_baudrate = get_long("", "makcu_baudrate", 115200);
     makcu_port = get_string("", "makcu_port", "COM0");
@@ -511,61 +504,38 @@ bool Config::loadConfig(const std::string& filename)
             hk.pidf_deadzone_y = static_cast<int>(get_long(sec, "pidf_deadzone_y", hk.pidf_deadzone_y));
             hk.pidf_limit_x = static_cast<int>(get_long(sec, "pidf_limit_x", hk.pidf_limit_x));
             hk.pidf_limit_y = static_cast<int>(get_long(sec, "pidf_limit_y", hk.pidf_limit_y));
+            hk.aim_px_per_count_x = static_cast<float>(get_double(
+                sec, "aim_px_per_count_x", hk.aim_px_per_count_x));
+            hk.aim_px_per_count_y = static_cast<float>(get_double(
+                sec, "aim_px_per_count_y", hk.aim_px_per_count_y));
+            // (anchor_filter_ms 已于 2026-09-12 移除: 位置不再平滑, 速度低通由观测器
+            //  内部承担。旧 ini 里的这个键会被忽略。)
 
-            // 旧版界面把四行错误接成 Kp/Ki/Kd/Kf，并隐藏 LR。按用户
-            // 看到的行值迁移为 AVA 的 Kp/Kd/Kf/LR，避免运行机沿用旧
-            // config.ini 后仍然出现“预测调大只回到框中心”。
-            if (hk.pidf_mapping_version < 2)
+            // v4: 控制器整条换成 mouse/aim_pid.h 的新 PID —— 这几个槽位的【单位与
+            // 含义全变了】, 旧值直接沿用会给出离谱的回路增益:
+            //   Kp  旧"每拍增益"        -> 新 计数/(像素*秒)
+            //   Ki  旧固定 0            -> 新 1/秒 的积分速率
+            //   Kd  旧 计数*秒/像素      -> 新 秒(微分时间)
+            //   Kf  旧"前馈强度"(默认 1) -> 新 提前量 秒(默认 0 = 关)
+            //   LR  旧"学习率"(默认 0.08)-> 新 延迟预测 秒
+            // 所以旧版本配置的这五个值一律回到新默认(旧 Kf=1 会变成 1 秒的提前量, 直接
+            // 把准星推到目标前面去); 死区与限幅语义没变, 保留用户设置。
+            // v2/v3 那两段"前馈/预测"迁移随旧管线一起删掉了。
+            if (hk.pidf_mapping_version < 4)
             {
-                const float old_ki_x = hk.pidf_ki_x;
-                const float old_ki_y = hk.pidf_ki_y;
-                const float old_kd_x = hk.pidf_kd_x;
-                const float old_kd_y = hk.pidf_kd_y;
-                const float old_kf_x = hk.pidf_kf_x;
-                const float old_kf_y = hk.pidf_kf_y;
-                hk.pidf_ki_x = 0.0f;
-                hk.pidf_ki_y = 0.0f;
-                hk.pidf_kd_x = old_ki_x; // 旧“过冲控制”
-                hk.pidf_kd_y = old_ki_y;
-                hk.pidf_kf_x = old_kd_x; // 旧“锁定强度”
-                hk.pidf_kf_y = old_kd_y;
-                hk.pidf_lr_x = old_kf_x; // 旧“预测速度”
-                hk.pidf_lr_y = old_kf_y;
-                hk.pidf_mapping_version = 2;
+                const HotkeyProfile fresh;  // 只为取新默认值
+                hk.pidf_kp_x = fresh.pidf_kp_x;
+                hk.pidf_kp_y = fresh.pidf_kp_y;
+                hk.pidf_ki_x = fresh.pidf_ki_x;
+                hk.pidf_ki_y = fresh.pidf_ki_y;
+                hk.pidf_kd_x = fresh.pidf_kd_x;
+                hk.pidf_kd_y = fresh.pidf_kd_y;
+                hk.pidf_kf_x = fresh.pidf_kf_x;
+                hk.pidf_kf_y = fresh.pidf_kf_y;
+                hk.pidf_lr_x = fresh.pidf_lr_x;
+                hk.pidf_lr_y = fresh.pidf_lr_y;
+                hk.pidf_mapping_version = 4;
             }
-
-            // v3: 把"前馈整条关死"的老配置升级到可用值。
-            //
-            // 为什么需要: pidf_kf_x 默认 0, 而 ff_output = ff_state*dt*kf, 于是
-            // kf=0 时前馈完全不出力, pidf_lr_x 调多少都没反应 —— 表现为"追不上
-            // 横移目标、摆头后咬不住"。多场景模拟(aim_scenario_sim, 120Hz, 25ms
-            // 链路延迟)实测: 出厂默认 kf=0/lr=0 综合分 37.8, 打开前馈后 20.6。
-            // 只动这三个"必须配套"的值, 不碰用户自己调的 Kp(瞄准速度)与死区/限幅。
-            if (hk.pidf_mapping_version < 3)
-            {
-                if (hk.pidf_kf_x <= 0.0f && hk.pidf_kf_y <= 0.0f)
-                {
-                    hk.pidf_kf_x = (hk.pidf_kf_x <= 0.0f) ? 1.0f : hk.pidf_kf_x;
-                    hk.pidf_kf_y = (hk.pidf_kf_y <= 0.0f) ? 1.0f : hk.pidf_kf_y;
-                    // lr 只在前馈本来就没开时才补, 避免覆盖用户已经选好的值
-                    if (hk.pidf_lr_x <= 0.0f) hk.pidf_lr_x = 0.08f;
-                    if (hk.pidf_lr_y <= 0.0f) hk.pidf_lr_y = 0.08f;
-                    // 微分项在延迟下 kd>=0.1 会发散(实测), 老默认 0.01 又几乎没有
-                    // 阻尼; 0.05 是实测的稳健值。
-                    if (hk.pidf_kd_x < 0.02f) hk.pidf_kd_x = 0.05f;
-                    if (hk.pidf_kd_y < 0.02f) hk.pidf_kd_y = 0.05f;
-                    // Kp 只在还是老默认 1.0 时才升到 2.0 —— 延迟补偿与 Kp 配套,
-                    // 两者一起才是"焊得住"的组合; 用户自己调过 Kp 的一律不动。
-                    if (hk.pidf_kp_x > 0.99f && hk.pidf_kp_x < 1.01f)
-                        hk.pidf_kp_x = 2.0f;
-                    if (hk.pidf_kp_y > 0.99f && hk.pidf_kp_y < 1.01f)
-                        hk.pidf_kp_y = 2.0f;
-                }
-                hk.pidf_mapping_version = 3;
-            }
-
-            hk.lost_target_cache_frames = static_cast<int>(get_long(
-                sec, "lost_target_cache_frames", hk.lost_target_cache_frames));
 
             // 扳机
             hk.trigger_enabled        = get_bool(sec, "trigger_enabled",        hk.trigger_enabled);
@@ -718,17 +688,20 @@ bool Config::loadConfig(const std::string& filename)
     }
 
     auto clamp_aim_fields = [](HotkeyProfile& hk) {
-        // AVA 的 PIDF 浮点编辑器沿用 QDoubleSpinBox 默认范围 0..99.99；
-        // 不再把 Kp/Kd/Kf 截到 10、把 LR 截到 1。
-        hk.pidf_kp_x = std::clamp(hk.pidf_kp_x, 0.0f, 99.99f); hk.pidf_kp_y = std::clamp(hk.pidf_kp_y, 0.0f, 99.99f);
-        hk.pidf_ki_x = 0.0f; hk.pidf_ki_y = 0.0f;
-        hk.pidf_kd_x = std::clamp(hk.pidf_kd_x, 0.0f, 99.99f); hk.pidf_kd_y = std::clamp(hk.pidf_kd_y, 0.0f, 99.99f);
-        hk.pidf_kf_x = std::clamp(hk.pidf_kf_x, 0.0f, 99.99f); hk.pidf_kf_y = std::clamp(hk.pidf_kf_y, 0.0f, 99.99f);
-        hk.pidf_lr_x = std::clamp(hk.pidf_lr_x, 0.0f, 99.99f); hk.pidf_lr_y = std::clamp(hk.pidf_lr_y, 0.0f, 99.99f);
+        // 新控制器(mouse/aim_pid.h)的单位与范围: Kp 计数/(像素*秒)、Ki 1/秒、
+        // Kd 秒、延迟预测与提前量 秒。上面的 D 盒子上限与这里保持一致。
+        hk.pidf_kp_x = std::clamp(hk.pidf_kp_x, 0.0f, 400.0f); hk.pidf_kp_y = std::clamp(hk.pidf_kp_y, 0.0f, 400.0f);
+        hk.pidf_ki_x = std::clamp(hk.pidf_ki_x, 0.0f, 60.0f); hk.pidf_ki_y = std::clamp(hk.pidf_ki_y, 0.0f, 60.0f);
+        hk.pidf_kd_x = std::clamp(hk.pidf_kd_x, 0.0f, 0.3f); hk.pidf_kd_y = std::clamp(hk.pidf_kd_y, 0.0f, 0.3f);
+        hk.pidf_kf_x = std::clamp(hk.pidf_kf_x, 0.0f, 0.6f); hk.pidf_kf_y = std::clamp(hk.pidf_kf_y, 0.0f, 0.6f);
+        hk.pidf_lr_x = std::clamp(hk.pidf_lr_x, 0.0f, 0.6f); hk.pidf_lr_y = std::clamp(hk.pidf_lr_y, 0.0f, 0.6f);
         hk.pidf_deadzone_x = std::clamp(hk.pidf_deadzone_x, 0, 1000); hk.pidf_deadzone_y = std::clamp(hk.pidf_deadzone_y, 0, 1000);
         hk.pidf_limit_x = std::clamp(hk.pidf_limit_x, 0, 1000); hk.pidf_limit_y = std::clamp(hk.pidf_limit_y, 0, 1000);
-
-        hk.lost_target_cache_frames = std::clamp(hk.lost_target_cache_frames, 0, 240);
+        // 每计数像素: 0 = 自动估算; 可见范围之外(比如填成 50 格才动 1 像素)一律当自动处理。
+        hk.aim_px_per_count_x = (hk.aim_px_per_count_x > 0.0f && hk.aim_px_per_count_x <= 20.0f)
+            ? hk.aim_px_per_count_x : 0.0f;
+        hk.aim_px_per_count_y = (hk.aim_px_per_count_y > 0.0f && hk.aim_px_per_count_y <= 20.0f)
+            ? hk.aim_px_per_count_y : 0.0f;
 
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 2);
         hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
@@ -746,7 +719,7 @@ bool Config::loadConfig(const std::string& filename)
         hk.trigger_fire_delay    = std::clamp(hk.trigger_fire_delay,    0, 5000);
         hk.trigger_fire_duration = std::clamp(hk.trigger_fire_duration, 0, 5000);
         hk.trigger_fire_interval = std::clamp(hk.trigger_fire_interval, 0, 5000);
-        hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 500);
+        hk.trigger_y_percent     = std::clamp(hk.trigger_y_percent,     1, 1000);
         hk.trigger_delay_jitter_ms    = std::clamp(hk.trigger_delay_jitter_ms,    0, 500);
         hk.trigger_duration_jitter_ms = std::clamp(hk.trigger_duration_jitter_ms, 0, 500);
         hk.trigger_interval_jitter_ms = std::clamp(hk.trigger_interval_jitter_ms, 0, 500);
@@ -830,10 +803,6 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Hardware / input device\n"
         << "# MAKCU | MAKCUNEW\n"
         << "input_method = " << input_method << "\n"
-        << "mouse_pixels_per_count_x = " << mouse_pixels_per_count_x << "\n"
-        << "mouse_pixels_per_count_y = " << mouse_pixels_per_count_y << "\n"
-        << "mouse_effect_delay_ms = " << mouse_effect_delay_ms << "\n"
-        << "mouse_effect_uncertainty_ms = " << mouse_effect_uncertainty_ms << "\n"
         << "capture_age_offset_ms = " << capture_age_offset_ms << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
         << "makcu_port = " << makcu_port << "\n"
@@ -929,7 +898,10 @@ bool Config::saveConfig(const std::string& filename)
         file << "keys = " << joinStrings(hk.keys) << "\n";
         file << "fovX = " << hk.fovX << "\n";
         file << "fovY = " << hk.fovY << "\n";
-        file << "pidf_mapping_version = 3\n";
+        // 必须写当前版本号: 加载侧按它判断要不要跑迁移。这里写死 3 而加载侧要求 <4 时
+        // 迁移, 结果就是"每次启动都把用户调好的 Kp/Ki/Kd/提前量/延迟预测重置成默认"
+        // (2026-09-12 实测: 配置文件里 Kp_x=100, 重启后会被改成 20)。
+        file << "pidf_mapping_version = 4\n";
         file << std::fixed << std::setprecision(4)
              << "pidf_kp_x = " << hk.pidf_kp_x << "\n" << "pidf_kp_y = " << hk.pidf_kp_y << "\n"
              << "pidf_ki_x = " << hk.pidf_ki_x << "\n" << "pidf_ki_y = " << hk.pidf_ki_y << "\n"
@@ -938,8 +910,9 @@ bool Config::saveConfig(const std::string& filename)
              << "pidf_lr_x = " << hk.pidf_lr_x << "\n" << "pidf_lr_y = " << hk.pidf_lr_y << "\n"
              << "pidf_deadzone_x = " << hk.pidf_deadzone_x << "\n" << "pidf_deadzone_y = " << hk.pidf_deadzone_y << "\n"
              << "pidf_limit_x = " << hk.pidf_limit_x << "\n" << "pidf_limit_y = " << hk.pidf_limit_y << "\n"
+             << "aim_px_per_count_x = " << hk.aim_px_per_count_x << "\n"
+             << "aim_px_per_count_y = " << hk.aim_px_per_count_y << "\n"
              << std::setprecision(0)
-             << "lost_target_cache_frames = " << hk.lost_target_cache_frames << "\n"
              << "trigger_enabled = "       << to_bool_str(hk.trigger_enabled)       << "\n"
              << "trigger_fire_delay = "    << hk.trigger_fire_delay    << "\n"
              << "trigger_fire_duration = " << hk.trigger_fire_duration << "\n"

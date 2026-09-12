@@ -105,7 +105,17 @@ HardwarePage::HardwarePage(QWidget* parent)
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
-    auto* mappingCard = new CardWidget(zh(u8"图像与鼠标映射"), QStringLiteral("adjustments"));
+    // 「图像与鼠标映射」已移除。
+    //
+    // 现役控制链(mouse/aim_pid.h)全程在【鼠标计数】域输出: 控制器算完直接把计数交给
+    // sendRawMove, 不存在"像素 -> 计数"这一步。而 mouse_pixels_per_count_x/y
+    // 与发送后生效延迟/误差范围这三个参数, 本来就是旧 predictive_controller 用来
+    // "扣除自身在途指令的像素位移"的写死标定 —— 现在没有任何代码读取它们。
+    // 新控制器同样需要"每计数多少像素", 但它是观测器(mouse/aim_motion.h)在线估出来的,
+    // 不落盘、不需要用户标定, 所以这里依旧没有可填的字段。
+    //
+    // 只保留采集回调前帧龄: 它仍然参与延迟遥测的采集时间戳修正。
+    auto* mappingCard = new CardWidget(zh(u8"延迟估计"), QStringLiteral("adjustments"));
     auto addMapping = [&](const char* title, double Config::*field, double low, double high, const char* suffix) {
         auto* spin = new QDoubleSpinBox;
         spin->setDecimals(4); spin->setRange(low, high); spin->setSuffix(QString::fromUtf8(suffix));
@@ -117,14 +127,37 @@ HardwarePage::HardwarePage(QWidget* parent)
             ConfigBridge::instance().markDirty();
         });
     };
-    addMapping(u8"水平像素 / 鼠标计数", &Config::mouse_pixels_per_count_x, .01, 100, "");
-    addMapping(u8"垂直像素 / 鼠标计数", &Config::mouse_pixels_per_count_y, .01, 100, "");
-    addMapping(u8"发送后生效延迟（估计）", &Config::mouse_effect_delay_ms, 0, 100, " ms");
-    addMapping(u8"生效延迟误差范围（估计）", &Config::mouse_effect_uncertainty_ms, 0, 50, " ms");
     addMapping(u8"采集回调前帧龄（估计）", &Config::capture_age_offset_ms, 0, 100, " ms");
-    auto* note = new QLabel(zh(u8"映射应对应当前游戏视角与开镜状态。延迟为模型估计，串口写入成功不等于硬件已执行；回调前帧龄填 0 表示尚未补偿。"));
+    auto* note = new QLabel(zh(u8"回调前帧龄是模型估计, 填 0 表示尚未补偿。它只影响延迟遥测的时间戳, 不参与控制回路。"));
     note->setWordWrap(true); mappingCard->contentLayout()->addWidget(note);
     layout->addWidget(mappingCard);
+
+    // 准星找色平滑: 以前只有配置文件里有这一项, 界面上看不到, 默认还是 0(等于关闭)。
+    // 但准星枢轴是【误差的基准】—— 它抖多少, 控制器就白挨多少。这里给它一个可见的旋钮。
+    {
+        auto* crossCard = new CardWidget(zh(u8"准星找色"), QStringLiteral("crosshair"));
+        auto* spin = new QDoubleSpinBox;
+        spin->setDecimals(2);
+        spin->setSingleStep(0.05);
+        spin->setRange(0.0, 1.0);
+        {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            spin->setValue(static_cast<double>(config.crosshair_smooth));
+        }
+        crossCard->contentLayout()->addWidget(FormKit::fieldRow(zh(u8"平滑强度"), spin));
+        auto* tip = new QLabel(zh(u8"0~1：越大越平滑(静止时重平滑、快速移动时自动放开，所以不会拖慢甩枪)。"));
+        tip->setWordWrap(true);
+        crossCard->contentLayout()->addWidget(tip);
+        auto* tip2 = new QLabel(zh(u8"填 0 或很小都按默认 0.5 处理：这道防线不该被关掉 —— 开火时准星被火光/烟雾干扰出现的跳点，会直接变成控制器的错误输入。"));
+        tip2->setWordWrap(true);
+        crossCard->contentLayout()->addWidget(tip2);
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [](double v) {
+            std::lock_guard<std::recursive_mutex> lock(configMutex);
+            config.crosshair_smooth = static_cast<float>(v);
+            ConfigBridge::instance().markDirty();
+        });
+        layout->addWidget(crossCard);
+    }
 
     loadFieldsFromConfig();
 

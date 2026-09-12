@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "latest_move_slot.h"
-#include "control/predictive_controller.h"
 
 // Forward declarations so that mouse.h stays light.
 class MakcuConnection;
@@ -19,7 +18,6 @@ class MakcuNewConnection;
 struct MouseRuntimeParams
 {
     int detection_resolution = 320;
-    motion::Calibration calibration;
 };
 
 class MouseThread
@@ -53,10 +51,7 @@ public:
     std::recursive_mutex input_method_mutex;
 
     // ─── Raw driver channel (used by the Boss AI aim engine) ───────────────
-    void sendRawMove(int dx, int dy, int64_t capture_ns = 0, int64_t aim_ns = 0, uint64_t command_id = 0);
-    void sendPixelMove(double dx, double dy, motion::Calibration calibration,
-                       int limit_x, int limit_y, int64_t capture_ns, int64_t aim_ns);
-    std::shared_ptr<motion::CommandJournal> commandJournal() const { return journal_; }
+    void sendRawMove(int dx, int dy, int64_t capture_ns = 0, int64_t aim_ns = 0);
     void pressLeftButton();
     void releaseLeftButton();
 
@@ -66,17 +61,14 @@ public:
 
 private:
     void moveWorkerLoop();
-    void queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns, uint64_t command_id);
+    void queueMove(int dx, int dy, int64_t capture_ns, int64_t aim_ns);
     bool sendMovementToDriver(int dx, int dy);
 
     void sendLeftDownToDriver();
     void sendLeftUpToDriver();
 
     MouseRuntimeParams params_{};
-    std::shared_ptr<motion::CommandJournal> journal_ = std::make_shared<motion::CommandJournal>();
-    motion::OutputMapper mapper_;
     std::mutex outputMtx_;
-    uint64_t pendingCommandId_ = 0;
 
     // Async driver dispatch.
     mouse_async::LatestMoveSlot moveSlot_;
