@@ -267,12 +267,18 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
 
     {
         std::lock_guard<std::mutex> filter_lock(g_filter_mtx);
-        if (cross_used && cross_smooth > 0.001f)
+        // 平滑强度: 配置里 <=0 时用默认 0.5 而不是"关闭"。
+        // 找色出来的枢轴是【误差的基准】—— 它抖多少, 控制器就白挨多少。实测枢轴本身
+        // 已经比较稳(逐帧 0.01px), 但开火/换弹时准星被火光烟雾干扰会出现跳点, 这个
+        // 自适应滤波(静止重平滑、快速移动放开)正是为它准备的。历史上默认 0 把它整个
+        // 关掉了, 等于把这道防线拆了 —— 所以这里不再允许"0 = 关闭", 太小一律按默认。
+        const float smooth_strength = (cross_smooth > 0.001f) ? cross_smooth : 0.5f;
+        if (cross_used)
         {
-            g_cross_filter.configure(cross_smooth);
+            g_cross_filter.configure(static_cast<double>(smooth_strength));
             *hit = g_cross_filter.filter(*hit, tsec);
         }
-        else if (!cross_used)
+        else
         {
             g_cross_filter.reset();
         }
@@ -362,6 +368,11 @@ void process_gpu_frame(const GpuImage& frame)
     const int roi_w = std::min(frame.cols(), std::max(4, snapshot->crosshair_rect_w));
     const int roi_h = std::min(frame.rows(), std::max(4, snapshot->crosshair_rect_h));
     const int roi_x = std::clamp(frame.cols() / 2 - roi_w / 2, 0, frame.cols() - roi_w);
+    // ROI 垂直位置【故意偏上】: 全自动射击时准星是向上弹跳的, 采样框必须多留上方
+    // 空间, 否则后坐力抬枪会把准星顶出框外。CPU 侧 crosshair_detector.cpp 的
+    // dynamic_center_roi() 用 y = cy - h*0.6 表达同一件事(向上 60% / 向下 40%);
+    // 这里的 rows/2 - roi_h + 10 是"框底在中心线下方 10px", 即向上留了约 100%
+    // 的余量, 比 CPU 侧更宽松。★ 不要顺手把它改成居中 —— 那会在连发时丢准星。
     const int roi_y = std::clamp(frame.rows() / 2 - roi_h + 10, 0, frame.rows() - roi_h);
 
     auto& state = gpu_state();

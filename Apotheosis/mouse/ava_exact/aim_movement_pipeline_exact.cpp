@@ -42,7 +42,8 @@ AimMovementPipelineExact::AimMovementPipelineExact(
     double now_seconds) noexcept
     : process_state_{},
       qx_state_(construct_qx_sigma_state(qx_seed)),
-      mode1_state_(construct_pidf_mode1(config.pidf, now_seconds)) {
+      mode1_state_(construct_pidf_mode1(config.pidf, now_seconds)),
+      mode2_state_(construct_pidf_mode2(config.pidf, now_seconds)) {
     process_state_.random.reseed(process_seed);
     apply_config(std::move(config), now_seconds);
 }
@@ -53,26 +54,30 @@ void AimMovementPipelineExact::apply_config(
     config.process = normalize_process_humanization_config(config.process);
     apply_qx_sigma_config(qx_state_, config.qx);
 
-    // 只保留现役的 mode1。原实现在每次重建时都会再构造一个 mode2 对象, 但
-    // pidf_mode 被写死为 mode1(见 boss_aim.cpp), 那个对象从不被 step —— 纯开销。
+    // This method is the explicit native profile/configuration boundary, not
+    // part of the per-frame ArmController path.  Reconstruct both possible
+    // objects so changing qword_140BD2750 cannot expose stale gains/state.
     mode1_state_ = construct_pidf_mode1(config.pidf, now_seconds);
+    mode2_state_ = construct_pidf_mode2(config.pidf, now_seconds);
     config.qx = qx_state_.config;
     config_ = std::move(config);
 }
 
 void AimMovementPipelineExact::reset_selected_pidf(
     double now_seconds) noexcept {
-    if (config_.pidf_mode == NativePidfMode::mode1) {
+    if (config_.pidf_mode == NativePidfMode::mode1)
         reset_pidf_mode1(mode1_state_, now_seconds);
-        reset_pidf_delay_model(mode1_delay_);
-    }
+    else if (config_.pidf_mode == NativePidfMode::mode2)
+        reset_pidf_mode2(mode2_state_, now_seconds);
 }
 
 PidfNativeOutput AimMovementPipelineExact::update_selected_pidf(
     const PidfInputExact& input,
     double now_seconds) noexcept {
     if (config_.pidf_mode == NativePidfMode::mode1)
-        return update_pidf_mode1(mode1_state_, mode1_delay_, input, now_seconds);
+        return update_pidf_mode1(mode1_state_, input, now_seconds);
+    if (config_.pidf_mode == NativePidfMode::mode2)
+        return update_pidf_mode2(mode2_state_, input, now_seconds);
     return {};
 }
 
@@ -175,6 +180,8 @@ AimMovementFrameTrace AimMovementPipelineExact::step(
     });
     if (config_.pidf_mode == NativePidfMode::mode1)
         apply_pidf_axis_policy(mode1_state_, trace.axis_policy);
+    else if (config_.pidf_mode == NativePidfMode::mode2)
+        apply_pidf_axis_policy(mode2_state_, trace.axis_policy);
 
     if (trace.axis_policy.suppress_pidf_update) {
         reset_selected_pidf(frame.now_seconds);
@@ -182,20 +189,19 @@ AimMovementFrameTrace AimMovementPipelineExact::step(
         // deliberately retains axis_blocked, matching the native object.
         if (config_.pidf_mode == NativePidfMode::mode1)
             apply_pidf_axis_policy(mode1_state_, trace.axis_policy);
+        else if (config_.pidf_mode == NativePidfMode::mode2)
+            apply_pidf_axis_policy(mode2_state_, trace.axis_policy);
         trace.pidf_input.valid = 0;
         trace.stop_reason = AimMovementStopReason::region_policy_suppressed;
         return trace;
     }
-    if (config_.pidf_mode != NativePidfMode::mode1) {
+    if (config_.pidf_mode != NativePidfMode::mode1
+        && config_.pidf_mode != NativePidfMode::mode2) {
         trace.pidf_input.valid = 0;
         trace.stop_reason = AimMovementStopReason::pidf_disabled;
         return trace;
     }
 
-    // 每帧把实测的链路延迟交给补偿模型(latency_probe 的来源见 mouse_thread_loop)。
-    mode1_delay_.measure_latency_sec =
-        frame.measure_latency_sec > 0.0 ? frame.measure_latency_sec : 0.0;
-    // 指令侧延迟(HID + 游戏帧)观测不到, 保持默认的 1 帧下限。
     trace.pidf_output = update_selected_pidf(
         trace.pidf_input, frame.now_seconds);
     trace.pidf_ran = true;

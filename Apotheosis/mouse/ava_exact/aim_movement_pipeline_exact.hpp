@@ -5,7 +5,7 @@
 #include "pid_input_pipeline.hpp"
 #include "pidf_axis_policy_exact.hpp"
 #include "pidf_mode1_exact.hpp"
-#include "pidf_types_exact.hpp"
+#include "pidf_mode2_exact.hpp"
 #include "process_humanization_exact.hpp"
 #include "qx_curve_config_exact.hpp"
 #include "target_region_exact.hpp"
@@ -16,11 +16,10 @@
 namespace cvm::recovered {
 
 // qword_140BD2750 low byte in ArmController_14004F1B0.
-// 只保留现役的 mode1：mode2 的代码路径已删除（pidf_mode 一直被写死为 mode1，
-// 那条分支从未被执行过，却每帧都要多构造一个 712 字节的状态对象）。
 enum class NativePidfMode : std::uint8_t {
     disabled = 0,
     mode1 = 1,
+    mode2 = 2,
 };
 
 // Configuration already selected by the profile/configuration layer.  The
@@ -32,7 +31,7 @@ struct AimMovementPipelineConfig {
     QxSigmaConfig qx{};                   // state at 0x140BD3B70
     TargetRegionConfig target_region{};   // globals 0x140BD1F70..0x140BD1F83
     NativePidfMode pidf_mode{NativePidfMode::disabled};
-    PidfConfig pidf{};                     // common 96-byte constructor ABI
+    PidfMode2Config pidf{};                // common 96-byte constructor ABI
 
     bool frame_divisor_enabled{};          // byte_140BD3F10
     std::int32_t configured_frame_divisor{}; // dword_140BD3F80
@@ -65,10 +64,6 @@ struct AimMovementFrameInput {
     TargetRegionBoxSelection target_region_boxes{};
     bool external_y_block{};
     AimMovementTargetFrame target{};
-
-    // 链路测量延迟(秒): 采集 -> 控制环拿到这一帧的端到端延迟, 由 latency_probe
-    // 实测填入。0 = 未知/未测到, 此时延迟补偿退化为恒等。
-    double measure_latency_sec{};
 };
 
 enum class AimMovementStopReason : std::uint8_t {
@@ -141,6 +136,7 @@ public:
     }
     const QxSigmaState& qx_state() const noexcept { return qx_state_; }
     const PidfMode1State& mode1_state() const noexcept { return mode1_state_; }
+    const PidfMode2State& mode2_state() const noexcept { return mode2_state_; }
 
 private:
     void reset_selected_pidf(double now_seconds) noexcept;
@@ -152,7 +148,7 @@ private:
     ProcessHumanizationState process_state_{};
     QxSigmaState qx_state_{};
     PidfMode1State mode1_state_{};
-    PidfDelayModelExact mode1_delay_{};
+    PidfMode2State mode2_state_{};
 };
 
 } // namespace cvm::recovered

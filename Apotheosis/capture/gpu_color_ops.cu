@@ -321,12 +321,30 @@ static __global__ void crosshair_hsv_reduce_bgr_u8_kernel(
     const int centre_dy = y - height / 2;
     const int distance2 = centre_dx * centre_dx + centre_dy * centre_dy;
     const int roi_distance2 = max(1, roi_w * roi_w + roi_h * roi_h);
+    // 距离压到 0..1023(原来 0..4095)。分辨率降 4 倍只是为了给密度腾出高位。
     const unsigned int scaled_distance = static_cast<unsigned int>(fminf(
-        4095.0f, static_cast<float>(distance2) * 4095.0f
+        1023.0f, static_cast<float>(distance2) * 1023.0f
             / static_cast<float>(roi_distance2)));
-    const unsigned int proximity = 4095u - scaled_distance;
+    const unsigned int proximity = 1023u - scaled_distance;
+
+    // ── 排序主键修正 (2026-09-12) ────────────────────────────────────────────
+    // 原来: quality = (min(local_count,15) << 12) | proximity
+    //   proximity(离画面中心多近) 独占 12 位 = 主键, 密度只占 4 位。
+    //   后果: 只要 ROI 里存在【比真准星更靠近画面中心】的同色像素, 它就赢 ——
+    //   而 ROI 有 71x71 = 5041 px, 血迹 / UI / 技能特效都进得来。准星一旦因为
+    //   开镜或后坐力抬枪偏离中心, 那个假目标就顶掉它, 质心(第二趟 kernel)
+    //   于是照着假目标算。
+    //
+    // 现在: 密度当主键(6 位, 上限从 15 提到 63), proximity 退成同位次的
+    //   决胜项(10 位)。语义变成"先找最像准星的那一簇, 同簇里再挑离中心最近的
+    //   那个像素" —— 后者本来就是用来在准星自身范围内定位的, 这才是它该有的
+    //   角色。上限从 15 提到 63 也是必要的: 真准星的局部密度远高于 15, 原来
+    //   那一项是饱和的, 等于没参与排序。
+    //
+    // 位宽核算: local_count <= 121 (11x11 全中), min(.,63) -> 6 位;
+    //           proximity <= 1023 -> 10 位; 合计 16 位, 与 key 的高 16 位对齐。
     const unsigned int quality =
-        (static_cast<unsigned int>(min(local_count, 15)) << 12) | proximity;
+        (static_cast<unsigned int>(min(local_count, 63)) << 10) | proximity;
     const unsigned int index = static_cast<unsigned int>(ly * roi_w + lx);
     const unsigned int key = (quality << 16) | (0xffffu - min(index, 0xffffu));
     atomicMax(reinterpret_cast<unsigned int*>(result), key);

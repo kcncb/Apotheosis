@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pidf_mode1_exact.hpp"
+#include "pidf_mode2_exact.hpp"
 
 #include <cstdint>
 
@@ -27,9 +28,11 @@ struct PidfAxisPolicyDecision {
 PidfAxisPolicyDecision evaluate_pidf_axis_policy(
     PidfAxisPolicyInput input) noexcept;
 
-// sub_1400517E0 state mutation.  Blocking an axis also clears that axis's
-// fractional residual before the PIDF update.
+// sub_1400517E0 state mutation for each concrete object.  Blocking an axis
+// also clears that axis's fractional residual before the PIDF update.
 void apply_pidf_axis_policy(PidfMode1State& state,
+                            const PidfAxisPolicyDecision& decision) noexcept;
+void apply_pidf_axis_policy(PidfMode2State& state,
                             const PidfAxisPolicyDecision& decision) noexcept;
 
 } // namespace cvm::recovered
