@@ -50,6 +50,13 @@ public:
     void setMakcuNewBaudrate(int v);
     QString makcuNewPort() const;
     void setMakcuNewPort(const QString& v);
+    // KMBox Net (以太网 UDP, 2026-09-15 恢复)
+    QString kmboxNetIp() const;
+    void setKmboxNetIp(const QString& v);
+    QString kmboxNetPort() const;
+    void setKmboxNetPort(const QString& v);
+    QString kmboxNetUuid() const;
+    void setKmboxNetUuid(const QString& v);
     // AI
     QString backend() const;
     void setBackend(const QString& v);

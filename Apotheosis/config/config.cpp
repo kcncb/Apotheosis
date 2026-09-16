@@ -309,8 +309,14 @@ bool Config::loadConfig(const std::string& filename)
     circle_mask = true;
 
     // ---------- Hardware ----------
+    // ★ 三档由 mouse/mouse_driver.h 的工厂按名字字符串分派(形状同 AimMagic
+    //   的 FUN_140040ff0)。这里做一次白名单校验: **不认识的档位回落到 MAKCU**,
+    //   而不是原样带下去 —— 带下去的话工厂会拒绝打开、用户看到的是"鼠标不动",
+    //   而真正的原因(名字拼错了)要翻日志才知道。
+    //   注: 这一项不是"槽位语义变更", 老配置里的 MAKCU/MAKCUNEW 取值含义没变,
+    //   所以 **pidf_mapping_version 不推进**。
     input_method = get_string("", "input_method", "MAKCU");
-    if (input_method != "MAKCU" && input_method != "MAKCUNEW")
+    if (input_method != "MAKCU" && input_method != "MAKCUNEW" && input_method != "KMBOXNET")
         input_method = "MAKCU";
     const auto finiteSetting = [&](const char* key, double fallback, double low, double high) {
         const double value = get_double("", key, fallback);
@@ -326,6 +332,13 @@ bool Config::loadConfig(const std::string& filename)
         static_cast<int>(get_long("", "makcu_new_baudrate", 6000000)),
         1200, 6000000);
     makcu_new_port = get_string("", "makcu_new_port", "COM0");
+    // ── KMBox Net (以太网 UDP) ──
+    // 三个值都从盒子屏幕上抄。**不做格式校验** —— 格式对不对只有连一次才知道,
+    // 而连不上的具体理由由 mouse_driver 的 lastError() 给出(带 IP/端口/UUID),
+    // 比在这里猜"IP 长得像不像"有用得多。
+    kmbox_net_ip = get_string("", "kmbox_net_ip", "192.168.2.88");
+    kmbox_net_port = get_string("", "kmbox_net_port", "6234");
+    kmbox_net_uuid = get_string("", "kmbox_net_uuid", "12345");
     // ---------- AI ----------
     backend = get_string("", "backend", "TRT");
     dml_device_id = get_long("", "dml_device_id", 0);
@@ -545,6 +558,32 @@ bool Config::loadConfig(const std::string& filename)
             // (结构体默认是 -1 哨兵, 见 config.h)。
             hk.pidf_inflight_x = static_cast<float>(get_double(sec, "pidf_inflight_x", hk.pidf_inflight_x));
             hk.pidf_inflight_y = static_cast<float>(get_double(sec, "pidf_inflight_y", hk.pidf_inflight_y));
+            // PID-EventSync 档 (2026-09-15 新增, 见 config.h 的长注释)。
+            // ★ 全部是【新增键】, 老配置里没有它们 → 一律取结构体默认。
+            //   默认 aim_mode = 0 = 现役纯反馈档, 所以老配置读进来行为逐位不变 ——
+            //   这正是"新增键不需要推进 pidf_mapping_version"的原因: 版本号是
+            //   【旧槽位语义变更】的迁移机制, 这里没有任何旧槽位被改语义。
+            hk.aim_mode = static_cast<int>(get_long(sec, "aim_mode", hk.aim_mode));
+            hk.esync_min_hits = static_cast<int>(get_long(
+                sec, "esync_min_hits", hk.esync_min_hits));
+            hk.esync_max_age = static_cast<int>(get_long(
+                sec, "esync_max_age", hk.esync_max_age));
+            hk.esync_assoc_radius_px = static_cast<int>(get_long(
+                sec, "esync_assoc_radius_px", hk.esync_assoc_radius_px));
+            hk.esync_assoc_iou = static_cast<float>(get_double(
+                sec, "esync_assoc_iou", hk.esync_assoc_iou));
+            hk.esync_vel_window_ms = static_cast<int>(get_long(
+                sec, "esync_vel_window_ms", hk.esync_vel_window_ms));
+            hk.esync_counts_per_pixel_x = static_cast<float>(get_double(
+                sec, "esync_counts_per_pixel_x", hk.esync_counts_per_pixel_x));
+            hk.esync_counts_per_pixel_y = static_cast<float>(get_double(
+                sec, "esync_counts_per_pixel_y", hk.esync_counts_per_pixel_y));
+            hk.esync_inflight_window_ms = static_cast<int>(get_long(
+                sec, "esync_inflight_window_ms", hk.esync_inflight_window_ms));
+            hk.esync_inflight_beta = static_cast<float>(get_double(
+                sec, "esync_inflight_beta", hk.esync_inflight_beta));
+            hk.esync_self_motion_gain = static_cast<float>(get_double(
+                sec, "esync_self_motion_gain", hk.esync_self_motion_gain));
             // ★★ 迁移 (2026-09-14): pidf_mapping_version < 5 的配置里, pidf_inflight_x/y
             //    存的是【旧语义】(像素/拍的补偿系数, 或早期"停用"阶段留下的占位 0)。
             //    这两种老值放到新语义(无量纲 beta)下都是错的:
@@ -883,6 +922,45 @@ bool Config::loadConfig(const std::string& filename)
         if (hk.aim_scale_base_h > 0.0f && hk.aim_scale_base_h < 4.0f)
             hk.aim_scale_base_h = 0.0f;
 
+        // ── PID-EventSync 档 (2026-09-15 新增) ──────────────────────────────
+        // ★ 只认 0/1: 未知值一律回落到 0(现役档)。这是【安全方向】的回落 ——
+        //   档位读错时应当退化成"一行都不生效"的老行为, 而不是启一条没测过的链。
+        hk.aim_mode = (hk.aim_mode == 1) ? 1 : 0;
+        if (!std::isfinite(hk.esync_assoc_iou))
+            hk.esync_assoc_iou = 0.20f;
+        // min_hits: 1..30。1 = 来一帧就确认(AM 有 min_hits=3, 但本项目上游 selector
+        //   已经做过一轮选靶, 不需要在这里再重复"确认"这道闸; 大了只会拖慢换锁)。
+        hk.esync_min_hits = std::clamp(hk.esync_min_hits, 1, 30);
+        // max_age: 1..60 帧。跟踪器内部还会做 max(min_hits+1, max_age)(AM 同款保护),
+        //   所以这里只夹物理上说得通的域。
+        hk.esync_max_age = std::clamp(hk.esync_max_age, 1, 60);
+        // 关联门限: 5..500px。太小 = 正常横穿也会被当成"新目标"。
+        hk.esync_assoc_radius_px = std::clamp(hk.esync_assoc_radius_px, 5, 500);
+        // IoU 阈值: 0..1。0 = 只靠最近邻(IoU 这道闸关掉)。
+        hk.esync_assoc_iou = std::clamp(hk.esync_assoc_iou, 0.0f, 1.0f);
+        // 速度采样窗: 0..1000ms。0 = 逐帧重算(保留这个取值是为了能对照实验;
+        //   8.3ms 拍间隔下逐帧差分噪声有几百 px/s, 生产不该用 0)。
+        hk.esync_vel_window_ms = std::clamp(hk.esync_vel_window_ms, 0, 1000);
+
+        // ⑤ k̂: 非法(非有限/非正)一律回落到 1.0(不做换算), 并夹到 AM 的域 [0.001, 10000]。
+        if (!std::isfinite(hk.esync_counts_per_pixel_x) || hk.esync_counts_per_pixel_x <= 0.0f)
+            hk.esync_counts_per_pixel_x = 1.0f;
+        hk.esync_counts_per_pixel_x = std::clamp(hk.esync_counts_per_pixel_x, 0.001f, 10000.0f);
+        if (!std::isfinite(hk.esync_counts_per_pixel_y) || hk.esync_counts_per_pixel_y <= 0.0f)
+            hk.esync_counts_per_pixel_y = 1.0f;
+        hk.esync_counts_per_pixel_y = std::clamp(hk.esync_counts_per_pixel_y, 0.001f, 10000.0f);
+        // ⑤ 在途窗口: 上限是真实链路死区 46ms —— 超过它会把早已生效的指令再扣一次,
+        //   正反馈发散(CLAUDE.md 在途补偿要点①)。0 = 关闭。
+        hk.esync_inflight_window_ms = std::clamp(hk.esync_inflight_window_ms, 0, 46);
+        // ⑤ 在途增益: 非有限回落 1.0; 0..4 是"比 AM 更激进"的可用区间。
+        if (!std::isfinite(hk.esync_inflight_beta) || hk.esync_inflight_beta < 0.0f)
+            hk.esync_inflight_beta = 1.0f;
+        hk.esync_inflight_beta = std::clamp(hk.esync_inflight_beta, 0.0f, 4.0f);
+        // ⑥ 自运动增益: 非有限回落 0(关闭); 幅度夹在 ±1.0(与 aim_tracker.h 一致)。
+        if (!std::isfinite(hk.esync_self_motion_gain))
+            hk.esync_self_motion_gain = 0.0f;
+        hk.esync_self_motion_gain = std::clamp(hk.esync_self_motion_gain, -1.0f, 1.0f);
+
         // 0 直线 / 1 贝塞尔 / 2 自定义 / 3 WindMouse。★ 上限必须跟着枚举一起改,
         // 否则填了 3 的方案会在加载时被静默降级回"自定义手绘"。
         hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 3);
@@ -996,12 +1074,16 @@ bool Config::saveConfig(const std::string& filename)
         << "circle_mask = " << to_bool_str(circle_mask) << "\n\n";
 
     file << "# Hardware / input device\n"
-        << "# MAKCU | MAKCUNEW\n"
+        << "# MAKCU | MAKCUNEW | KMBOXNET  (三档共用 mouse/mouse_driver.h 的驱动抽象)\n"
         << "input_method = " << input_method << "\n"
         << "makcu_baudrate = " << makcu_baudrate << "\n"
         << "makcu_port = " << makcu_port << "\n"
         << "makcu_new_baudrate = " << makcu_new_baudrate << "\n"
-        << "makcu_new_port = " << makcu_new_port << "\n\n";
+        << "makcu_new_port = " << makcu_new_port << "\n"
+        << "# KMBox Net: 三个值照抄盒子屏幕上显示的 ip / port / uuid\n"
+        << "kmbox_net_ip = " << kmbox_net_ip << "\n"
+        << "kmbox_net_port = " << kmbox_net_port << "\n"
+        << "kmbox_net_uuid = " << kmbox_net_uuid << "\n\n";
 
     file << "# AI\n"
         << "backend = " << backend << "\n"
@@ -1120,6 +1202,18 @@ bool Config::saveConfig(const std::string& filename)
              << "pidf_inflight_x = " << hk.pidf_inflight_x << "\n"
              << "pidf_inflight_y = " << hk.pidf_inflight_y << "\n"
              << "pidf_inflight_window_ms = " << hk.pidf_inflight_window_ms << "\n"
+             // PID-EventSync 档 (2026-09-15 新增)。默认 0 = 现役纯反馈档。
+             << "aim_mode = " << hk.aim_mode << "\n"
+             << "esync_min_hits = " << hk.esync_min_hits << "\n"
+             << "esync_max_age = " << hk.esync_max_age << "\n"
+             << "esync_assoc_radius_px = " << hk.esync_assoc_radius_px << "\n"
+             << "esync_assoc_iou = " << hk.esync_assoc_iou << "\n"
+             << "esync_vel_window_ms = " << hk.esync_vel_window_ms << "\n"
+             << "esync_counts_per_pixel_x = " << hk.esync_counts_per_pixel_x << "\n"
+             << "esync_counts_per_pixel_y = " << hk.esync_counts_per_pixel_y << "\n"
+             << "esync_inflight_window_ms = " << hk.esync_inflight_window_ms << "\n"
+             << "esync_inflight_beta = " << hk.esync_inflight_beta << "\n"
+             << "esync_self_motion_gain = " << hk.esync_self_motion_gain << "\n"
              // 尺度增益调度 (2026-09-14 新增; 同日改为"单基准"设计)
              << "aim_scale_enabled = " << hk.aim_scale_enabled << "\n"
              << "aim_scale_max = " << hk.aim_scale_max << "\n"

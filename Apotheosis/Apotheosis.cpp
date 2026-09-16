@@ -23,6 +23,9 @@
 #include "capture.h"
 #include "capture/auto_capture.h"
 #include "mouse.h"
+#include "mouse/Makcu.h"
+#include "mouse/MakcuNew.h"
+#include "mouse/kmboxNetConnection.h"
 #include "Apotheosis.h"
 #include "keyboard_listener.h"
 #include "app_log.h"
@@ -69,6 +72,7 @@ Config config;
 
 MakcuConnection* makcuSerial = nullptr;
 MakcuNewConnection* makcuNewSerial = nullptr;
+KmboxNetConnection* kmboxNetSerial = nullptr;
 
 std::atomic<bool> detection_resolution_changed(false);
 std::atomic<bool> capture_method_changed(false);
@@ -128,6 +132,7 @@ void createInputDevices()
     const auto cfg = runtime_config::read();
     std::unique_ptr<MakcuConnection> oldMakcu;
     std::unique_ptr<MakcuNewConnection> oldNew;
+    std::unique_ptr<KmboxNetConnection> oldKmboxNet;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         if (globalMouseThread)
@@ -136,18 +141,26 @@ void createInputDevices()
             globalMouseThread->releaseLeftButton();
             globalMouseThread->setMakcuConnection(nullptr);
             globalMouseThread->setMakcuNewConnection(nullptr);
+            globalMouseThread->setKmboxNetConnection(nullptr);
         }
         oldMakcu.reset(makcuSerial);
         oldNew.reset(makcuNewSerial);
+        oldKmboxNet.reset(kmboxNetSerial);
         makcuSerial = nullptr;
         makcuNewSerial = nullptr;
+        kmboxNetSerial = nullptr;
     }
     // Detached from all readers; closing outside the lock keeps status polls
     // responsive and releases the COM port before its replacement is opened.
     oldMakcu.reset();
     oldNew.reset();
+    // ★ KMBox Net 的析构会向盒子发 unmaskAll() —— 必须让它在被换成别的后端
+    //   之前真的跑完, 否则盒子那边会留着"物理键被屏蔽"的状态, 用户退出程序后
+    //   鼠标键盘还是被挡住的。
+    oldKmboxNet.reset();
     std::unique_ptr<MakcuConnection> nextMakcu;
     std::unique_ptr<MakcuNewConnection> nextNew;
+    std::unique_ptr<KmboxNetConnection> nextKmboxNet;
     if (cfg->input_method == "MAKCU")
     {
         nextMakcu = std::make_unique<MakcuConnection>(cfg->makcu_port, cfg->makcu_baudrate);
@@ -158,14 +171,22 @@ void createInputDevices()
         nextNew = std::make_unique<MakcuNewConnection>(cfg->makcu_new_port, cfg->makcu_new_baudrate);
         if (!nextNew->isOpen()) nextNew.reset();
     }
+    else if (cfg->input_method == "KMBOXNET")
+    {
+        nextKmboxNet = std::make_unique<KmboxNetConnection>(
+            cfg->kmbox_net_ip, cfg->kmbox_net_port, cfg->kmbox_net_uuid);
+        if (!nextKmboxNet->isOpen()) nextKmboxNet.reset();
+    }
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
         makcuSerial = nextMakcu.release();
         makcuNewSerial = nextNew.release();
+        kmboxNetSerial = nextKmboxNet.release();
         if (globalMouseThread)
         {
             globalMouseThread->setMakcuConnection(makcuSerial);
             globalMouseThread->setMakcuNewConnection(makcuNewSerial);
+            globalMouseThread->setKmboxNetConnection(kmboxNetSerial);
         }
     }
 }
@@ -177,6 +198,7 @@ void assignInputDevices()
     {
         globalMouseThread->setMakcuConnection(makcuSerial);
         globalMouseThread->setMakcuNewConnection(makcuNewSerial);
+        globalMouseThread->setKmboxNetConnection(kmboxNetSerial);
     }
 }
 
@@ -553,10 +575,14 @@ int main(int argc, char* argv[])
         mouseThread.releaseRightButton();
         mouseThread.setMakcuConnection(nullptr);
         mouseThread.setMakcuNewConnection(nullptr);
+        mouseThread.setKmboxNetConnection(nullptr);
         delete makcuSerial;
         makcuSerial = nullptr;
         delete makcuNewSerial;
         makcuNewSerial = nullptr;
+        // ★ 析构会 unmaskAll(), 把 KMBox Net 那边的物理键屏蔽状态清掉。
+        delete kmboxNetSerial;
+        kmboxNetSerial = nullptr;
 
         timeEndPeriod(1);
         return result;

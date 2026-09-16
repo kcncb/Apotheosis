@@ -146,7 +146,7 @@ Defaults below are first-run defaults from `config.cpp`.
 | `snapBoostFactor` | float | `1.15` | UI range `0.01..4.0` |
 | `easynorecoil` | bool | `false` | Recoil compensation master switch |
 | `easynorecoilstrength` | float | `0.0` | UI range `0.1..500.0` when enabled |
-| `input_method` | string | `MAKCU` | `MAKCU`, `MAKCUNEW` |
+| `input_method` | string | `MAKCU` | `MAKCU`, `MAKCUNEW`, `KMBOXNET`（三档共用 `mouse_driver.h` 的驱动抽象，形状仿 AimMagic 的 `FUN_140040ff0`） |
 
 ### 4.4 Wind Mouse
 
@@ -171,6 +171,16 @@ Defaults below are first-run defaults from `config.cpp`.
 |---|---|---:|---|
 | `makcu_new_baudrate` | int | `6000000` | 固件上限 6 Mbps。固件上电固定 115200；!= 115200 时连接期发送 `0x42 SET_BAUD`（失败再用 `DE AD` 转义帧）并重连，协商失败自动退回 115200 |
 | `makcu_new_port` | string | `COM0` | CH343 serial port |
+
+### 4.7 KMBOXNET（2026-09-15 恢复）
+
+以太网 UDP 协议。三个值照抄盒子屏幕上显示的内容：
+
+| Key | Type | Default | Allowed / Notes |
+|---|---|---:|---|
+| `kmbox_net_ip` | string | `192.168.2.88` | 盒子屏幕显示的 IP。注意**不是**盒子自动 DHCP 的，是固件内写死的 |
+| `kmbox_net_port` | string | `6234` | 盒子屏幕显示的端口号 |
+| `kmbox_net_uuid` | string | `12345` | 盒子屏幕显示的 UUID / MAC 标识（不是标准 UUID 格式） |
 
 ### 4.9 Mouse Shooting
 
@@ -601,6 +611,35 @@ PID 的 P 项放大的是这个噪声，不是真实误差。
 | **在途增益 X/Y** | `pidf_inflight_x/y` | **把「已发出还没生效」的自身位移从误差里减掉**，解开 Kp 的死结 | 加过头会“发木”：接近目标时提前收手、落不到位 |
 | **在途时间窗** | `pidf_inflight_window_ms` | 多久之内发出的指令算“还没生效” | 太短压不住晃；太长把早已生效的也算进去，发木 |
 
+### 9.5 瞄准档位（PID-EventSync 档，2026-09-15 新增）
+
+完整说明见 **`docs/eventsync-mode.md`**。要点：
+
+| 界面名 | 配置键 | 默认 | 作用与调过头的后果 |
+| --- | --- | --- | --- |
+| 档位 | `aim_mode` | 0 | 0 = 现役纯反馈档；1 = EventSync（跟踪器 + 每轨预测）。**默认 0，老配置行为逐位不变** |
+| 确认命中帧数 | `esync_min_hits` | 3 | 连续命中多少帧算“确认轨迹”。★ **不会拖慢锁定**，只影响“锁定目标死了能否自动转移” |
+| 滑行帧数上限 | `esync_max_age` | 5 | 漏帧多少帧后删除轨迹（= 滑行窗口）。调大更扛遮挡，但目标真走掉后会多追几拍残影 |
+| 关联距离门限 | `esync_assoc_radius_px` | 80 | 框心距离超过它判为新目标。太小 ⇒ 高速横穿时身份乱跳、积分反复清零 |
+| 关联重叠门限 | `esync_assoc_iou` | 0.20 | 0 = 只靠最近邻。这是身份稳定的主要来源 |
+| 速度采样窗 | `esync_vel_window_ms` | 100 | 速度 = 窗内位移 ÷ 窗时间。8.3ms 逐帧差分噪声是几百 px/s，太短 ⇒ 预测抖；太长 ⇒ 急停/换向时提前量收不回来 |
+| 每计数像素 X/Y | `esync_counts_per_pixel_x/y` | 1.0 | ⑤ **你自己填的常量**（AimMagic 的 `kalman_counts_per_pixel`，它也是让用户填的）。1.0 = 不换算。填错只影响在途补偿强度，不会让准星飞掉 |
+| 在途换算窗 | `esync_inflight_window_ms` | 0 | ⑤ **0 = 整条链关闭**。打开等于把在途补偿从「计数域」换成 AimMagic 的「像素域」做法。★ 上限硬夹 **46ms**（= 链路死区），超过会把已生效指令再扣一遍 ⇒ 正反馈发散 |
+| 在途换算强度 | `esync_inflight_beta` | 1.0 | ⑤ AimMagic 在这一档没有额外增益（= 1.0）。夹 [0, 4] |
+| 自运动补偿 | `esync_self_motion_gain` | 0.0 | ⑥ 提前量正比于**你自己甩枪的速度**。★ **默认关**；这类项在本项目被删过一次（标定增益进反馈回路 ⇒ 每拍反向极限环）。夹 ±1.0 |
+
+★★ **打开「在途换算窗」时会自动把 `pidf_inflight_beta` 置 0**（代码强制）。
+两者是同一个 Smith 预测器的两种做法（一个在像素域、一个在计数域），
+同时开 = 同一批在途指令被扣两次 = 过补偿 = **正反馈发散**。
+
+★ 预测强度、尺寸区间、提前量上限、速度噪声门与现役档**共用** `pidf_predict_*` ——
+换档不需要重填一遍，两个档的预测强度也因此可以直接对照。
+
+★★ 关于 ⑤ 的 k̂：**它和 `pid_calib`（甩枪档的自动标定）不是一回事。**
+后者是"程序发一批已知计数、读光标、反算"，依赖单机架构，在本项目双机架构下
+**不成立**（`docs/aimmagic-comparison.md` §6.7）。前者是用户在设置里手填的常量，
+双机架构下**同样可以填**（你在自己游戏里知道灵敏度）。详见 `docs/eventsync-mode.md` §4。
+
 另外 `p_full_scale_px`（P 项连续饱和，默认 100px）
 是代替死区的防冲机制：`|e| <= 阈值` 原样透传
 （满增益），超过则按 `阈值/|e|` 衰减。
@@ -696,16 +735,16 @@ PID 的 P 项放大的是这个噪声，不是真实误差。
 （按住 W 在走是最常见的情形）。斜向（W+A）只会抵消掉前后轴那一半，横向仍在 ——
 这一点不假装能停干净，因为 `KEY_TAP` 一次只带一个键码。
 
-### 10.2 只有 MAKCUNEW 能用
+### 10.2 哪些后端能用自动急停（2026-09-15 扩充）
 
-键盘注入是 `0x22 KEY_TAP`（`uint8 mod, uint8 key, uint16 hold_ms`，`key` 用标准
-HID usage id，与 `0x21 KEY_MASK` 的 `keys[6]` 同一码表：W=0x1A / A=0x04 /
-S=0x16 / D=0x07）。老 MAKCU 只有鼠标报文，**没有键盘通道**，所以：
+自动急停要求后端有**键盘注入通道**（`kCapKeyboard`）。通过 `mouse/mouse_driver.h` 查询能力位，
+不再硬编码类型：
 
-- 运行时判 `input_method == "MAKCUNEW"`，不是就整项跳过；
-- 配了却用不了时，全链路日志会写一行 `SecTrigger ... auto_stop=unsupported,input=MAKCU`，
-  免得用户以为它坏了；
-- `MouseThread::tapKey()` 在非 MAKCUNEW 下返回 `false`，调用方不会静默成功。
+- **MAKCUNEW**：原生支持（`0x22 KEY_TAP`，固件自清，不会卡键）。
+- **KMBOXNET**：支持（走 `kmNet_keydown` + `Sleep` + `kmNet_keyup`，HID usage 自动转 Windows Virtual-Key）。
+- **老 MAKCU**：**不支持**（官方库只有鼠标报文，`kCapKeyboard` 为 0）。
+  配了却用不了时日志会写一行 `auto_stop=unsupported,input=MAKCU`，
+  `MouseThread::tapKey()` 返回 `false`，功能安全退化。
 
 **为什么用 KEY_TAP 而不是 KEY_MASK**：`KEY_TAP` 由固件定时弹起，是**自清**的 ——
 上位机崩了、会话停了，键也会在 ms 级被放开。`KEY_MASK` 是绝对态，一旦漏发清除帧

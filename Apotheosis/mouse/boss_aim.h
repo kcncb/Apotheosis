@@ -21,6 +21,7 @@
 #include "aim_pid.h"
 #include "aim_predict.h"
 #include "aim_scale.h"
+#include "aim_tracker.h"
 #include "anchor_filter.h"
 #include "ava_exact/target_selector_top_exact.hpp"
 #include "ava_exact/target_to_aimpoint_exact.hpp"
@@ -132,6 +133,18 @@ struct EngineInput
 
     // 【2026-09-13 删除】px_per_count_x/y —— 控制器不再消费 k̂(前馈已整条移除)。
     // 平滑由 boss_aim.cpp 里的 AnchorFilter 承担, 不需要这个量。
+    // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──────
+    // aim_mode: 0 = 现役纯反馈档(默认, 行为与本档存在之前逐位相同);
+    //           1 = EventSync 档(跟踪器 + 每轨预测 + 事件驱动消费)。
+    // ★ mode 1 的差异面只有三处, 全部在 boss_aim.cpp 里分支标注:
+    //   ① 身份/换目标判据走【跟踪器】(trackId 粘滞), 不再用 selector 的 generation;
+    //   ② 提前量走【每轨预测状态机】(AimTracker::predictionLead), 不走 predict_;
+    //   ③ 丢目标不清控制器状态(等跟踪器 max_age 到期), 避免 AM 那种"状态跨帧持有"
+    //      被本轮的重锁打断。
+    //   在途补偿不在这三者之列 —— 它仍然由 AimPid 在计数域完成(见 aim_pid.h),
+    //   AM 那条"发送日志 ÷ counts_per_pixel 换回像素"的路径需要 k̂, 不移植(§6.7)。
+    int aim_mode = 0;
+    AimTrackerParams esync{};
 };
 
 struct EngineOutput
@@ -200,6 +213,24 @@ struct EngineOutput
     double aim_scale = 1.0;          // 本拍使用的尺度(平滑后)
     double aim_scale_height_px = 0.0;// 本拍用于算尺度的框高(平滑后, 像素)
     bool   aim_scale_active = false; // false = 尺度关闭, 行为与没有它逐位相同
+
+    // ── EventSync 档遥测 (2026-09-15, 只在 aim_mode == 1 时有意义) ──────────
+    // 排查"EventSync 档为什么和现役档手感不同"先看这几个量。
+    bool   esync_active = false;       // 本拍走的是 EventSync 分支
+    int    esync_track_hits = 0;       // 跟踪器锁定轨迹的连续命中数
+    int    esync_track_age = 0;        // 锁定轨迹的连续漏帧数(0 = 本帧有观测)
+    bool   esync_track_confirmed = false;
+    double esync_vel_x = 0.0;          // 跟踪器给出的框心速度(像素/秒)
+    double esync_vel_y = 0.0;
+    bool   esync_vel_valid = false;
+    double esync_pred_k_x = 0.0;       // 预测系数 FSM 当前值 [0, 1]
+    double esync_pred_k_y = 0.0;
+    int    esync_track_id = -1;        // 跟踪器身份(与 current_track_id 不同源)
+    int    esync_track_count = 0;      // 本拍存活轨迹数
+    // ⑤ 在途自身位移补偿(AM 的发送环 ÷ k̂), 单位【像素】, 已从误差里扣掉。
+    //   ★ k̂ = 1.0(默认)时它 = "计数当像素"; 窗口 0(默认)时恒为 0 = 不参与。
+    double esync_inflight_x = 0.0;
+    double esync_inflight_y = 0.0;
 };
 
 class AimEngine
@@ -210,6 +241,12 @@ public:
 
     void reset();
     EngineOutput tick(const EngineInput& in, double dt);
+
+    // ★ ⑤ EventSync 档 (aim_mode == 1) 专用: 把本拍【实际发出去】的整数计数登进
+    //   在途账本(AM 的发送环), 下一拍的误差合成会按 k̂ 换成像素扣掉。
+    //   调用点在 mouse_thread_loop.cpp 的 sendRawMove 之后(登的必须是真发出去的值)。
+    //   非 EventSync 档调用它是安全的空操作(账本不属于那条路径)。
+    void noteAimSend(int dx, int dy);
     int lockedTrackId() const { return current_id_; }
     const std::vector<Track>& tracks() const { return tracks_; }
 
@@ -259,6 +296,13 @@ private:
     // 上一拍的瞄点, 用来判断"身份变化"到底是真换目标还是 tracker 把同一个目标重锁一次。
     cv::Point2f last_anchor_{};
     bool has_last_anchor_ = false;
+
+    // ── PID-EventSync 档的状态 (2026-09-15 新增) ─────────────────────────────
+    // 跟踪器跨帧持有(不因单帧漏检清空); 身份来自它, 速度与每轨预测状态也来自它。
+    AimTracker esync_tracker_;
+    int esync_locked_track_ = -1;   // 上一拍的跟踪器身份(判"换目标")
+    bool esync_configured_ = false; // 跟踪器参数是否已按当前配置装过
+    AimTrackerParams esync_params_{};  // 上一拍装进去的参数(变了才重装)
 };
 
 } // namespace boss

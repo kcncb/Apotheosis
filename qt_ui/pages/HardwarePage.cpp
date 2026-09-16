@@ -22,6 +22,10 @@
 
 #include <mutex>
 
+#include "mouse/Makcu.h"
+#include "mouse/MakcuNew.h"
+#include "mouse/kmboxNetConnection.h"
+
 namespace {
 
 QString zh(const char* text)
@@ -29,8 +33,8 @@ QString zh(const char* text)
     return QString::fromUtf8(text);
 }
 
-constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW"};
-constexpr int kInputMethodCount = 2;
+constexpr const char* kInputMethodIds[] = {"MAKCU", "MAKCUNEW", "KMBOXNET"};
+constexpr int kInputMethodCount = 3;
 
 } // namespace
 
@@ -53,7 +57,12 @@ HardwarePage::HardwarePage(QWidget* parent)
 
     auto* inputCard = new CardWidget(zh(u8"输入方式"), QStringLiteral("plug"));
     m_inputMethodCombo = new QComboBox;
-    m_inputMethodCombo->addItems({QStringLiteral("MAKCU"), QStringLiteral("MAKCUNEW")});
+    // 三档走同一套驱动抽象 (mouse/mouse_driver.h, 形状移植自 AimMagic 的 FUN_140040ff0)
+    m_inputMethodCombo->addItems({
+        QStringLiteral("MAKCU"),
+        QStringLiteral("MAKCUNEW"),
+        QStringLiteral("KMBOXNET")
+    });
     inputCard->contentLayout()->addWidget(
         FormKit::fieldRow(zh(u8"方式"), m_inputMethodCombo));
     layout->addWidget(inputCard);
@@ -103,6 +112,20 @@ HardwarePage::HardwarePage(QWidget* parent)
         m_deviceStack->addWidget(page);
     }
 
+    {
+        auto* page = new QWidget;
+        auto* panel = new QVBoxLayout(page);
+        panel->setContentsMargins(0, 0, 0, 0);
+        panel->setSpacing(10);
+        m_kmboxNetIp = new QLineEdit;
+        panel->addWidget(FormKit::fieldRow(zh(u8"盒子 IP"), m_kmboxNetIp));
+        m_kmboxNetPort = new QLineEdit;
+        panel->addWidget(FormKit::fieldRow(zh(u8"端口"), m_kmboxNetPort));
+        m_kmboxNetUuid = new QLineEdit;
+        panel->addWidget(FormKit::fieldRow(zh(u8"UUID / MAC"), m_kmboxNetUuid));
+        m_deviceStack->addWidget(page);
+    }
+
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
@@ -137,6 +160,15 @@ HardwarePage::HardwarePage(QWidget* parent)
     connect(m_makcuNewBaud, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
         ConfigManager::instance().setMakcuNewBaudrate(value);
     });
+    connect(m_kmboxNetIp, &QLineEdit::textChanged, this, [](const QString& value) {
+        ConfigManager::instance().setKmboxNetIp(value);
+    });
+    connect(m_kmboxNetPort, &QLineEdit::textChanged, this, [](const QString& value) {
+        ConfigManager::instance().setKmboxNetPort(value);
+    });
+    connect(m_kmboxNetUuid, &QLineEdit::textChanged, this, [](const QString& value) {
+        ConfigManager::instance().setKmboxNetUuid(value);
+    });
     connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectDevice);
 
     // 切换全局配置方案后, 设备类型/串口必须跟着新方案走。
@@ -155,7 +187,11 @@ HardwarePage::HardwarePage(QWidget* parent)
 void HardwarePage::loadFieldsFromConfig()
 {
     auto& cm = ConfigManager::instance();
-    const int index = cm.inputMethod() == QStringLiteral("MAKCUNEW") ? 1 : 0;
+    const QString method = cm.inputMethod();
+    int index = 0;
+    if (method == QStringLiteral("MAKCUNEW")) index = 1;
+    else if (method == QStringLiteral("KMBOXNET")) index = 2;
+
     m_inputMethodCombo->blockSignals(true);
     m_inputMethodCombo->setCurrentIndex(index);
     m_deviceStack->setCurrentIndex(index);
@@ -165,9 +201,9 @@ void HardwarePage::loadFieldsFromConfig()
     m_makcuBaud->setValue(cm.makcuBaudrate());
     m_makcuNewPort->setText(cm.makcuNewPort());
     m_makcuNewBaud->setValue(cm.makcuNewBaudrate());
-
-    // 【2026-09-13 删除】原来这里还要单独还原 m_captureAgeOffset / m_crosshairSmooth
-    // 两个直接写 config.* 的控件; 两个控件都已删除, 这段跟着删。
+    m_kmboxNetIp->setText(cm.kmboxNetIp());
+    m_kmboxNetPort->setText(cm.kmboxNetPort());
+    m_kmboxNetUuid->setText(cm.kmboxNetUuid());
 }
 
 void HardwarePage::onInputMethodChanged(int index)
@@ -188,6 +224,9 @@ void HardwarePage::reconnectDevice()
         config.makcu_baudrate = cm.makcuBaudrate();
         config.makcu_new_port = cm.makcuNewPort().toStdString();
         config.makcu_new_baudrate = cm.makcuNewBaudrate();
+        config.kmbox_net_ip = cm.kmboxNetIp().toStdString();
+        config.kmbox_net_port = cm.kmboxNetPort().toStdString();
+        config.kmbox_net_uuid = cm.kmboxNetUuid().toStdString();
     }
 
     runtime_config::publish();
@@ -197,15 +236,40 @@ void HardwarePage::reconnectDevice()
     refreshStatus();
 }
 
+extern MakcuConnection* makcuSerial;
+extern MakcuNewConnection* makcuNewSerial;
+extern KmboxNetConnection* kmboxNetSerial;
+
 void HardwarePage::refreshStatus()
 {
-    const bool useNew = m_inputMethodCombo && m_inputMethodCombo->currentIndex() == 1;
+    const int idx = m_inputMethodCombo ? m_inputMethodCombo->currentIndex() : 0;
     std::lock_guard<std::mutex> deviceLock(inputDeviceMutex);
-    const bool pointerExists = useNew ? makcuNewSerial != nullptr : makcuSerial != nullptr;
-    const bool connected = useNew
-        ? pointerExists && makcuNewSerial->isOpen()
-        : pointerExists && makcuSerial->isOpen();
-    const QString deviceName = useNew ? QStringLiteral("MAKCUNEW") : QStringLiteral("MAKCU");
+
+    bool pointerExists = false;
+    bool connected = false;
+    QString deviceName;
+
+    switch (idx)
+    {
+    case 0:
+        deviceName = QStringLiteral("MAKCU");
+        pointerExists = (makcuSerial != nullptr);
+        connected = pointerExists && makcuSerial->isOpen();
+        break;
+    case 1:
+        deviceName = QStringLiteral("MAKCUNEW");
+        pointerExists = (makcuNewSerial != nullptr);
+        connected = pointerExists && makcuNewSerial->isOpen();
+        break;
+    case 2:
+        deviceName = QStringLiteral("KMBOXNET");
+        pointerExists = (kmboxNetSerial != nullptr);
+        connected = pointerExists && kmboxNetSerial->isOpen();
+        break;
+    default:
+        deviceName = zh(u8"未知");
+        break;
+    }
 
     if (connected) {
         m_statusDot->setStyleSheet("color:#22C55E; font-size:16px;");
@@ -215,7 +279,8 @@ void HardwarePage::refreshStatus()
     } else {
         m_statusDot->setStyleSheet("color:#EF4444; font-size:16px;");
         m_statusText->setText(deviceName + (pointerExists
-            ? zh(u8" — 连接失败") : zh(u8" — 未初始化")));
+            ? zh(u8" — 连接失败(检查IP/端口/UUID或串口号)")
+            : zh(u8" — 未初始化")));
         m_statusText->setStyleSheet("color:#EF4444; font-size:13px;");
         m_connectBtn->setText(zh(u8"连接"));
     }

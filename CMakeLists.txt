@@ -158,6 +158,11 @@ set(APP_SOURCES
     ${AVA_TARGET_SOURCES}
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/MakcuNew.cpp"
+    # KMBox Net (以太网 UDP) 后端 + 驱动抽象层 (2026-09-15 恢复/新增)。
+    # 抽象层的形状移植自 AimMagic 的驱动工厂 FUN_140040ff0 (见 mouse_driver.h)。
+    "${SRC_DIR}/mouse/kmboxNetConnection.cpp"
+    "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
+    "${SRC_DIR}/mouse/mouse_driver.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
     "${SRC_DIR}/overlay/app_log.cpp"
     "${SRC_DIR}/overlay/preview_window.cpp"
@@ -332,6 +337,8 @@ target_link_libraries(ai PRIVATE
     bcrypt
     winhttp
     crypt32
+    # KMBox Net 走 UDP (mouse/kmbox_net/kmboxNet.cpp 用 winsock)。
+    ws2_32
     d3d11
     dxgi
     d2d1

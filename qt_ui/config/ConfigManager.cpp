@@ -185,6 +185,33 @@ void ConfigManager::setMakcuNewPort(const QString& v) {
     emit configChanged();
 }
 
+QString ConfigManager::kmboxNetIp() const {
+    return m_settings->value("Hardware/kmbox_net_ip", "192.168.2.88").toString();
+}
+
+void ConfigManager::setKmboxNetIp(const QString& v) {
+    m_settings->setValue("Hardware/kmbox_net_ip", v);
+    emit configChanged();
+}
+
+QString ConfigManager::kmboxNetPort() const {
+    return m_settings->value("Hardware/kmbox_net_port", "6234").toString();
+}
+
+void ConfigManager::setKmboxNetPort(const QString& v) {
+    m_settings->setValue("Hardware/kmbox_net_port", v);
+    emit configChanged();
+}
+
+QString ConfigManager::kmboxNetUuid() const {
+    return m_settings->value("Hardware/kmbox_net_uuid", "12345").toString();
+}
+
+void ConfigManager::setKmboxNetUuid(const QString& v) {
+    m_settings->setValue("Hardware/kmbox_net_uuid", v);
+    emit configChanged();
+}
+
 // --- AI ---
 
 QString ConfigManager::backend() const {

@@ -4,7 +4,6 @@
 #include <iostream>
 
 #include "Makcu.h"
-#include "Apotheosis.h"
 
 namespace
 {

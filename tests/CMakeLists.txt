@@ -44,8 +44,23 @@ add_logic_test(latest_move_slot_test "${CMAKE_CURRENT_LIST_DIR}/latest_move_slot
 add_logic_test(aim_pid_test "${CMAKE_CURRENT_LIST_DIR}/aim_pid_test.cpp"
     "${APP_SOURCE_ROOT}/mouse/aim_pid.cpp")
 
-# 轨迹整形层 (mouse/aim_path.h) —— 头文件级实现, 不需要额外源文件。
-# 覆盖四种模式的公共不变式(只旋转不缩放) 与 WindMouse 曲线(从 AimMagic
+# PID-EventSync 档的目标跟踪器 (mouse/aim_tracker.h, 2026-09-15 移植自
+# AimMagic 1.0.30 的 FUN_140089ac0 / FUN_14006e470 语义)。头文件级实现。
+# 覆盖: 身份粘滞(抖动/漏帧不许换 id, 真换目标必须换)、生命周期(min_hits 不挡
+# 锁定、max_age 淘汰)、速度采样窗(收敛 + 跨帧持有 + 停住归零)、预测系数 FSM
+# (0.1 爬 / 0.2 落 / 夹在 [0,1])、提前量的硬上限与速度噪声门、关预测时逐位恒等、
+# 确定性与异常输入(dt=0/负、长期空观测、reset)。
+add_logic_test(aim_tracker_test "${CMAKE_CURRENT_LIST_DIR}/aim_tracker_test.cpp")
+
+# PID-EventSync 全链路的闭环回归 (跟踪器 → 每轨预测 → 控制器 → 计数)。
+# 假游戏与 aim_acceptance_test 同源(世界速度 + 44/46ms 延迟 + 框心整数量化)。
+# 覆盖: ①关预测时必须与现役链路【逐位一致】(换档不改行为的硬证据);
+#       ②开预测时提前量有界、闭环不发散; ③丢帧时状态跨帧持有(积分不被清零);
+#       ④身份粘滞(抖动+漏帧下只建一次轨); ⑤在途补偿与档位无关。
+add_logic_test(aim_eventsync_test "${CMAKE_CURRENT_LIST_DIR}/aim_eventsync_test.cpp"
+    "${APP_SOURCE_ROOT}/mouse/aim_pid.cpp")
+
+# 轨迹整形层 (mouse/aim_path.h) —— 头文件级实现, 不需要额外源文件。# 覆盖四种模式的公共不变式(只旋转不缩放) 与 WindMouse 曲线(从 AimMagic
 # enable_mouse_curve) 的门控、确定性、收敛性。
 add_logic_test(aim_path_test "${CMAKE_CURRENT_LIST_DIR}/aim_path_test.cpp")
 
@@ -201,3 +216,39 @@ if(TARGET Qt6::Widgets)
     set_tests_properties(autotune_layout_test PROPERTIES
         ENVIRONMENT "PATH=${QT_BIN_DIR};$ENV{PATH};QT_QPA_PLATFORM=offscreen")
 endif()
+
+# ── 硬件驱动抽象单元测试 (2026-09-15 新增) ──────────────────────────────────
+#
+# 验证 AimMagic 驱动工厂形状的抽象层契约:
+#   三家后端名称 / 能力位中文渲染 / 状态串带理由 / 不认识的名字拒绝 /
+#   各包装器在空指针下的安全降级。
+#
+# ★ 独立可执行文件, 链真实的 mouse_driver.cpp + 依赖库(Makcu / serial / ws2_32),
+#   不需要 Qt 或推理运行时。
+add_executable(mouse_driver_test "${CMAKE_CURRENT_LIST_DIR}/mouse_driver_test.cpp"
+    "${APP_SOURCE_ROOT}/mouse/mouse_driver.cpp"
+    "${APP_SOURCE_ROOT}/mouse/Makcu.cpp"
+    "${APP_SOURCE_ROOT}/mouse/MakcuNew.cpp"
+    "${APP_SOURCE_ROOT}/mouse/kmboxNetConnection.cpp"
+    "${APP_SOURCE_ROOT}/mouse/kmbox_net/kmboxNet.cpp"
+    "${APP_SOURCE_ROOT}/modules/makcu/src/makcu.cpp"
+    "${APP_SOURCE_ROOT}/modules/makcu/src/serialport.cpp"
+    "${APP_SOURCE_ROOT}/modules/serial/src/serial.cc"
+    "${APP_SOURCE_ROOT}/modules/serial/src/impl/win.cc"
+    "${APP_SOURCE_ROOT}/modules/serial/src/impl/list_ports/list_ports_win.cc")
+target_include_directories(mouse_driver_test PRIVATE
+    "${CMAKE_SOURCE_DIR}"
+    "${APP_SOURCE_ROOT}"
+    "${APP_SOURCE_ROOT}/config"
+    "${APP_SOURCE_ROOT}/include"
+    "${APP_SOURCE_ROOT}/mouse"
+    "${APP_SOURCE_ROOT}/modules/makcu/include"
+    "${APP_SOURCE_ROOT}/modules/serial/include")
+target_compile_features(mouse_driver_test PRIVATE cxx_std_20)
+target_compile_definitions(mouse_driver_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(mouse_driver_test PRIVATE ws2_32 setupapi)
+if(MSVC)
+    target_compile_options(mouse_driver_test PRIVATE /utf-8 /Zc:char8_t-)
+endif()
+add_test(NAME mouse_driver_test COMMAND mouse_driver_test)
+set_tests_properties(mouse_driver_test PROPERTIES TIMEOUT 10)

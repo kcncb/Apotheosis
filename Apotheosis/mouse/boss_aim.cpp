@@ -20,6 +20,23 @@ bool sameSlot(const TargetSlot& a, const TargetSlot& b) noexcept
 // kAnchorObserverSmoothMs / VelTauMs / GatePx / InputLagS 全部随观测器一起删除。
 // 见 boss_aim.h 顶部的架构说明。
 
+// EventSync 档: 跟踪器参数是否与上一拍相同(相同就不重新 configure,
+// 免得每拍重建轨迹表、把速度采样窗清空)。
+bool sameTrackerParams(const AimTrackerParams& a, const AimTrackerParams& b) noexcept
+{
+    return a.min_hits == b.min_hits
+        && a.max_age == b.max_age
+        && a.assoc_radius_px == b.assoc_radius_px
+        && a.assoc_iou == b.assoc_iou
+        && a.vel_window_s == b.vel_window_s
+        && a.pred_factor_x == b.pred_factor_x
+        && a.pred_factor_y == b.pred_factor_y
+        && a.pred_min_w == b.pred_min_w
+        && a.pred_max_w == b.pred_max_w
+        && a.pred_max_lead_px == b.pred_max_lead_px
+        && a.pred_vel_floor == b.pred_vel_floor;
+}
+
 } // namespace
 
 AimEngine::AimEngine() = default;
@@ -48,10 +65,23 @@ void AimEngine::reset()
     aim_scale_.reset();
     last_counts_x_ = 0;
     last_counts_y_ = 0;
+    // EventSync 档: 跟踪器与它持有的身份一起清掉(会话停止/重新开始)。
+    esync_tracker_.reset();
+    esync_locked_track_ = -1;
+    esync_configured_ = false;
+    has_last_anchor_ = false;
 }
 
-bool AimEngine::selectorConfigChanged(const EngineInput& in) const
+// ── ⑤ EventSync 档: 在途账本登记 (AM 的发送环) ──────────────────────────────
+//
+// 由 mouse_thread_loop.cpp 在 sendRawMove 【之后】调用 —— 登的必须是真正发出去的
+// 整数计数(不是 PID 输出里的零头, 那部分没发出去, 由 carry 攒到下一拍)。
+void AimEngine::noteAimSend(int dx, int dy)
 {
+    esync_tracker_.noteSend(dx, dy);
+}
+
+bool AimEngine::selectorConfigChanged(const EngineInput& in) const{
     if (!selector_ || selector_slots_.size() != in.target_slots.size()
         || selector_lost_frames_ != in.lost_target_cache_frames
         || selector_normalizer_ != static_cast<int>(std::lround(in.image_size)))
@@ -156,12 +186,54 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         last_generation_ = -1;
         // 丢目标: 控制器历史(积分/微分/零头)与框平滑器状态一起清掉 —— 换了目标,
         // 上一段的位置/速度估计对新目标没有意义, 留着只会让它"预测"到旧方向去。
-        pid_x_.reset();
-        pid_y_.reset();
-        anchor_filter_x_.reset();
-        anchor_filter_y_.reset();
-        last_counts_x_ = 0;
-        last_counts_y_ = 0;
+        //
+        // ★ EventSync 档 (aim_mode == 1) 例外: 这里【不清控制器状态】。
+        //   理由正是 AimMagic §3.4 的"状态跨帧持有": 单帧漏检(遮挡/闪一下)在
+        //   EventSync 里由跟踪器的 max_age 滑行窗口吸收, 而"漏一帧就把积分/零头
+        //   全清掉"会让积分永远攒不起来(实测身份变化占 7% 的帧 → 每秒清 8 次)。
+        //   轨迹真的死掉(max_age 到期)时, 跟踪器会换 id → 走下面的"真换目标"复位,
+        //   所以不存在"拿着旧状态追新目标"的风险。
+        if (in.aim_mode != 1)
+        {
+            pid_x_.reset();
+            pid_y_.reset();
+            anchor_filter_x_.reset();
+            anchor_filter_y_.reset();
+            last_counts_x_ = 0;
+            last_counts_y_ = 0;
+        }
+        else
+        {
+            // 跟踪器仍然要推进一帧(空观测), 让漏帧计数增长、超龄轨迹被淘汰。
+            esync_tracker_.beginFrame(dt);
+            esync_tracker_.endFrame();
+            out.esync_active = true;
+            out.esync_track_id = esync_tracker_.lockedId();
+            out.esync_track_count = static_cast<int>(esync_tracker_.tracks().size());
+            const auto* lt = esync_tracker_.locked();
+            if (lt)
+            {
+                out.esync_track_hits = lt->hits;
+                out.esync_track_age = lt->age;
+                out.esync_track_confirmed = lt->confirmed;
+                out.esync_vel_x = lt->vel_x;
+                out.esync_vel_y = lt->vel_y;
+                out.esync_vel_valid = lt->vel_valid;
+                out.esync_pred_k_x = lt->pred_k_x;
+                out.esync_pred_k_y = lt->pred_k_y;
+            }
+            else
+            {
+                // 轨迹真的死了: 这才复位, 与"身份变化"同一条路径。
+                pid_x_.reset();
+                pid_y_.reset();
+                anchor_filter_x_.reset();
+                anchor_filter_y_.reset();
+                last_counts_x_ = 0;
+                last_counts_y_ = 0;
+                esync_locked_track_ = -1;
+            }
+        }
         return out;
     }
 
@@ -216,6 +288,78 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     out.coasting = selected->target_flag != 0;
     out.motion_suppressed = generation_changed;
 
+    // ── PID-EventSync 档: 跟踪器接管【身份】 (2026-09-15 新增) ────────────────
+    //
+    // 只做一件事: 给这一拍的选中框一个【跨帧稳定的身份】。
+    // 现役档的身份是 selector 的 generation, 它在目标短暂漏检/重锁时会换号
+    // (实机实测身份变化占 7% 的帧), 而每次换号都可能触发复位。跟踪器把同一目标
+    // 的连续观测关联到同一条轨迹上, 于是:
+    //   · 身份只在【真的换了一个目标】时变化 → 复位不再被重锁打断;
+    //   · 速度跨帧持有(采样窗), 且每轨一份预测状态(系数/平滑),
+    //     两个目标交替出现时不会互相串状态。
+    // ★ 这里【不】改瞄点、不改误差、不改 PID —— 那些仍在下面同一条路径里,
+    //   EventSync 与现役档共用同一套控制器(这是"抄架构不抄数字"的落点)。
+    if (in.aim_mode == 1)
+    {
+        // ★ configure() 只在参数真的变了才重建跟踪器状态 —— 与 AnchorObserver
+        //   当年"每拍无条件 reset 导致状态永远攒不满"的教训同源(见本文件下方注释)。
+        //   用户改 min_hits/max_age 时参数变化 → 重新装一次并保留已有轨迹。
+        if (!esync_configured_ || !sameTrackerParams(esync_params_, in.esync))
+        {
+            esync_tracker_.configure(in.esync);
+            esync_params_ = in.esync;
+            esync_configured_ = true;
+        }
+        esync_tracker_.beginFrame(dt);
+        // 只看【本帧真的有观测】的框: coasting(selector 自己在滑行)的框不喂跟踪器,
+        // 否则会把预测出来的假位移当成观测喂进速度采样窗 —— 那是正反馈。
+        if (!out.coasting)
+        {
+            TrackBox tbl{};
+            tbl.x = out.observed_bbox.x;
+            tbl.y = out.observed_bbox.y;
+            tbl.w = out.observed_bbox.width;
+            tbl.h = out.observed_bbox.height;
+            esync_tracker_.offer(tbl, out.observed_bbox.x + out.observed_bbox.width * 0.5,
+                                 out.observed_bbox.y + out.observed_bbox.height * 0.5);
+        }
+        esync_tracker_.endFrame();
+
+        const auto* lt = esync_tracker_.locked();
+        out.esync_active = true;
+        out.esync_track_count = static_cast<int>(esync_tracker_.tracks().size());
+        if (lt)
+        {
+            out.esync_track_id = lt->id;
+            out.esync_track_hits = lt->hits;
+            out.esync_track_age = lt->age;
+            out.esync_track_confirmed = lt->confirmed;
+            out.esync_vel_x = lt->vel_x;
+            out.esync_vel_y = lt->vel_y;
+            out.esync_vel_valid = lt->vel_valid;
+            out.esync_pred_k_x = lt->pred_k_x;
+            out.esync_pred_k_y = lt->pred_k_y;
+            // 身份切换判据: 跟踪器身份变化【就是】换目标。
+            // ★ 与现役档的差别(有意): 现役档要求"身份变了 且 瞄点跳 >=25px"才算真换,
+            //   因为 selector 的 generation 会为同一个目标换号; 跟踪器的 id 有粘滞性,
+            //   它换号只发生在真换了目标(旧轨迹死了)。所以这里不需要 25px 这道闸,
+            //   而且少了它, "小跳变真换目标"就不再漏判(实测 2282 次里 1256 次跳 <25px)。
+            out.motion_suppressed = (esync_locked_track_ != -1 && lt->id != esync_locked_track_);
+            out.current_track_id = lt->id;
+            out.coasting = (lt->age > 0);
+        }
+        else
+        {
+            // 跟踪器手里一条已锁定的轨迹都没有: 本拍没有可瞄身份, 直接交还"丢目标"。
+            // ★ 这里【不清控制器状态】(见上面丢目标分支的说明): 目标可能只是被遮挡了
+            //   一两帧, 下一拍关联回同一条轨迹时积分/零头还在, 不该白清一遍。
+            out.have_target = false;
+            out.current_track_id = -1;
+            return out;
+        }
+        esync_locked_track_ = out.current_track_id;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  新PID: 误差是【检测图像素】的浮点量 输出是【整数鼠标计数】
     // ═══════════════════════════════════════════════════════════════════════
@@ -247,7 +391,11 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     const float anchor_jump = has_last_anchor_
         ? std::hypot(raw_anchor.x - last_anchor_.x, raw_anchor.y - last_anchor_.y)
         : 1e9f;
-    out.target_switched = out.motion_suppressed && anchor_jump >= 25.0f;
+    // ★ EventSync 档的身份来自跟踪器, 它本身带粘滞性 —— 不需要 25px 跳变这道闸。
+    //   现役档必须留着它, 因为 selector 的 generation 会为同一个目标换号。
+    out.target_switched = (in.aim_mode == 1)
+        ? out.motion_suppressed
+        : (out.motion_suppressed && anchor_jump >= 25.0f);
     out.target_anchor_jump_px = anchor_jump;
     last_anchor_ = raw_anchor;
     has_last_anchor_ = true;
@@ -319,6 +467,17 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     // 速度来源: AnchorFilter 的 α-β 速度状态 —— 它本来就是"预测 + 修正"里的预测项
     // 所用的同一个量(AM 也是复用它自己维护的速度低通, 见 aim_predict.h 顶部)。
     // 尺寸权重输入: 当前检测框的宽度。
+    //
+    // ★ EventSync 档 (aim_mode == 1): 这一段的角色由【跟踪器的每轨预测状态机】承担,
+    //   走下面的 else 分支。两者的差别是"状态住在谁身上":
+    //     · 现役档: 一份 predict_ 状态, 全局共享 —— 换目标时把上一个目标的平滑/方向
+    //       阻尼状态带过来, 且速度来自紧跟锚点的 α-β 滤波。
+    //     · EventSync 档: 每条轨迹一份系数/平滑状态, 速度来自轨迹自己的采样窗
+    //       (AM §4.3)。换目标就换到另一条轨迹的状态, 不串味; 而且目标短暂漏检时
+    //       轨迹还在, 系数不会每次重锁都从 0 重爬。
+    //   ★ 两个分支【互斥】, 不会叠加成两倍提前量 —— 这一点有回归钉住
+    //     (tests/aim_eventsync_test.cpp)。
+    if (in.aim_mode != 1)
     {
         predict_.configure(in.predict_factor_x, in.predict_factor_y,
                            in.predict_min_width, in.predict_max_width,
@@ -348,13 +507,90 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         out.anchor.x = static_cast<float>(static_cast<double>(out.anchor.x) + lead.x);
         out.anchor.y = static_cast<float>(static_cast<double>(out.anchor.y) + lead.y);
     }
+    else
+    {
+        // ── EventSync 档: 每轨预测状态机 (AimTracker::predictionLead) ────────
+        // 误差注入点与现役档完全相同(算误差【之前】加到瞄点上), 所以下游的
+        // 尺度/PID/在途补偿一行都不用改。
+        //
+        // ★ 先喂【自身瞄准速度】—— AM 的系数涨落有第二个条件(FUN_14006e470 行 135):
+        //   "自己没在动时系数只落不涨"。不喂它 = 自己永远算没在动 = 预测永远不启动。
+        //   自身速度用锚点滤波器的速度(与现役档预测吃的同一个量, 见 aim_predict.h)。
+        {
+            const double self_vx = anchor_filter_x_.velocity();
+            const double self_vy = anchor_filter_y_.velocity();
+            const bool ok = anchor_filter_x_.velocityValid()
+                         && anchor_filter_y_.velocityValid();
+            esync_tracker_.setAimVelocity(ok ? self_vx : 0.0, ok ? self_vy : 0.0);
+        }
 
-    const double err_px_x = static_cast<double>(out.anchor.x) - in.crosshair_x;
-    const double err_px_y = static_cast<double>(out.anchor.y) - in.crosshair_y;
+        double lead_x = 0.0;
+        double lead_y = 0.0;
+        const bool active = esync_tracker_.predictionLead(lead_x, lead_y);
+
+        // 预测关(系数 0)时 predictionLead 恒返回 (0,0) —— 与"不做预测"逐位相同。
+        last_predict_width_ = static_cast<float>(out.bbox.width);
+        last_predict_lead_x_ = static_cast<float>(lead_x);
+        last_predict_lead_y_ = static_cast<float>(lead_y);
+
+        out.predict_lead_x = last_predict_lead_x_;
+        out.predict_lead_y = last_predict_lead_y_;
+        out.predict_size_weight =
+            static_cast<float>(esync_tracker_.sizeWeight(static_cast<double>(out.bbox.width)));
+        out.predict_active = active;
+
+        out.anchor.x = static_cast<float>(static_cast<double>(out.anchor.x) + lead_x);
+        out.anchor.y = static_cast<float>(static_cast<double>(out.anchor.y) + lead_y);
+
+        // 遥测: 系数在本拍推进后的值(排查"预测到底有没有爬上去"看这两个)。
+        if (const auto* lt = esync_tracker_.locked())
+        {
+            out.esync_pred_k_x = lt->pred_k_x;
+            out.esync_pred_k_y = lt->pred_k_y;
+        }
+    }
+
+    double err_px_x = static_cast<double>(out.anchor.x) - in.crosshair_x;
+    double err_px_y = static_cast<double>(out.anchor.y) - in.crosshair_y;
+
+    // ── ⑤ EventSync 档: 在途自身位移补偿 (AM 的发送环 ÷ k̂) ──────────────────
+    //
+    // AM: FUN_140067000 行 1172-1209 —— 把"已经发出去、还没生效"的计数求和, 再
+    // ÷ counts_per_pixel 换回【像素】, 从误差里扣掉。
+    //
+    // ★★ 与 aim_pid.h 的【计数域】在途补偿(u -= beta*N/W)的关系 —— 两者【不是】
+    //    同一件事的重复, 而是同一条 Smith 预测器的两种做法, 且【本档只用这一种】:
+    //      · 现役档: 在控制器出口扣(计数域), 不需要 k̂;
+    //      · EventSync 档: 在误差入口扣(像素域), 需要用户填的 k̂ —— 这是 AM 的形态。
+    //    ★ 所以 aim_mode == 1 时【必须把计数域那一项关掉】, 否则同一批在途指令
+    //      被扣两次 (像素域 + 计数域) = 过补偿 = 正反馈发散。见下面的 pid 配置处。
+    if (in.aim_mode == 1)
+    {
+        double if_x = 0.0;
+        double if_y = 0.0;
+        esync_tracker_.inflightPixels(if_x, if_y);
+        out.esync_inflight_x = static_cast<float>(if_x);
+        out.esync_inflight_y = static_cast<float>(if_y);
+        err_px_x -= if_x;
+        err_px_y -= if_y;
+    }
 
     // 控制器参数直接来自配置 —— 不再有任何在线估算出来的量要注入。
-    pid_x_.configure(in.pid_x);
-    pid_y_.configure(in.pid_y);
+    //
+    // ★★ EventSync 档 (aim_mode == 1) 必须把【计数域】在途补偿关掉 ★★
+    //   理由: 本档已在误差入口用 AM 的形态(像素域, 见上)扣了一次在途位移。
+    //   两处同时开 = 同一批在途指令被扣两次 = 过补偿 = 正反馈发散
+    //   (CLAUDE.md 在途补偿要点①:"补过头会把已生效的指令再扣一遍 → 正反馈发散")
+    //   所以这一档只保留 AM 那一种。两者的关系是【二选一】, 不是叠加。
+    AimPidParams pid_x_cfg = in.pid_x;
+    AimPidParams pid_y_cfg = in.pid_y;
+    if (in.aim_mode == 1)
+    {
+        pid_x_cfg.inflight_beta = 0.0;
+        pid_y_cfg.inflight_beta = 0.0;
+    }
+    pid_x_.configure(pid_x_cfg);
+    pid_y_.configure(pid_y_cfg);
 
     // ── 距离尺度 (2026-09-13, 见 mouse/aim_scale.h) ──────────────────────────
     //

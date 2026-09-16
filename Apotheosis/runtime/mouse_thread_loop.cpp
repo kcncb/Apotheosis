@@ -559,6 +559,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
     // 检测间歇期用 tracker 的预测分支继续推进控制器, 而不是干等下一帧。
     // 详见 config.h 里 use_prediction_tick 的说明。
     // 注意: 这些状态只在末尾的"无新检测"分支里用, 所以必须在循环外声明。
+    //
+    // ★ PID-EventSync 档 (aim_mode == 1) 会在【使用处】强制关掉它 —— 见下面
+    //   "无新检测"分支里的闸门。这里只保留全局开关本身。
     const bool prediction_tick_enabled = runtime_config::read()->use_prediction_tick;
     const int  prediction_tick_hz =
         std::clamp(runtime_config::read()->prediction_tick_hz, 60, 1000);
@@ -753,6 +756,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // 参数复用: 预测拍没有新配置可读, 直接复用上一拍真实 tick 填好的
             // EngineInput 与枢轴 —— 它们描述的是"这一帧该怎么瞄", 与检测是否
             // 更新无关。
+            // ★ PID-EventSync 档: 帧间【不许】外推补拍 —— 这是档位语义的一部分。
+            //   EventSync 的定义就是"每次推理只消费一次"; AimMagic 的 EventSync 档
+            //   在两次推理之间不发任何位移(它等条件变量睡到下一帧), 帧间插值是它
+            //   另一个档(kalman/FrameSync)的行为。两条同时开会叠成两层外推, 提前量
+            //   被算两遍 —— 同源于 aim_pid.h 里"同一个物理量不许扣两遍"的教训。
+            //   ★ 判定用 last_input.aim_mode(上一拍真实 tick 填进去的档位), 而不是
+            //     启动时读一次的全局量: 用户中途换档必须立刻生效。
+            if (last_input_valid && last_input.aim_mode == 1)
+                continue;
+
             if (!prediction_tick_enabled || !last_input_valid)
                 continue;
 
@@ -969,6 +982,41 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.predict_max_px = static_cast<double>(profile_ptr->pidf_predict_max_px);
         in.predict_vel_floor = static_cast<double>(profile_ptr->pidf_predict_vel_floor);
 
+        // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──
+        // aim_mode: 0 = 现役纯反馈档; 1 = EventSync 档(跟踪器 + 每轨预测)。
+        // ★ 在途补偿【不在这个开关里】—— 它一直在跑(pidf_inflight_*), 两条档位
+        //   共用同一套控制器与同一个计数域在途补偿(见 aim_pid.h / config.h 说明)。
+        in.aim_mode = profile_ptr->aim_mode;
+        {
+            boss::AimTrackerParams tp;
+            tp.min_hits = profile_ptr->esync_min_hits;
+            tp.max_age = profile_ptr->esync_max_age;
+            tp.assoc_radius_px = static_cast<double>(profile_ptr->esync_assoc_radius_px);
+            tp.assoc_iou = static_cast<double>(profile_ptr->esync_assoc_iou);
+            tp.vel_window_s = static_cast<double>(profile_ptr->esync_vel_window_ms) / 1000.0;
+            // ★ 预测系数/尺寸区间/硬上限/噪声门与现役档【共用同一组槽位】
+            //   (pidf_predict_*): 换档不该让用户把提前量重填一遍, 而且这样两个档的
+            //   预测强度可以直接对照 —— 差别只剩下"状态住在哪"(每轨 vs 全局)。
+            tp.pred_factor_x = static_cast<double>(profile_ptr->pidf_predict_x);
+            tp.pred_factor_y = static_cast<double>(profile_ptr->pidf_predict_y);
+            tp.pred_min_w = static_cast<double>(profile_ptr->pidf_predict_min_w);
+            tp.pred_max_w = static_cast<double>(profile_ptr->pidf_predict_max_w);
+            tp.pred_max_lead_px = static_cast<double>(profile_ptr->pidf_predict_max_px);
+            tp.pred_vel_floor = static_cast<double>(profile_ptr->pidf_predict_vel_floor);
+            // ── ⑤ k̂ / 在途换算链 (AM: kalman_counts_per_pixel + mouse_effect_delay) ──
+            // ★ k̂ 默认 1.0 = 不做换算; 窗口默认 0 = 整条链关闭(在途量恒 0)。
+            //   两者都要用户明确设置才生效 —— 见 config.h 里那一段历史。
+            tp.counts_per_pixel_x = static_cast<double>(profile_ptr->esync_counts_per_pixel_x);
+            tp.counts_per_pixel_y = static_cast<double>(profile_ptr->esync_counts_per_pixel_y);
+            tp.inflight_window_s =
+                static_cast<double>(profile_ptr->esync_inflight_window_ms) / 1000.0;
+            tp.inflight_beta = static_cast<double>(profile_ptr->esync_inflight_beta);
+            // ── ⑥ 自运动补偿 (AM: 提前量与自身瞄准速度成正比) ──────────────────
+            // ★ 默认 0 = 关闭。本项目删过一次的那类项, 必须由用户明确开启。
+            tp.self_motion_gain = static_cast<double>(profile_ptr->esync_self_motion_gain);
+            in.esync = tp;
+        }
+
         // ── 尺度增益调度 s(bbox.height) —— 2026-09-14 新增, 同日改为"单基准" ──
         // 在这里把界面上的三个量填进引擎。s 同时作用在 X/Y 两个轴上(共用一个
         // AimScale 实例), 因为"目标多大"是目标本身的属性, 不分轴。
@@ -1008,6 +1056,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // 预测参数也要参与变化检测 —— 它们同样决定手感, 换档时必须留痕。
             static double last_pfx = 1e30, last_pfy = 1e30;
             static double last_pmn = -1.0, last_pmx = -1.0, last_pdp = -1.0;
+            static int last_mode = -1;
             const auto same = [](const boss::AimPidParams& a, const boss::AimPidParams& b) {
                 return a.kp == b.kp && a.ki == b.ki && a.kd == b.kd
                     && a.p_full_scale_px == b.p_full_scale_px && a.limit_counts == b.limit_counts;
@@ -1015,14 +1064,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
             if (!logged || !same(in.pid_x, last_x) || !same(in.pid_y, last_y)
                 || in.predict_factor_x != last_pfx || in.predict_factor_y != last_pfy
                 || in.predict_min_width != last_pmn || in.predict_max_width != last_pmx
-                || in.predict_damp != last_pdp)
+                || in.predict_damp != last_pdp || in.aim_mode != last_mode)
             {
                 runtime::chainlog::event(
                     ",reason=pid_params,"
+                    "mode=%d,"
                     "x=(kp=%.1f,ki=%.2f,kd=%.3f,psat=%.0f,lim=%d),"
                     "y=(kp=%.1f,ki=%.2f,kd=%.3f,psat=%.0f,lim=%d),"
                     "predict=(fx=%.3f,fy=%.3f,minw=%.0f,maxw=%.0f,damp=%.2f),"
                     "filter_tau_ms=%.0f",
+                    in.aim_mode,
                     in.pid_x.kp, in.pid_x.ki, in.pid_x.kd,
                     in.pid_x.p_full_scale_px, in.pid_x.limit_counts,
                     in.pid_y.kp, in.pid_y.ki, in.pid_y.kd,
@@ -1035,6 +1086,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 last_pfx = in.predict_factor_x; last_pfy = in.predict_factor_y;
                 last_pmn = in.predict_min_width; last_pmx = in.predict_max_width;
                 last_pdp = in.predict_damp;
+                last_mode = in.aim_mode;
                 logged = true;
             }
         }
@@ -1146,8 +1198,17 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // 老链路: 输出已经是计数, 直接发送。限幅/死区在PIDF 后处理里已经做过了
             // 采集戳原样用(帧龄估计旋钮已删)。
             const int64_t send_capture_ns = probed_frame_capture_ns;
-            mouseThread.sendRawMove(static_cast<int>(std::lround(drive_dx)),
-                static_cast<int>(std::lround(drive_dy)), send_capture_ns, aim_consume_ns);
+            const int send_dx = static_cast<int>(std::lround(drive_dx));
+            const int send_dy = static_cast<int>(std::lround(drive_dy));
+            mouseThread.sendRawMove(send_dx, send_dy, send_capture_ns, aim_consume_ns);
+
+            // ★ ⑤ EventSync 档: 把这一拍【实际发出去】的计数登进在途账本
+            //   (AM 的发送环)。下一拍的误差合成会把它们按 k̂ 换成像素扣掉。
+            //   ★ 登的是 lround 之后的【整数计数】—— 与真正发给盒子的值一致;
+            //     用 drive_dx 的 double 会登进"还没被取整消化掉的零头", 那部分
+            //     其实没发出去(零头由 PID 的 carry 攒到下一拍)。
+            if (in.aim_mode == 1)
+                engine.noteAimSend(send_dx, send_dy);
 
             // 全链路日志: 本帧的完整现场(检测/找色枢轴/锚点/误差/控制器输出/整形/
             // 位移/队列/扳机相位/延迟探针)。字段含义见 runtime/chain_log.h。
@@ -1195,12 +1256,19 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 //   fits     观测器已接受的有效拟合窗口数(0 = 还没标定出来)
                 //   bbh      本拍检测框高度(像素)。调参 agent 用它学【基准框高】
                 //            (尺度调度的参照点), 见 mouse/aim_scale.h。
+                //   ── PID-EventSync 档新增 (2026-09-15, 只在 mode=1 时有意义) ──
+                //   mode     本拍档位(0 现役 / 1 EventSync)
+                //   tid      跟踪器身份(与 gen 不同源, 跨帧粘滞)
+                //   th/tm    锁定轨迹的连续命中数 / 连续漏帧数(tm>0 = 本拍在滑行)
+                //   tvx/tvy  跟踪器采样窗给出的目标速度(像素/秒)
+                //   tkx/tky  每轨预测系数的当前值 [0,1](排查"预测到底爬没爬上去")
                 runtime::chainlog::write(
                     runtime::chainlog::SecPid, 2,
                     ",dt_ms=%.2f,sup=%d,switch=%d,jump_px=%.1f,"
                     "ex=%.2f,ey=%.2f,eux=%.2f,euy=%.2f,"
                     "ipx=%.2f,ipy=%.2f,dpx=%.2f,dpy=%.2f,ix=%.2f,iy=%.2f,"
-                    "carryx=%.2f,carryy=%.2f,cmdx=%.2f,cmdy=%.2f,lim=%d/%d,bbh=%.1f",
+                    "carryx=%.2f,carryy=%.2f,cmdx=%.2f,cmdy=%.2f,lim=%d/%d,bbh=%.1f,"
+                    "mode=%d,tid=%d,th=%d,tm=%d,tvx=%.1f,tvy=%.1f,tkx=%.2f,tky=%.2f",
                     out.pid_dt_ms, out.motion_suppressed ? 1 : 0, out.target_switched ? 1 : 0,
                     out.target_anchor_jump_px,
                     out.pid_error_px_x, out.pid_error_px_y,
@@ -1210,7 +1278,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     out.pid_carry_x, out.pid_carry_y,
                     out.pid_cmd_x, out.pid_cmd_y,
                     out.pid_limit_x, out.pid_limit_y,
-                    static_cast<double>(out.bbox.height));
+                    static_cast<double>(out.bbox.height),
+                    in.aim_mode, out.esync_track_id, out.esync_track_hits,
+                    out.esync_track_age, out.esync_vel_x, out.esync_vel_y,
+                    out.esync_pred_k_x, out.esync_pred_k_y);
 
                 // 调参 agent 的数据源 (2026-09-14)。
                 // ★ 用【拉】而不是推: 这里只调用一次很轻的 diff, agent 没开时

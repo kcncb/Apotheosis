@@ -37,6 +37,11 @@ private:
     QLineEdit* m_makcuNewPort{};
     QSpinBox* m_makcuNewBaud{};
 
+    // KMBox Net (以太网 UDP, 2026-09-15 恢复)
+    QLineEdit* m_kmboxNetIp{};
+    QLineEdit* m_kmboxNetPort{};
+    QLineEdit* m_kmboxNetUuid{};
+
     // 【2026-09-13 删除】m_captureAgeOffset (采集回调前帧龄估计) 与
     // m_crosshairSmooth (准星找色平滑强度) 两个控件, 连同它们的界面卡片一起移除。
 };

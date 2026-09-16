@@ -82,6 +82,9 @@ void ConfigBridge::syncToRuntime() {
     config.makcu_port     = qs(cm.makcuPort());
     config.makcu_new_baudrate = cm.makcuNewBaudrate();
     config.makcu_new_port     = qs(cm.makcuNewPort());
+    config.kmbox_net_ip       = qs(cm.kmboxNetIp());
+    config.kmbox_net_port     = qs(cm.kmboxNetPort());
+    config.kmbox_net_uuid     = qs(cm.kmboxNetUuid());
     // --- AI ---
     std::string oldModel = config.ai_model;
     config.backend              = qs(cm.backend());
@@ -193,6 +196,9 @@ void ConfigBridge::syncFromRuntime()
     cm.setMakcuPort(qstr(config.makcu_port));
     cm.setMakcuNewBaudrate(config.makcu_new_baudrate);
     cm.setMakcuNewPort(qstr(config.makcu_new_port));
+    cm.setKmboxNetIp(qstr(config.kmbox_net_ip));
+    cm.setKmboxNetPort(qstr(config.kmbox_net_port));
+    cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
     // --- AI ---
     cm.setBackend(qstr(config.backend));
     cm.setDmlDeviceId(config.dml_device_id);
