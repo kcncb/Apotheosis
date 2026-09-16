@@ -70,6 +70,27 @@ void MouseThread::sendLeftUpToDriver()
         makcu_new_->release(1);
 }
 
+// 右键 = 通道 2 (见 Makcu.cpp 的 mouseButtonFromChannel: 1=左 2=右 3=中 4/5=侧键)。
+// 自动开镜靠它; 与左键共用同一把递归锁, 保证"开镜指令"和"开火指令"的先后顺序
+// 在串口写出这一层不会被换序。
+void MouseThread::sendRightDownToDriver()
+{
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    if (makcu_)
+        makcu_->press(2);
+    else if (makcu_new_)
+        makcu_new_->press(2);
+}
+
+void MouseThread::sendRightUpToDriver()
+{
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    if (makcu_)
+        makcu_->release(2);
+    else if (makcu_new_)
+        makcu_new_->release(2);
+}
+
 void MouseThread::updateParams(const MouseRuntimeParams& in)
 {
     const auto sanitized = sanitize(in);
@@ -182,6 +203,26 @@ void MouseThread::pressLeftButton()
 void MouseThread::releaseLeftButton()
 {
     sendLeftUpToDriver();
+}
+
+void MouseThread::pressRightButton()
+{
+    sendRightDownToDriver();
+}
+
+void MouseThread::releaseRightButton()
+{
+    sendRightUpToDriver();
+}
+
+bool MouseThread::tapKey(int hid_key, int hold_ms)
+{
+    std::lock_guard<std::recursive_mutex> lock(input_method_mutex);
+    // 只有 MAKCUNEW 有键盘通道; 老 MAKCU 只有鼠标报文, 这里直接失败,
+    // 调用方据此把"自动急停"当成不可用(不会静默什么都不做)。
+    if (!makcu_new_)
+        return false;
+    return makcu_new_->tapKey(hid_key, hold_ms);
 }
 
 bool MouseThread::sendMovementToDriver(int dx, int dy)

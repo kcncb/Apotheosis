@@ -72,3 +72,14 @@ out/
 
 # IDE
 .idea/
+
+# 运行时日志 (chain_live.log 等 —— 程序自己写出来的, 不进仓库)
+/logs/
+
+# config_migration_test 的临时产物 (测试运行时自己在工作目录写出, 每次都会重建)
+/base.ini
+/nover.ini
+/sm.ini
+/v4.ini
+/v6.ini
+/v7.ini

@@ -33,7 +33,11 @@
 #include "runtime/cuda_availability.h"
 #include "runtime/inference_session.h"
 #include "runtime/latency_probe.h"
+#include "runtime/live_tune.h"
+#include "mouse/autotune_runtime.h"   // 调参 agent 的生产接线
 #include "runtime/config_snapshot.h"
+#include "runtime/aim_telemetry.h"
+#include "runtime/sched_boost.h"
 #include "runtime/thread_loops.h"
 #include "detector/dml_detector.h"
 #include "auth/auth_state.h"
@@ -45,6 +49,7 @@
 #include "widgets/LoginDialog.h"
 #include "config/ConfigManager.h"
 #include "config/config_bridge.h"
+#include "config/config_profiles.h"
 
 std::condition_variable frameCV;
 std::atomic<bool> shouldExit(false);
@@ -76,6 +81,10 @@ std::string g_iconLastError;
 
 std::atomic<bool> g_replay_playback_active(false);
 std::atomic<int>  g_replay_playback_frame(0);
+
+// 【2026-09-13 删除】「每计数像素」标定遥测的定义
+// (namespace runtime::calib 的 20 个 atomic)。前馈删除后不再有人消费 k̂,
+// 测量功能与界面按钮一并移除。声明处见 runtime/aim_telemetry.h。
 
 static int FatalExit(const std::string& message)
 {
@@ -248,6 +257,15 @@ int main(int argc, char* argv[])
     {
         std::cerr << "[Config] Error with loading config!" << std::endl;
         return FatalExit("[Config] Error with loading config!");
+    }
+
+    // 进程调度档位: 提到 HIGH_PRIORITY_CLASS。
+    // 对应原神AI 日志里的 process_priority=0x8000。放在 config 加载之后,
+    // 这样开关(use_process_boost)可被用户覆盖。失败只打日志不阻断启动。
+    if (config.use_process_boost)
+    {
+        if (sched_boost::boostProcessPriority())
+            std::cout << "[Sched] Process priority -> HIGH" << std::endl;
     }
 
     // 端到端延迟日志落盘 (logs/latency_<时间>.log)。
@@ -484,12 +502,35 @@ int main(int argc, char* argv[])
         ConfigManager::instance().load("config.ini");
         ConfigBridge::instance().syncFromRuntime();
 
+        // 全局配置方案: 扫描 configs/ 并把 active.txt 里记着的方案设为生效配置。
+        // 必须在 syncFromRuntime() 之后 —— 它会把方案的值推回 Qt 侧缓存,
+        // 各页面的构造函数随后读到的是方案值而不是 config.ini 的旧值。
+        ConfigProfiles::instance().initialize();
+
+        // 调参通道 (2026-09-13 新增): 让外部脚本在运行中换参数。
+        // 【默认关闭】—— 只有配置目录里存在 live_tune.enable 才真的启用,
+        // 没有这个文件时每 200ms 只做一次文件存在性检查。详见 runtime/live_tune.h。
+        // 必须放在这里(而不是更早): 它依赖 Qt 事件循环, 且要在配置方案初始化之后,
+        // 否则可能会把方案配置覆盖掉。
+        live_tune::start();
+
         // 单机自用：跳过登录对话框，直接进入主界面
         MainWindow window;
         window.resize(960, 640);
         window.show();
 
+        // 调参 agent 的生产接线 (2026-09-14)。
+        // ★ 必须在配置方案初始化与 live_tune::start() 之后: 它读的是"当前生效
+        //   配置", 而且写回要靠 live_tune 的轮询去应用。
+        // ★ 只是【接线】, 不启动任何线程 —— 真正开跑要点界面上的开关。
+        boss::autotune::install_production_hooks();
+
         QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
+            // 退出前务必撤掉 live_tune 哨兵: 否则会留下一个能改参数的活动入口,
+            // 下次启动时可能被半截配置影响。
+            // ★ 采样会话不需要显式取消 —— 它没有后台线程, 就是个区间标记;
+            //   没点「结束」就没发过请求、也没改过参数。
+            boss::autotune::uninstall_production_hooks();
             ConfigBridge::instance().flush();
             shouldExit = true;
         });
@@ -507,6 +548,9 @@ int main(int argc, char* argv[])
 
         mouseThread.clearQueuedMoves();
         mouseThread.releaseLeftButton();
+        // 自动开镜可能正处在"点了还没抬"的那一拍上: 退出前把右键也抬起来,
+        // 否则用户会看到一个卡住的右键(脚本退出后游戏里还在开镜)。
+        mouseThread.releaseRightButton();
         mouseThread.setMakcuConnection(nullptr);
         mouseThread.setMakcuNewConnection(nullptr);
         delete makcuSerial;

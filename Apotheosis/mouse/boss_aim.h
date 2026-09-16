@@ -1,56 +1,73 @@
 #ifndef MOUSE_BOSS_AIM_H
 #define MOUSE_BOSS_AIM_H
 
-// 目标关联 + 瞄点 + 控制�?
+// 目标关联 + 瞄点 + 控制器
 //
 // 这一层负责三件事:
-//   1. 【锁谁�?   —�?target_selector (ava_exact)
-//   2. 【瞄哪一点】—�?target_to_aimpoint (ava_exact)
-//   3. 【怎么动�? —�?engine::AimPid, �?mouse/aim_pid.h
+//   1. 【锁谁】   —→target_selector (ava_exact)
+//   2. 【瞄哪一点】—→target_to_aimpoint (ava_exact)
+//   3. 【怎么动】 —→engine::AimPid, 见mouse/aim_pid.h
 //
-// �?AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy�?
-// aim_movement_pipeline、controller_orchestration、pid_input、qx_curve�?
-// process_humanization 以及热键旁路)已整条删�? �?mouse/aim_pid.h 的新控制�?
-// 取代, 接入点在 boss_aim.cpp �?tick()�?
+// 旧AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、
+// aim_movement_pipeline、controller_orchestration、pid_input、qx_curve、
+// process_humanization 以及热键旁路)已整条删除, 由mouse/aim_pid.h 的新控制器
+// 取代, 接入点在 boss_aim.cpp 的tick()。
 
 #include <memory>
 #include <vector>
 
 #include <opencv2/opencv.hpp>
 
-#include "aim_motion.h"
 #include "aim_pid.h"
-#include "anchor_observer.h"
+#include "aim_predict.h"
+#include "aim_scale.h"
+#include "anchor_filter.h"
 #include "ava_exact/target_selector_top_exact.hpp"
 #include "ava_exact/target_to_aimpoint_exact.hpp"
 
 namespace boss
 {
 
-// ── 运动观测�?+ 死区补偿的常�?不是用户旋钮) ───────────────────────────────
-// 位置: 不平�?0ms) —�?控制器吃原始瞄点, "甩到瞄点"永远是一拍的事�?
-// 速度: 只喂前馈, 走输入延迟扣�?+ 200ms 低�? 因为不进位置回路, 估错了也不会让准星抽�?
+// ── 架构 (2026-09-13 重写, 抄原神 AI 的纯反馈路线) ──────────────────────────
 //
-// ★★ 链路死区 kAimDeadTimeS —�?这是整个回路最关键的物理量, 实测出来�?
-//   我们发出去的计数要过这么久才在【检测画面】里生效(HID + 游戏�?+ 显示 + 采集缓冲 +
-//   推理)�?026-09-12 那场日志(chain_live.log)给了两个独立证据:
-//     �?极限环周�? Kp=100 时误差以 5.00Hz/200ms 摆动 = 24 拍。离�?积分+纯延�?环路�?
-//        振荡周期�?2(2d+1) �?=> d = 5.5 �?�?46ms; 临界每拍增益 g_crit = 2sin(π/(2(2d+1)))
-//        = 0.256, 而实�?g = Kp*dt*k = 100*0.00833*0.593 = 0.494 = 1.9 倍临�?—�?正好解释
-//        "Kp=30 稳、Kp=100 �?(Kp=30 �?g=0.148 < 0.256)�?
-//     �?起始那几�? 连发 259 counts 期间画面里的瞄点纹丝不动, �?50ms 后才开始走�?
-//   所以延迟预�?=盲区里目标走掉的距离)的合理值也是这个量�? �?在途自身位�?的窗�?
-//   就是它�?
-inline constexpr double kAimDeadTimeS = 0.046;
+//   检测框 --(瞄点)--> 【α-β 框平滑器】--> PID --> 输出限幅 --> 发送
+//
+// 就这三段。**没有观测器、没有前馈、没有预测、没有标定。**
+//
+// ██ 为什么删掉观测器和前馈 ██
+//
+// 原来这条链是: 检测框 -> AnchorObserver(平滑+估速度+算在途位移) -> PID(+前馈)
+// 观测器干三件事, 后两件都需要 k̂(每计数像素), 而 k̂ 在本项目【双机架构】下
+// 测不准(游戏在另一台机器上, 详见 docs/aimmagic-comparison.md §6.7)。
+// 一个测不准的参数进了回路, 估错就直接变成固定瞄偏 —— 历史上 +6.2px @300px/s
+// 就是这么来的。
+//
+// 原神 AI 用高增益纯反馈 + 输出整形做到了同样的事, 而且它的预测开关是【关着】的
+// (aim_prediction_enabled = 0)。纯 P 回路追匀速目标的稳态滞后 = v/(Kp·换算),
+// Kp 够大时只有几个像素 —— 根本不需要前馈去补。
+//
+// ██ 各段职责 ██
+//
+//   框平滑器  : 滤掉检测框的抖动(它每帧跳 1~2px, 在 8.3ms 里就是 230px/s 假速度)
+//               → 喂给 PID 的信号干净了, Kp 才敢开大
+//   PID       : 高增益纯反馈。Kp 决定"跟得紧不紧", Ki 磨掉稳态滞后
+//   P 项饱和  : 大误差段自动降增益 —— 甩枪/换靶不过冲, 且不像死区那样留盲区
+//   输出限幅  : 相当于原神的 smooth_max_pixel, 兜住极端输出
+//
+// ██ 参数 ██
+//
+// 用户只调 5 个: 追踪增益(Kp) / 积分增益(Ki) / 震荡抑制(Kd) / 饱和阈值 / 输出限幅。
+// 平滑时间常数【故意不暴露】—— 它和 Kp 是耦合的, 一起调极容易调乱。
 
-// 在途自身位移的补偿强度: 只补 80%�?
-//   �?方向是不对称�?—�?补偿【不足】只是回到原来那个延�?安全), 补偿【过头】会�?
-//   "已经生效的指�?再扣一�? 变成正反�?-> 发散。所以留 20% 余量�?
-inline constexpr double kAimDeadTimeCompScale = 0.8;
-
-inline constexpr double kAnchorObserverSmoothMs = 0.0;
-inline constexpr double kAnchorObserverVelTauMs = 200.0;
-inline constexpr double kAnchorObserverGatePx = 40.0;
+// 框平滑时间常数(毫秒)。这是"平滑强度", 不是用户旋钮。
+//
+// 怎么定的: 检测框的抖动是【单帧孤立跳变】(实测框心逐帧变化中位 0.06px, 偶发 1.9px),
+// 而目标的真实运动是【连续】的。取 30ms 意味着"约 3~4 拍之内的抖动会被平均掉, 而
+// 超过 30ms 的持续运动会被当作真实运动跟上去"。α-β 带回速度状态, 所以匀速目标下
+// 它【几乎不产生滞后】(这是它比一阶低通强的地方)。
+//
+// 太小(如 0) = 不平滑, 框抖直接进 PID; 太大(如 100ms) = 目标一动就落后, 得靠加 Kp 补。
+inline constexpr double kAnchorFilterTauMs = 30.0;
 
 struct Track
 {
@@ -67,7 +84,7 @@ struct Track
 struct TargetSlot
 {
     int class_id = -1;
-    // 用户坐标�?=框底�?=框顶�?
+    // 用户坐标系=框底，1=框顶）
     float y_offset_min = 0.5f;
     float y_offset_max = 0.5f;
     float min_conf = 0.0f;
@@ -88,81 +105,101 @@ struct EngineInput
     double fov_radius_y = 0.0;
     double image_size = 0.0;
 
-    // �?PID 参数: 每拍从当前热键配置快照填�?�?runtime/mouse_thread_loop.cpp)�?
-    // 单位与取值见 mouse/aim_pid.h —�?Kp[计数/像素]、Ki[计数/(像素·�?]�?
-    // Kd[计数·�?像素]、死区[像素]、限幅[计数/拍]�?
+    // 新PID 参数: 每拍从当前热键配置快照填充（runtime/mouse_thread_loop.cpp)。
+    // 单位与取值见 mouse/aim_pid.h —— Kp[计数/像素]、Ki[计数/(像素·秒]）
+    // Kd[计数·秒/像素]、死区[像素]、限幅[计数/拍]。
     AimPidParams pid_x{};
     AimPidParams pid_y{};
 
-    // 每计数像�?px/count), 由热键配置手填�?0 = 直接用它(前馈立刻生效);
-    // 0 = 仍然自动在线估算。见 config.h �?aim_px_per_count_x/y�?
-    double px_per_count_x = 0.0;
-    double px_per_count_y = 0.0;
+    // ── 预测补偿参数 (2026-09-13, 对齐 AimMagic 1.0.30) ──────────────────────
+    // 每拍从当前热键配置快照填入。字段含义见 mouse/aim_predict.h 与 config.h。
+    // factor 为 0(AM 的 UI 默认值) => 整条预测链路关闭, 行为与不做预测逐位相同。
+    double predict_factor_x = 0.0;
+    double predict_factor_y = 0.0;
+    double predict_min_width = 20.0;
+    double predict_max_width = 80.0;
+    double predict_damp = 0.25;
+    // 提前量硬上限(px) 与 速度噪声门(px/s)。见 aim_predict.h —— 这两条是任务书
+    // §4.2 第②③条的落地: 没有它们, 稳态瞄偏会随目标速度【线性增长】。
+    double predict_max_px = 12.0;
+    double predict_vel_floor = 60.0;
 
-    // 【删�?2026-09-12】原「瞄点滤�?anchor_filter_ms)」旋钮已移除�?
-    //   理由: 位置一平滑, "甩到瞄点"就多�?3~4 �? 手感上就�?不跟�?; 而它想解决的
-    //   "框在�?问题, 真正该做的是【只把速度滤掉�?控制器吃原始瞄点, 速度只喂前馈,
-    //   速度不进位置回路)—�?�?mouse/anchor_observer.h �?aim_pid.cpp 的速度噪声门�?
+    // ── 距离尺度参数 (2026-09-13 新增, 见 mouse/aim_scale.h) ────────────────
+    // 每拍从当前热键配置快照填入。全部为 0/负 => 尺度关闭, 行为与没有它逐位相同。
+    // 唯一的距离代理是【检测框高】: 本项目双机架构下拿不到真实距离,
+    // AimbotTarget::depth_at_pivot 是恒 -1 的占位常量, 不可用。
+    AimScaleParams aim_scale{};
+
+    // 【2026-09-13 删除】px_per_count_x/y —— 控制器不再消费 k̂(前馈已整条移除)。
+    // 平滑由 boss_aim.cpp 里的 AnchorFilter 承担, 不需要这个量。
 };
 
 struct EngineOutput
 {
     bool have_target = false;
     int current_track_id = -1;
-    cv::Point2f anchor{};       // 瞄点(框内按类别比例算出的那个�?
+    cv::Point2f anchor{};       // 瞄点(框内按类别比例算出的那个点)
     cv::Rect2f bbox{};          // 用于日志/扳机判定的观测框
-    cv::Rect2f observed_bbox{}; // �?bbox 相同, 保留独立字段以免调用方语义混�?
+    cv::Rect2f observed_bbox{}; // 与bbox 相同, 保留独立字段以免调用方语义混淆
     int class_id = -1;
 
-    bool coasting = false;          // 本拍用的�?tracker 的预测框而非新观�?
-    bool motion_suppressed = false; // 本拍刚换了目标身�? 新控制器应重置信
+    bool coasting = false;          // 本拍用的是tracker 的预测框而非新观测
+    bool motion_suppressed = false; // 本拍刚换了目标身份 新控制器应重置信
 
-    // ── �?PID 的接入点 ─────────────────────────────────────────────────────
-    // 误差 = 瞄点 - 准星(单位: 检测图像素, 浮点), 输出 = 整数鼠标计数�?
-    // 控制器全程在像素域用 double �? 整数只在出口出现一�? 取整零头会攒到下一�?
-    // 所以亚计数的小误差不会被丢掉。见 mouse/aim_pid.h 的说明�?
-    // 现役链路是计数域: 外面直接�?sendRawMove 发出, 不做像素<->计数换算�?
-    //    · 换目标身�?motion_suppressed)/丢失目标�? 控制�?reset(), 观测�?
-    //      resetTargetMotion()(保留已标定出�?每计数多少像�?)�?
+    // ── 预测补偿遥测 (2026-09-13) ────────────────────────────────────────────
+    // 只用于日志/界面显示, 不参与控制。predict_active 为 false 时三个量都无意义。
+    float predict_lead_x = 0.0f;      // 本拍加在瞄点上的 X 偏移(像素)
+    float predict_lead_y = 0.0f;      // 同上, Y
+    float predict_size_weight = 0.0f; // 尺寸权重 (maxW-w)/(maxW-minW), 0..1
+    bool predict_active = false;
+
+    // ── 新PID 的接入点 ─────────────────────────────────────────────────────
+    // 误差 = 瞄点 - 准星(单位: 检测图像素, 浮点), 输出 = 整数鼠标计数。
+    // 控制器全程在像素域用 double 算, 整数只在出口出现一次, 取整零头会攒到下一拍
+    // 所以亚计数的小误差不会被丢掉。见 mouse/aim_pid.h 的说明。
+    // 现役链路是计数域: 外面直接用sendRawMove 发出, 不做像素<->计数换算；
+    //    · 换目标身份(motion_suppressed)/丢失目标时, 控制器reset(), 观测器
+    //      resetTargetMotion()(保留已标定出的每计数多少像素)。
     int dx = 0;
     int dy = 0;
 
-    // ── 控制器遥�?只给日志/调试�? 不参与控�? ────────────────────────────
-    // 误差单位像素, 前馈偏移单位像素, 速度单位像素/�? 每计数像素单位像�?计数�?
-    bool   pid_ff_ready = false;      // 观测器是否已标定�?每计数多少像�?
-    // 本拍是不是【真的换目标�? 身份变了 �?瞄点跳了 >=25px。仅供日志判断策略�?
+    // ── 控制器遥测(只给日志/调试用, 不参与控制) ─────────────────────────────
+    // 误差单位像素, 速度单位像素/秒。前馈相关字段已随前馈一起删除。
+    // 本拍是不是【真的换目标】: 身份变了 或 瞄点跳了 >=25px。仅供日志判断策略用。
     bool   target_switched = false;
-    double target_anchor_jump_px = 0.0;  // 本拍瞄点相对上一拍的跳变�?像素)
-    double pid_dt_ms = 0.0;           // 本拍实际用于输出缩放�?dt(已夹在典型拍间隔附近)
+    double target_anchor_jump_px = 0.0;  // 本拍瞄点相对上一拍的跳变量(像素)
+    double pid_dt_ms = 0.0;           // 本拍实际用于输出缩放的 dt(已夹在典型拍间隔附近)
     double pid_error_px_x = 0.0;
     double pid_error_px_y = 0.0;
-    double pid_used_error_px_x = 0.0; // 加了前馈、送给 P/I 的误�?
+    // ── 在途补偿遥测 (2026-09-13) ────────────────────────────────────────────
+    // ★ 排查"冲过头/贴不死"最先看这几个量: 补偿是不是吃掉了稳态误差。
+    int    pid_inflight_x = 0;        // 本拍进入窗口的在途计数(原始, 未乘 beta)
+    int    pid_inflight_y = 0;
+    double pid_inflight_beta_x = 0.0; // 本拍生效的补偿强度
+    double pid_inflight_beta_y = 0.0;
+    double pid_used_error_px_x = 0.0; // 送给 P/I 的误差(现在恒等于 error — 无前馈)
     double pid_used_error_px_y = 0.0;
     double pid_cmd_x = 0.0;           // 取整前的浮点指令(计数)
     double pid_cmd_y = 0.0;
-    double pid_feedforward_px_x = 0.0;
-    double pid_feedforward_px_y = 0.0;
-    double pid_ff_scale_x = 0.0;      // 速度前馈的噪声门(0~1): 0 = 视为静止, 不提�?
-    double pid_ff_scale_y = 0.0;
-    double pid_pending_px_x = 0.0;    // 在途自身位移补�?Smith): 从误差里扣掉的像�?
-    double pid_pending_px_y = 0.0;
-    double pid_px_per_count_x = 0.0;
-    double pid_px_per_count_y = 0.0;
-    double pid_target_vel_x = 0.0;
-    double pid_target_vel_y = 0.0;
-    // 排查"抽一�?冲过�?要看的中间量: 各分项的像素当量 + 积分状�?+ 零头 + 限幅�?
+    // 排查"抽一下/冲过头"要看的中间量: 各分项的像素当量 + 积分状态 + 零头 + 限幅值
     double pid_i_px_x = 0.0;
     double pid_i_px_y = 0.0;
     double pid_d_px_x = 0.0;
     double pid_d_px_y = 0.0;
-    double pid_integral_x = 0.0;   // 像素·�?
+    double pid_integral_x = 0.0;   // 像素·秒
     double pid_integral_y = 0.0;
     double pid_carry_x = 0.0;      // 未发出的计数零头
     double pid_carry_y = 0.0;
-    int    pid_limit_x = 0;        // 本拍生效的输出上�?计数/�?
+    int    pid_limit_x = 0;        // 本拍生效的输出上限(计数/拍)
     int    pid_limit_y = 0;
-    int    pid_fits_x = 0;         // 观测器已接受的有效拟合窗口数(0 = 还没标定出来)
-    int    pid_fits_y = 0;
+
+    // ── 距离尺度 (2026-09-13 新增, 见 mouse/aim_scale.h) ────────────────────
+    // 唯一的距离代理是【检测框高】。s ∈ [s_min, s_max], 近处 -> 大, 远处 -> 小。
+    // 它作用于控制器的【等效增益】(近处更快)。★ 不用来做"几何投影补偿" —— 屏幕
+    // 速度本身已经是世界速度的投影, 再乘一个和距离成正比的因子就是重复计算。
+    double aim_scale = 1.0;          // 本拍使用的尺度(平滑后)
+    double aim_scale_height_px = 0.0;// 本拍用于算尺度的框高(平滑后, 像素)
+    bool   aim_scale_active = false; // false = 尺度关闭, 行为与没有它逐位相同
 };
 
 class AimEngine
@@ -175,6 +212,16 @@ public:
     EngineOutput tick(const EngineInput& in, double dt);
     int lockedTrackId() const { return current_id_; }
     const std::vector<Track>& tracks() const { return tracks_; }
+
+    // ── 【2026-09-13 删除】「每计数像素」测量 API ─────────────────────────────
+    // beginCalibrationMeasure / cancelCalibrationMeasure / measuringCalibration /
+    // calibrationMeasureReady / measuredPxPerCountX/Y / calibrationMeasureFits(Needed) /
+    // calibrationFitStats / resetCalibrationFitStats / calibrationHistorySize /
+    // calibrationReady / autoPxPerCountX/Y —— 整组删除。
+    //
+    // 它们全都在测 k̂(每计数像素)。k̂ 在本项目双机架构下测不准(§6.7), 而且前馈删除后
+    // 控制器根本不再需要这个量 —— 没有消费者了。界面上对应的「测量」按钮与其状态
+    // 提示也一并移除(见 qt_ui/pages/HotkeyPage.cpp)。
 
 private:
     bool selectorConfigChanged(const EngineInput& in) const;
@@ -190,20 +237,28 @@ private:
     int last_generation_ = -1;
     std::vector<Track> tracks_;
 
-    // X/Y 各一个控制器 + 一个目标运动观测器。误差是像素、输出是计数, 状�?积分/微分/
-    // 零头)跨帧保留; 观测器在线估"每计数多少像�?与目标自身速度, 供前馈使用�?
+    // X/Y 各一个控制器 + 一个框平滑器。
+    //   误差是像素、输出是计数, 状态(积分/微分/零头)跨帧保留;
+    //   平滑器只做"滤掉检测抖动", 位置进 PID, 速度只用于它自己的内部预测、不外传。
     AimPid pid_x_;
     AimPid pid_y_;
-    AnchorMotionEstimator motion_x_;
-    AnchorMotionEstimator motion_y_;
-    int last_counts_x_ = 0;  // 上一拍实际下发的计数(观测器要用它�?在途自身位�?)
+    AnchorFilter anchor_filter_x_;
+    AnchorFilter anchor_filter_y_;
+    // 瞄点预测 (对齐 AimMagic 1.0.30「预测补偿」, 见 mouse/aim_predict.h)。
+    // 位置: 在算误差【之前】把偏移加到瞄点上, 所以 PID 追的是"目标将要到"的位置。
+    AimPredict predict_;
+    // 距离尺度估计器 (2026-09-13)。X/Y 共用【一个】(距离是目标属性, 不分轴),
+    // 结果通过 setScale() 分别注入两个 PID。见 mouse/aim_scale.h。
+    AimScale aim_scale_;
+    // 上一拍用于预测的框宽(像素)与预测后的瞄点(仅遥测)。
+    float last_predict_width_ = 0.0f;
+    float last_predict_lead_x_ = 0.0f;
+    float last_predict_lead_y_ = 0.0f;
+    int last_counts_x_ = 0;  // 上一拍实际下发的计数(仅遥测/日志用)
     int last_counts_y_ = 0;
-    // 上一拍的瞄点, 用来判断"身份变化"到底是真换目标还�?tracker 把同一个目标重锁一次�?
+    // 上一拍的瞄点, 用来判断"身份变化"到底是真换目标还是 tracker 把同一个目标重锁一次。
     cv::Point2f last_anchor_{};
     bool has_last_anchor_ = false;
-    // 目标运动观测�?X/Y 各一�?: 平滑瞄点 + 估目标自身速度, �?anchor_observer.h�?
-    AnchorObserver anchor_obs_x_;
-    AnchorObserver anchor_obs_y_;
 };
 
 } // namespace boss

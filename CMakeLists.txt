@@ -147,9 +147,14 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
-    "${SRC_DIR}/mouse/aim_motion.cpp"
     "${SRC_DIR}/mouse/aim_pid.cpp"
     "${SRC_DIR}/mouse/boss_aim.cpp"
+    # 调参 agent (2026-09-14): LLM 客户端走 WinHTTP, 零新依赖。
+    # runtime/agent/hooks 三层分开: 纯逻辑层(可进逻辑测试) + Qt/config 接入层。
+    "${SRC_DIR}/mouse/autotune_llm.cpp"
+    "${SRC_DIR}/mouse/autotune_agent.cpp"
+    "${SRC_DIR}/mouse/autotune_runtime.cpp"
+    "${SRC_DIR}/mouse/autotune_hooks.cpp"
     ${AVA_TARGET_SOURCES}
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/MakcuNew.cpp"
@@ -163,7 +168,11 @@ set(APP_SOURCES
     "${SRC_DIR}/runtime/config_snapshot.h"
     "${SRC_DIR}/runtime/inference_session.cpp"
     "${SRC_DIR}/runtime/latency_probe.h"
+    "${SRC_DIR}/runtime/live_tune.cpp"
+    "${SRC_DIR}/runtime/live_tune.h"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
+    "${SRC_DIR}/runtime/sched_boost.cpp"
+    "${SRC_DIR}/runtime/sched_boost.h"
     "${SRC_DIR}/scr/file_picker.cpp"
     "${SRC_DIR}/scr/other_tools.cpp"
     "${SRC_DIR}/tensorrt/nvinf.cpp"
@@ -172,12 +181,16 @@ set(APP_SOURCES
     "${QT_UI_DIR}/MainWindow.h"
     "${QT_UI_DIR}/config/ConfigManager.cpp"
     "${QT_UI_DIR}/config/ConfigManager.h"
+    "${QT_UI_DIR}/config/config_profiles.cpp"
+    "${QT_UI_DIR}/config/config_profiles.h"
     "${QT_UI_DIR}/config/config_bridge.cpp"
     "${QT_UI_DIR}/config/config_bridge.h"
     "${QT_UI_DIR}/pages/AiModelPage.cpp"
     "${QT_UI_DIR}/pages/AiModelPage.h"
     "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
     "${QT_UI_DIR}/pages/AutoCapturePage.h"
+    "${QT_UI_DIR}/pages/AutoTunePage.cpp"
+    "${QT_UI_DIR}/pages/AutoTunePage.h"
     "${QT_UI_DIR}/pages/CapturePage.cpp"
     "${QT_UI_DIR}/pages/CapturePage.h"
     "${QT_UI_DIR}/pages/CrosshairPage.cpp"
@@ -332,6 +345,9 @@ target_link_libraries(ai PRIVATE
     ole32
     oleaut32
     winmm
+    # MMCSS (AvSetMmThreadCharacteristicsW / AvSetMmThreadPriority) —— 推理线程
+    # 的调度保护, 对应原神AI 的 mmcss=true。见 runtime/sched_boost.cpp。
+    avrt
     WindowsApp)
 
 copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")

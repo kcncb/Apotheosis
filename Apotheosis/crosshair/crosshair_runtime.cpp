@@ -28,75 +28,18 @@ PivotSnapshot g_static_ref{};
 
 crosshair::CrosshairDetector  g_detector;
 
-// --- Anti-jitter: adaptive (One-Euro) low-pass on the pivot --------------
-// Heavy smoothing when the point is nearly still (kills detection jitter),
-// light smoothing when it moves fast (so flicks / recoil stay responsive and
-// un-laggy). Stateful; only touched on the capture thread inside process_frame.
-struct LowPass
-{
-    double y = 0.0;
-    bool   init = false;
-    double filter(double x, double a)
-    {
-        if (!init) { y = x; init = true; }
-        else       { y = a * x + (1.0 - a) * y; }
-        return y;
-    }
-    void reset() { init = false; }
-};
+// ── 【2026-09-13 删除】准星枢轴的自适应(One-Euro)低通 ────────────
+// 删掉的代码: LowPass / OneEuro2D 结构体 + g_cross_filter + g_filter_mtx, 以及两处调用点
+// (各自的 process_frame 路径与 CUDA 路径)。
+//
+// 为什么: 现在瞄点已经有一道 α-β 框平滑(mouse/anchor_filter.h)在 PID 之前。
+// 准星这里再叠一层就是两道串联滤波: 各自引入滞后、参数还互相耦合。
+// 保留 α-β 的理由: 它就在控制器门口, 位置/速度状态对 PID 直接可用,
+// 而且对"匀速目标不落后"有解析保证。
+//
+// 准星找色检测本身保留, 只是输出不再被时间平滑。
+// 旧 ini 里的 crosshair_smooth 键会被忽略。
 
-struct OneEuro2D
-{
-    double mincutoff = 4.0; // Hz; lower = smoother when still
-    double beta = 0.04;     // responsiveness vs speed
-    double dcutoff = 1.0;
-    LowPass xf, yf, dxf, dyf;
-    double lastT = -1.0;
-
-    static double alpha(double cutoff, double dt)
-    {
-        constexpr double kPi = 3.14159265358979323846;
-        const double tau = 1.0 / (2.0 * kPi * cutoff);
-        return 1.0 / (1.0 + tau / dt);
-    }
-
-    // Map smoothing strength s in (0,1] to a min-cutoff: more s => lower
-    // cutoff => stronger steady-state smoothing.
-    void configure(double s)
-    {
-        mincutoff = std::max(0.5, (1.0 - s) * 8.0);
-        beta = 0.04;
-        dcutoff = 1.0;
-    }
-
-    cv::Point2f filter(cv::Point2f p, double t)
-    {
-        if (lastT < 0.0)
-        {
-            lastT = t;
-            xf.filter(p.x, 1.0);
-            yf.filter(p.y, 1.0);
-            return p;
-        }
-        double dt = t - lastT;
-        if (!(dt > 1e-5)) dt = 1.0 / 240.0;
-        lastT = t;
-
-        const double dx = (p.x - xf.y) / dt;
-        const double dy = (p.y - yf.y) / dt;
-        const double edx = dxf.filter(dx, alpha(dcutoff, dt));
-        const double edy = dyf.filter(dy, alpha(dcutoff, dt));
-        const double speed = std::hypot(edx, edy);
-        const double cutoff = mincutoff + beta * speed;
-        const double a = alpha(cutoff, dt);
-        return cv::Point2f(static_cast<float>(xf.filter(p.x, a)),
-                           static_cast<float>(yf.filter(p.y, a)));
-    }
-    void reset() { xf.reset(); yf.reset(); dxf.reset(); dyf.reset(); lastT = -1.0; }
-};
-
-OneEuro2D g_cross_filter;
-std::mutex g_filter_mtx;
 
 constexpr int kMaxGpuBands = 16;
 
@@ -214,7 +157,7 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
 
     bool cross_enabled = false;
     bool cross_has_color = false;
-    float cross_smooth = 0.0f;
+    // (cross_smooth 已随 One-Euro 滤波一起删除 2026-09-13)
 
     crosshair::CrosshairDetectorSettings cross_settings;
 
@@ -234,8 +177,6 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
             return;
         }
 
-        cross_smooth = cfg.crosshair_smooth;
-
         cross_settings.enabled         = true;
         cross_settings.rect_w          = cfg.crosshair_rect_w;
         cross_settings.rect_h          = cfg.crosshair_rect_h;
@@ -254,35 +195,23 @@ void process_frame(const cv::Mat& bgrFrame, int64_t captured_ns)
         }
     }
 
-    const double tsec = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
     std::optional<cv::Point2f> hit;
-    bool cross_used = false;
     if (cross_enabled && cross_has_color)
-    {
         hit = g_detector.detect(bgrFrame, cross_settings);
-        cross_used = hit.has_value();
-    }
 
-    {
-        std::lock_guard<std::mutex> filter_lock(g_filter_mtx);
-        // 平滑强度: 配置里 <=0 时用默认 0.5 而不是"关闭"。
-        // 找色出来的枢轴是【误差的基准】—— 它抖多少, 控制器就白挨多少。实测枢轴本身
-        // 已经比较稳(逐帧 0.01px), 但开火/换弹时准星被火光烟雾干扰会出现跳点, 这个
-        // 自适应滤波(静止重平滑、快速移动放开)正是为它准备的。历史上默认 0 把它整个
-        // 关掉了, 等于把这道防线拆了 —— 所以这里不再允许"0 = 关闭", 太小一律按默认。
-        const float smooth_strength = (cross_smooth > 0.001f) ? cross_smooth : 0.5f;
-        if (cross_used)
-        {
-            g_cross_filter.configure(static_cast<double>(smooth_strength));
-            *hit = g_cross_filter.filter(*hit, tsec);
-        }
-        else
-        {
-            g_cross_filter.reset();
-        }
-    }
+    // ── 【2026-09-13 删除】准星枢轴的自适应平滑 (One-Euro, crosshair_smooth) ──────
+    // 原代码在这里对 hit 做一次 g_cross_filter.filter()。删掉的理由:
+    //
+    //   现在瞄点已经有一道 α-β 框平滑(anchor_filter.h)在 PID 之前。准星这里再叠一层
+    //   就是【两道串联滤波】: 各自引入滞后、参数还互相耦合(调了一个另一个就不对了),
+    //   而两道滤波能滤掉的东西是一样的 —— 没有理由串两个。
+    //
+    //   留哪一道: 留 α-β。因为它就在控制器门口, 位置/速度状态对 PID 直接可用, 而且
+    //   它对"匀速目标不落后"这件事有解析保证(见 anchor_filter.h 的说明)。准星找色
+    //   本身【保留】, 只是它的输出现在是原始值, 不再被时间平滑。
+    //
+    // 顺带: 原来还有一条"配置 <=0 时强制按 0.5, 不许关闭"的逻辑。那道防线存在的
+    // 前提是"这是唯一一道滤波"; 前提没了, 这条特例也一起删。
 
     PivotSnapshot snap;
     snap.ts = captured_ns > 0 ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(captured_ns))
@@ -429,15 +358,8 @@ void process_gpu_frame(const GpuImage& frame)
         if (hit.x >= roi_left && hit.x <= roi_right
             && hit.y >= roi_top && hit.y <= roi_bottom)
         {
-            const float smooth = snapshot->crosshair_smooth;
-            if (smooth > 0.001f)
-            {
-                const double tsec = std::chrono::duration<double>(
-                    out.ts.time_since_epoch()).count();
-                std::lock_guard<std::mutex> filter_lock(g_filter_mtx);
-                g_cross_filter.configure(smooth);
-                hit = g_cross_filter.filter(hit, tsec);
-            }
+            // 【2026-09-13 删除】这里原来是 g_cross_filter 的自适应平滑。
+            // 准星枢轴现在直接用原始质心 —— 平滑统一交给 PID 之前的 anchor_filter。
             out.x = hit.x;
             out.y = hit.y;
             out.valid = true;
@@ -455,8 +377,6 @@ void process_gpu_frame(const GpuImage& frame)
             publish(previous);
             return;
         }
-        std::lock_guard<std::mutex> filter_lock(g_filter_mtx);
-        g_cross_filter.reset();
     }
     publish(out);
 }

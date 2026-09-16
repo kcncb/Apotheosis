@@ -55,6 +55,10 @@ QString ConfigManager::configPath() const {
     return m_path;
 }
 
+void ConfigManager::notifyRuntimeReloaded() {
+    emit configLoaded();
+}
+
 // --- Capture: 只有「采集卡」一种方式 ---
 //
 // 旧的 capture_method / udp_* / tcp_* / eth_* / opencv_capture_* / capture_crop /
@@ -406,14 +410,8 @@ void ConfigManager::setCrosshairCloseRadius(int v) {
     emit configChanged();
 }
 
-float ConfigManager::crosshairSmooth() const {
-    return m_settings->value("Crosshair/crosshair_smooth", 0.5).toFloat();
-}
-
-void ConfigManager::setCrosshairSmooth(float v) {
-    m_settings->setValue("Crosshair/crosshair_smooth", static_cast<double>(v));
-    emit configChanged();
-}
+// 【2026-09-13 删除】crosshairSmooth() / setCrosshairSmooth() —— 准星平滑已移除,
+// 平滑统一由 PID 之前的 anchor_filter 负责。见 Apotheosis/config/config.h。
 
 QList<ConfigManager::ColorProfile> ConfigManager::crosshairColors() const {
     QList<ColorProfile> result;
@@ -508,6 +506,10 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "trigger_duration_jitter_ms", data.triggerDurationJitterMs);
     m_settings->setValue(prefix + "trigger_interval_jitter_ms", data.triggerIntervalJitterMs);
     m_settings->setValue(prefix + "trigger_switch_cooldown_ms", data.triggerSwitchCooldownMs);
+    m_settings->setValue(prefix + "trigger_auto_scope",       data.triggerAutoScope);
+    m_settings->setValue(prefix + "trigger_scope_delay_ms",   data.triggerScopeDelayMs);
+    m_settings->setValue(prefix + "trigger_auto_stop",        data.triggerAutoStop);
+    m_settings->setValue(prefix + "trigger_stop_ms",          data.triggerStopMs);
     m_settings->setValue(prefix + "aim_classes",         data.aimClasses);
     m_settings->setValue(prefix + "crosshair_detect_enabled", data.crosshairDetectEnabled);
     m_settings->setValue(prefix + "dynamic_fov_enabled", data.dynamicFovEnabled);
@@ -517,6 +519,11 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "aim_path_bezier_cy1", static_cast<double>(data.aimPathBezierCy1));
     m_settings->setValue(prefix + "aim_path_bezier_cx2", static_cast<double>(data.aimPathBezierCx2));
     m_settings->setValue(prefix + "aim_path_bezier_cy2", static_cast<double>(data.aimPathBezierCy2));
+    m_settings->setValue(prefix + "aim_path_wind_gravity",   static_cast<double>(data.aimPathWindGravity));
+    m_settings->setValue(prefix + "aim_path_wind_wind",      static_cast<double>(data.aimPathWindWind));
+    m_settings->setValue(prefix + "aim_path_wind_step",      static_cast<double>(data.aimPathWindStep));
+    m_settings->setValue(prefix + "aim_path_wind_distance",  static_cast<double>(data.aimPathWindDistance));
+    m_settings->setValue(prefix + "aim_path_wind_threshold", data.aimPathWindThreshold);
     m_settings->setValue(prefix + "aim_path_custom_samples", data.aimPathCustomSamples);
 }
 
@@ -538,6 +545,10 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.triggerDurationJitterMs = m_settings->value(prefix + "trigger_duration_jitter_ms", 0).toInt();
     data.triggerIntervalJitterMs = m_settings->value(prefix + "trigger_interval_jitter_ms", 0).toInt();
     data.triggerSwitchCooldownMs = m_settings->value(prefix + "trigger_switch_cooldown_ms", 0).toInt();
+    data.triggerAutoScope    = m_settings->value(prefix + "trigger_auto_scope", 0).toInt();
+    data.triggerScopeDelayMs = m_settings->value(prefix + "trigger_scope_delay_ms", 0).toInt();
+    data.triggerAutoStop = m_settings->value(prefix + "trigger_auto_stop", 0).toInt();
+    data.triggerStopMs   = m_settings->value(prefix + "trigger_stop_ms", 60).toInt();
     data.aimClasses      = m_settings->value(prefix + "aim_classes", QString()).toString();
     data.crosshairDetectEnabled = m_settings->value(prefix + "crosshair_detect_enabled", false).toBool();
     data.dynamicFovEnabled = m_settings->value(prefix + "dynamic_fov_enabled", false).toBool();
@@ -547,6 +558,11 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.aimPathBezierCy1 = m_settings->value(prefix + "aim_path_bezier_cy1", 0.00).toFloat();
     data.aimPathBezierCx2 = m_settings->value(prefix + "aim_path_bezier_cx2", 0.70).toFloat();
     data.aimPathBezierCy2 = m_settings->value(prefix + "aim_path_bezier_cy2", 0.00).toFloat();
+    data.aimPathWindGravity   = m_settings->value(prefix + "aim_path_wind_gravity", 5.0).toFloat();
+    data.aimPathWindWind      = m_settings->value(prefix + "aim_path_wind_wind", 2.0).toFloat();
+    data.aimPathWindStep      = m_settings->value(prefix + "aim_path_wind_step", 10.0).toFloat();
+    data.aimPathWindDistance  = m_settings->value(prefix + "aim_path_wind_distance", 8.0).toFloat();
+    data.aimPathWindThreshold = m_settings->value(prefix + "aim_path_wind_threshold", 10).toInt();
     data.aimPathCustomSamples = m_settings->value(prefix + "aim_path_custom_samples", QString()).toString();
 
     return data;

@@ -122,6 +122,23 @@ inline std::vector<uint8_t> frame_click(uint8_t btn_bits, uint16_t down_ms) {
 inline std::vector<uint8_t> frame_wheel(int8_t delta) {
     return build_frame(CMD_WHEEL, reinterpret_cast<const uint8_t*>(&delta), 1);
 }
+// 键盘单键短按: uint8 mod + uint8 key(HID usage id) + uint16 hold_ms。
+// 固件内定时弹起(自清), 所以不会因为上位机异常而把键卡住。
+inline std::vector<uint8_t> frame_key_tap(uint8_t mod, uint8_t key, uint16_t hold_ms) {
+    std::vector<uint8_t> p;
+    p.push_back(mod);
+    p.push_back(key);
+    put_u16(p, hold_ms);
+    return build_frame(CMD_KEY_TAP, p.data(), p.size());
+}
+// 键盘绝对态: uint8 mod + uint8 keys[6] (标准 HID 键盘报表布局)
+inline std::vector<uint8_t> frame_key_mask(uint8_t mod, const uint8_t* keys, size_t count) {
+    std::vector<uint8_t> p(7, 0);
+    p[0] = mod;
+    for (size_t i = 0; i < count && i < 6; ++i)
+        p[1 + i] = keys[i];
+    return build_frame(CMD_KEY_MASK, p.data(), p.size());
+}
 inline std::vector<uint8_t> frame_ghost(bool on) {
     uint8_t v = on ? 1 : 0; return build_frame(CMD_GHOST_MODE, &v, 1);
 }

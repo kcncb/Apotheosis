@@ -190,14 +190,10 @@ CrosshairPage::CrosshairPage(QWidget* parent)
     connect(m_closeRadius, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [](int v) { ConfigManager::instance().setCrosshairCloseRadius(v); });
 
-    // 平滑防抖强度
-    shapeCard->contentLayout()->addWidget(
-        FormKit::sliderRowD(
-            QStringLiteral("平滑防抖强度"),
-            0.0, 1.0, static_cast<double>(cfg.crosshairSmooth()), 0.01, 2,
-            m_smoothSlider, m_smoothSpin));
-    connect(m_smoothSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, [](double v) { ConfigManager::instance().setCrosshairSmooth(static_cast<float>(v)); });
+    // ──【2026-09-13 删除】「平滑防抖强度」滑块 (crosshair_smooth) ──────────────
+    // 准星枢轴不再做时间平滑: 现在锚点只有一道 α-β 平滑(anchor_filter), 位置在 PID
+    // 之前。两道串联滤波参数互相耦合, 留一道、放在最接近控制器的地方更好调。
+    // 准星找色检测本身保留, 只是输出直接用原始质心。
 
     layout->addWidget(shapeCard);
 
@@ -215,7 +211,7 @@ void CrosshairPage::loadConfig() {
     m_rectH->setValue(cfg.crosshairRectH());
     m_minPixels->setValue(cfg.crosshairMinPixelCount());
     m_closeRadius->setValue(cfg.crosshairCloseRadius());
-    m_smoothSpin->setValue(static_cast<double>(cfg.crosshairSmooth()));
+    // (m_smoothSpin 已随「平滑防抖强度」滑块一起删除 2026-09-13)
 
     m_colors = cfg.crosshairColors();
     rebuildColorList();

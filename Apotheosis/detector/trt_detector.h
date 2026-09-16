@@ -110,6 +110,20 @@ private:
     void allocatePinnedOutputs();
     void freePinnedOutputs();
 
+    // 等待一个 CUDA event 完成。
+    //
+    // 默认走自旋 (cudaEventQuery 轮询), 完成即返回; 这在推理线程上比
+    // cudaEventSynchronize 的内核态阻塞唤醒快 10~40us, 而且不会因为 CPU
+    // 抢占被推迟 —— 消的是 p99 尾部而非均值。
+    //
+    // 自旋超过 spin_wait_timeout_ms 后回退到阻塞式同步, 避免 GPU 掉卡 /
+    // 上下文丢失时把推理线程永久占死。
+    void waitForEvent(cudaEvent_t ev);
+    // 自旋统计: 用于确认这条路径真的生效 (chain log 里打出来)。
+    double lastSyncSpinMs = 0.0;
+    bool   lastSyncUsedSpin = false;
+    long   syncFallbackCount = 0;
+
     std::mutex inferenceMutex;
     std::condition_variable inferenceCV;
     std::atomic<bool> shouldExit;

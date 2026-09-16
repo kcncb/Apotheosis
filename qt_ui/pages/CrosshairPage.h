@@ -41,8 +41,7 @@ private:
     // ---- Crosshair shape tolerance ----
     QSpinBox* m_minPixels{};
     QSpinBox* m_closeRadius{};
-    QDoubleSpinBox* m_smoothSpin{};
-    QSlider* m_smoothSlider{};
+    // 【2026-09-13 删除】m_smoothSpin / m_smoothSlider —— 准星平滑已移除。
 
     // ---- Color Palette UI ----
     QList<ConfigManager::ColorProfile> m_colors;

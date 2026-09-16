@@ -107,7 +107,7 @@ void ConfigBridge::syncToRuntime() {
     config.crosshair_rect_h         = cm.crosshairRectH();
     config.crosshair_min_pixel_count = cm.crosshairMinPixelCount();
     config.crosshair_close_radius   = cm.crosshairCloseRadius();
-    config.crosshair_smooth         = cm.crosshairSmooth();
+    // (crosshair_smooth 已删除 2026-09-13)
 
     {
         auto qcolors = cm.crosshairColors();
@@ -217,7 +217,7 @@ void ConfigBridge::syncFromRuntime()
     cm.setCrosshairRectH(config.crosshair_rect_h);
     cm.setCrosshairMinPixelCount(config.crosshair_min_pixel_count);
     cm.setCrosshairCloseRadius(config.crosshair_close_radius);
-    cm.setCrosshairSmooth(config.crosshair_smooth);
+    // (cm.setCrosshairSmooth 已删除 2026-09-13)
     {
         QList<ConfigManager::ColorProfile> qcolors;
         for (const auto& c : config.crosshair_colors) {
@@ -270,6 +270,10 @@ void ConfigBridge::syncFromRuntime()
         hd.triggerDurationJitterMs = hp.trigger_duration_jitter_ms;
         hd.triggerIntervalJitterMs = hp.trigger_interval_jitter_ms;
         hd.triggerSwitchCooldownMs = hp.trigger_switch_cooldown_ms;
+        hd.triggerAutoScope    = hp.trigger_auto_scope;
+        hd.triggerScopeDelayMs = hp.trigger_scope_delay_ms;
+        hd.triggerAutoStop     = hp.trigger_auto_stop;
+        hd.triggerStopMs       = hp.trigger_stop_ms;
         {
             QString joined;
             for (size_t ai = 0; ai < hp.aim_classes.size(); ++ai) {
@@ -293,6 +297,11 @@ void ConfigBridge::syncFromRuntime()
         hd.aimPathBezierCy1   = hp.aim_path_bezier_cy1;
         hd.aimPathBezierCx2   = hp.aim_path_bezier_cx2;
         hd.aimPathBezierCy2   = hp.aim_path_bezier_cy2;
+        hd.aimPathWindGravity   = hp.aim_path_wind_gravity;
+        hd.aimPathWindWind      = hp.aim_path_wind_wind;
+        hd.aimPathWindStep      = hp.aim_path_wind_step;
+        hd.aimPathWindDistance  = hp.aim_path_wind_distance;
+        hd.aimPathWindThreshold = hp.aim_path_wind_threshold;
         // 高密度曲线由 Config 的 .curve 二进制资产持久化。
         // QSettings 不再重复保存数万个文本浮点数。
         hd.aimPathCustomSamples.clear();

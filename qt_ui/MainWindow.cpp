@@ -2,9 +2,11 @@
 
 #include <QHBoxLayout>
 #include <QCloseEvent>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QGraphicsOpacityEffect>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPropertyAnimation>
 #include <QShortcut>
 #include <QStackedWidget>
@@ -19,6 +21,7 @@
 #include "capture/capture.h"
 #include "config/config.h"
 #include "config/config_bridge.h"
+#include "config/config_profiles.h"
 #include "config/ConfigManager.h"
 #include "detector/i_detector.h"
 #include "runtime/inference_session.h"
@@ -39,6 +42,7 @@
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
+#include "pages/AutoTunePage.h"
 #include "capture/auto_capture.h"
 
 namespace {
@@ -62,8 +66,10 @@ const QVector<GroupDef>& navGroups() {
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu")}},
         {QString::fromUtf8(u8"控制"),
-         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"准星找色")},
-         {QStringLiteral("keyboard"), QStringLiteral("color-swatch")}},
+         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"准星找色"),
+          QString::fromUtf8(u8"自动调参")},
+         {QStringLiteral("keyboard"), QStringLiteral("color-swatch"),
+          QStringLiteral("adjustments")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -136,6 +142,29 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_topNav, &TopNavBar::primaryChanged, this, &MainWindow::onPrimaryChanged);
     connect(m_sideNav, &SideNav::currentChanged, this, &MainWindow::onSecondaryChanged);
     connect(m_topNav, &TopNavBar::saveClicked, this, &MainWindow::onSaveRequested);
+
+    // ── 全局配置方案 ──
+    connect(m_topNav, &TopNavBar::profileSwitchRequested,
+            this, &MainWindow::onProfileSwitchRequested);
+    connect(m_topNav, &TopNavBar::profileSaveRequested,
+            this, &MainWindow::onProfileSaveRequested);
+    connect(m_topNav, &TopNavBar::profileSaveAsRequested,
+            this, &MainWindow::onProfileSaveAsRequested);
+    connect(m_topNav, &TopNavBar::profileRenameRequested,
+            this, &MainWindow::onProfileRenameRequested);
+    connect(m_topNav, &TopNavBar::profileDeleteRequested,
+            this, &MainWindow::onProfileDeleteRequested);
+    connect(m_topNav, &TopNavBar::profileOpenDirRequested,
+            this, &MainWindow::onProfileOpenDirRequested);
+    connect(m_topNav, &TopNavBar::profileRefreshRequested,
+            this, &MainWindow::onProfileRefreshRequested);
+    connect(&ConfigProfiles::instance(), &ConfigProfiles::profilesChanged,
+            this, &MainWindow::refreshProfileControls);
+    connect(&ConfigProfiles::instance(), &ConfigProfiles::operationFailed,
+            this, [this](const QString& message) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"配置方案"), message);
+    });
+    refreshProfileControls();
 
     auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
     connect(saveShortcut, &QShortcut::activated, this, &MainWindow::onSaveRequested);
@@ -299,11 +328,175 @@ void MainWindow::updateContextHeader(int primary, int secondary) {
 void MainWindow::onSaveRequested() {
     if (m_sessionOperation.valid()) return;
     ConfigBridge::instance().syncToRuntime();
-    {
+
+    // 落盘目标由 Config::config_path 决定: 建立方案之后它指向当前方案文件,
+    // 所以在「保存设置」和「保存当前方案」是同一件事。
+    QString error;
+    if (!ConfigProfiles::instance().saveCurrent(&error)) {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
-        config.saveConfig();
+        if (!config.saveConfig()) {
+            QMessageBox::warning(this, QString::fromUtf8(u8"保存设置"),
+                                 error.isEmpty()
+                                     ? QString::fromUtf8(u8"配置写入失败。")
+                                     : error);
+            return;
+        }
     }
     m_topNav->showSaveFeedback();
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已保存"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 全局配置方案
+// ═══════════════════════════════════════════════════════════════════════════
+
+void MainWindow::refreshProfileControls() {
+    auto& profiles = ConfigProfiles::instance();
+    m_topNav->setProfiles(profiles.names(), profiles.activeName());
+}
+
+void MainWindow::onProfileSwitchRequested(const QString& name) {
+    auto& profiles = ConfigProfiles::instance();
+    if (name.isEmpty() || name == profiles.activeName()) {
+        refreshProfileControls();
+        return;
+    }
+
+    // 推理会话正在跑的时候整套换配置: 采集设备/模型都会变。要让用户知道
+    // 有些东西要重启会话才彻底生效, 而不是悄悄换一半。
+    if (m_sessionRunning && !m_starting) {
+        const auto answer = QMessageBox::question(
+            this, QString::fromUtf8(u8"切换配置方案"),
+            QString::fromUtf8(u8"推理正在运行。切换到「%1」后, 采集设备与模型等参数"
+                              u8"需要重启推理会话才会完全生效。\n\n现在切换吗？")
+                .arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            refreshProfileControls();
+            return;
+        }
+    }
+
+    QString error;
+    if (!profiles.switchTo(name, &error)) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"切换配置方案"), error);
+        refreshProfileControls();
+        return;
+    }
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已切换"));
+}
+
+void MainWindow::onProfileSaveRequested() {
+    if (m_sessionOperation.valid()) return;
+    QString error;
+    if (!ConfigProfiles::instance().saveCurrent(&error)) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"保存配置方案"), error);
+        return;
+    }
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已保存"));
+    m_topNav->showSaveFeedback();
+}
+
+void MainWindow::onProfileSaveAsRequested() {
+    if (m_sessionOperation.valid()) return;
+    auto& profiles = ConfigProfiles::instance();
+
+    bool ok = false;
+    const QString input = QInputDialog::getText(
+        this, QString::fromUtf8(u8"另存为配置方案"),
+        QString::fromUtf8(u8"方案名称（例如：游戏名 / 灵敏度档位）:"),
+        QLineEdit::Normal, profiles.activeName(), &ok);
+    if (!ok || input.trimmed().isEmpty())
+        return;
+
+    const QString name = ConfigProfiles::sanitizeName(input);
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"另存为配置方案"),
+                             QString::fromUtf8(u8"方案名不能为空, 且不能包含 "
+                                               u8"\\ / : * ? \" < > | 等字符。"));
+        return;
+    }
+
+    bool overwrite = false;
+    if (profiles.exists(name)) {
+        const auto answer = QMessageBox::question(
+            this, QString::fromUtf8(u8"同名方案已存在"),
+            QString::fromUtf8(u8"已存在配置方案「%1」, 覆盖它吗？").arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+        overwrite = true;
+    }
+
+    QString error;
+    if (!profiles.saveAs(name, overwrite, &error)) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"另存为配置方案"), error);
+        return;
+    }
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已保存"));
+}
+
+void MainWindow::onProfileRenameRequested() {
+    if (m_sessionOperation.valid()) return;
+    auto& profiles = ConfigProfiles::instance();
+    const QString active = profiles.activeName();
+    if (active.isEmpty())
+        return;
+
+    bool ok = false;
+    const QString input = QInputDialog::getText(
+        this, QString::fromUtf8(u8"重命名配置方案"), QString::fromUtf8(u8"新的方案名称:"),
+        QLineEdit::Normal, active, &ok);
+    if (!ok)
+        return;
+
+    const QString name = ConfigProfiles::sanitizeName(input);
+    if (name.isEmpty() || name == active) {
+        if (name.isEmpty())
+            QMessageBox::warning(this, QString::fromUtf8(u8"重命名配置方案"),
+                                 QString::fromUtf8(u8"方案名无效。"));
+        return;
+    }
+
+    QString error;
+    if (!profiles.renameProfile(active, name, &error)) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"重命名配置方案"), error);
+        return;
+    }
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已重命名"));
+}
+
+void MainWindow::onProfileDeleteRequested() {
+    if (m_sessionOperation.valid()) return;
+    auto& profiles = ConfigProfiles::instance();
+    const QString active = profiles.activeName();
+    if (active.isEmpty())
+        return;
+
+    const auto answer = QMessageBox::warning(
+        this, QString::fromUtf8(u8"删除配置方案"),
+        QString::fromUtf8(u8"删除「%1」？该方案的配置文件与轨迹曲线会被永久删除, "
+                          u8"无法撤销。\n\n删除后会自动切到另一个方案。")
+            .arg(active),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QString error;
+    if (!profiles.remove(active, &error)) {
+        QMessageBox::warning(this, QString::fromUtf8(u8"删除配置方案"), error);
+        return;
+    }
+    m_topNav->showProfileFeedback(QString::fromUtf8(u8"已删除"));
+}
+
+void MainWindow::onProfileOpenDirRequested() {
+    ConfigProfiles::instance().openDirectory();
+}
+
+void MainWindow::onProfileRefreshRequested() {
+    // 方案文件可能在资源管理器里被手动增删 —— 重新扫一遍 configs/。
+    ConfigProfiles::instance().refresh();
 }
 
 MainWindow::~MainWindow()
@@ -400,6 +593,7 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
     if (name == QString::fromUtf8(u8"瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
+    if (name == QString::fromUtf8(u8"自动调参"))   { m_autoTunePage = new AutoTunePage(); return m_autoTunePage; }
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }

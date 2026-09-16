@@ -16,9 +16,28 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
+
+#include <cmath>
+
+namespace {
+
+// FormKit::sliderRowD 里 slider 的值域是 round((v - min)/step), 所以还原时
+// 必须用同一个映射; 而且 spin 的信号被屏蔽后 slider 不会跟着走, 得手工同步。
+void setSliderValue(QDoubleSpinBox* spin, QSlider* slider,
+                    double value, double min, double step) {
+    const QSignalBlocker blockSpin(spin);
+    spin->setValue(value);
+    if (!slider)
+        return;
+    const QSignalBlocker blockSlider(slider);
+    slider->setValue(static_cast<int>(std::lround((value - min) / step)));
+}
+
+}  // namespace
 
 AiModelPage::AiModelPage(QWidget* parent)
     : QWidget(parent) {
@@ -243,6 +262,52 @@ AiModelPage::AiModelPage(QWidget* parent)
     });
 
     layout->addStretch();
+
+    updateModelInfo();
+    updateBackendStatus();
+
+    // 切换配置方案后, 本页所有控件都要按新方案重读。
+    connect(&cfg, &ConfigManager::configLoaded, this, &AiModelPage::reloadFromConfig);
+}
+
+void AiModelPage::reloadFromConfig() {
+    auto& cfg = ConfigManager::instance();
+
+    // 整段还原期间屏蔽控件信号: 否则 setValue/setChecked 会走回写路径, 把
+    // 中间态当成用户改动塞进新方案。
+    const QSignalBlocker blockCombo(m_modelCombo);
+    const QSignalBlocker blockBackend(m_backendCombo);
+    const QSignalBlocker blockDml(m_dmlDeviceId);
+    const QSignalBlocker blockMaxDet(m_maxDetections);
+    const QSignalBlocker blockStToggle(m_smallTargetEnabled);
+
+    const QString model = cfg.aiModel();
+    int modelIdx = m_modelCombo->findText(model);
+    if (modelIdx < 0 && !model.isEmpty()) {
+        // 方案里的模型不在 models/ 列表里 (被删了/拷走了): 补一项让用户看见真实值,
+        // 而不是让下拉悄悄留在上一个方案的文件名上。
+        m_modelCombo->addItem(model);
+        modelIdx = m_modelCombo->findText(model);
+    }
+    if (modelIdx >= 0)
+        m_modelCombo->setCurrentIndex(modelIdx);
+
+    m_backendCombo->setCurrentIndex(cfg.backend() == QStringLiteral("DML") ? 1 : 0);
+    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
+    m_dmlRow->setVisible(m_backendCombo->currentIndex() == 1);
+
+    setSliderValue(m_confSpin, m_confSlider, cfg.confidenceThreshold(), 0.01, 0.01);
+    setSliderValue(m_nmsSpin, m_nmsSlider, cfg.nmsThreshold(), 0.00, 0.01);
+    m_maxDetections->setValue(cfg.maxDetections());
+
+    m_smallTargetEnabled->setChecked(cfg.smallTargetEnabled());
+    setSliderValue(m_smallTargetConfSpin, m_smallTargetConfSlider,
+                   cfg.smallTargetConfidence(), 0.01, 0.01);
+    setSliderValue(m_smallTargetAreaSpin, m_smallTargetAreaSlider,
+                   cfg.smallTargetAreaFrac(), 0.001, 0.001);
+    const bool stEnabled = cfg.smallTargetEnabled();
+    m_smallTargetConfRow->setEnabled(stEnabled);
+    m_smallTargetAreaRow->setEnabled(stEnabled);
 
     updateModelInfo();
     updateBackendStatus();

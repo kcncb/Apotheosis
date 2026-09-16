@@ -554,6 +554,22 @@ void MakcuNewConnection::wheel(int delta)
     sendFrame(makcu::CMD_WHEEL, reinterpret_cast<const uint8_t*>(&value), 1);
 }
 
+bool MakcuNewConnection::tapKey(int hidKey, int holdMs, int mod)
+{
+    if (!open_.load(std::memory_order_acquire)) return false;
+    if (hidKey <= 0 || hidKey > 0xFF) return false;
+    const int hold = std::clamp(holdMs, 1, 2000);
+    // 固件 0x22 KEY_TAP: payload = {mod, key, hold_ms_lo, hold_ms_hi}
+    // key 用标准 HID usage id(与 0x21 KEY_MASK 的 keys[6] 同一码表)。
+    // 固件内定时弹起, 是自清的 —— 上位机异常也不会把键卡在按下。
+    uint8_t payload[4];
+    payload[0] = static_cast<uint8_t>(std::clamp(mod, 0, 0xFF));
+    payload[1] = static_cast<uint8_t>(hidKey);
+    payload[2] = static_cast<uint8_t>(hold & 0xFF);
+    payload[3] = static_cast<uint8_t>((hold >> 8) & 0xFF);
+    return sendFrame(makcu::CMD_KEY_TAP, payload, sizeof(payload));
+}
+
 bool MakcuNewConnection::physicalButtonPressed(int button) const
 {
     const uint8_t bit = buttonBit(button);

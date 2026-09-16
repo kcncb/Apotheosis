@@ -8,6 +8,7 @@
 
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QSignalBlocker>
 #include "config/config_bridge.h"
 #include <QHBoxLayout>
 #include <QLabel>
@@ -105,59 +106,20 @@ HardwarePage::HardwarePage(QWidget* parent)
     deviceCard->contentLayout()->addWidget(m_deviceStack);
     layout->addWidget(deviceCard);
 
-    // 「图像与鼠标映射」已移除。
+    // ── 【2026-09-13 删除】「延迟估计」卡片(含它唯一的 addMapping 字段) ──────────
     //
-    // 现役控制链(mouse/aim_pid.h)全程在【鼠标计数】域输出: 控制器算完直接把计数交给
-    // sendRawMove, 不存在"像素 -> 计数"这一步。而 mouse_pixels_per_count_x/y
-    // 与发送后生效延迟/误差范围这三个参数, 本来就是旧 predictive_controller 用来
-    // "扣除自身在途指令的像素位移"的写死标定 —— 现在没有任何代码读取它们。
-    // 新控制器同样需要"每计数多少像素", 但它是观测器(mouse/aim_motion.h)在线估出来的,
-    // 不落盘、不需要用户标定, 所以这里依旧没有可填的字段。
+    // 这张卡片曾经装过「图像与鼠标映射」那几个标定量, 后来只剩「采集回调前帧龄（估计）」
+    // 一个输入框。那个框也删掉之后, 卡片就【一个字段都不剩】了 —— 如果只删字段、留下
+    // 卡片, 界面上会出现一个只有标题的空壳(与「移动锁死瞄准」那次是同一类错误)。
+    // 所以这里连卡片和 addMapping lambda 一起删。
     //
-    // 只保留采集回调前帧龄: 它仍然参与延迟遥测的采集时间戳修正。
-    auto* mappingCard = new CardWidget(zh(u8"延迟估计"), QStringLiteral("adjustments"));
-    auto addMapping = [&](const char* title, double Config::*field, double low, double high, const char* suffix) {
-        auto* spin = new QDoubleSpinBox;
-        spin->setDecimals(4); spin->setRange(low, high); spin->setSuffix(QString::fromUtf8(suffix));
-        { std::lock_guard<std::recursive_mutex> lock(configMutex); spin->setValue(config.*field); }
-        mappingCard->contentLayout()->addWidget(FormKit::fieldRow(zh(title), spin));
-        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [field](double v) {
-            std::lock_guard<std::recursive_mutex> lock(configMutex);
-            config.*field = v;
-            ConfigBridge::instance().markDirty();
-        });
-    };
-    addMapping(u8"采集回调前帧龄（估计）", &Config::capture_age_offset_ms, 0, 100, " ms");
-    auto* note = new QLabel(zh(u8"回调前帧龄是模型估计, 填 0 表示尚未补偿。它只影响延迟遥测的时间戳, 不参与控制回路。"));
-    note->setWordWrap(true); mappingCard->contentLayout()->addWidget(note);
-    layout->addWidget(mappingCard);
-
-    // 准星找色平滑: 以前只有配置文件里有这一项, 界面上看不到, 默认还是 0(等于关闭)。
-    // 但准星枢轴是【误差的基准】—— 它抖多少, 控制器就白挨多少。这里给它一个可见的旋钮。
-    {
-        auto* crossCard = new CardWidget(zh(u8"准星找色"), QStringLiteral("crosshair"));
-        auto* spin = new QDoubleSpinBox;
-        spin->setDecimals(2);
-        spin->setSingleStep(0.05);
-        spin->setRange(0.0, 1.0);
-        {
-            std::lock_guard<std::recursive_mutex> lock(configMutex);
-            spin->setValue(static_cast<double>(config.crosshair_smooth));
-        }
-        crossCard->contentLayout()->addWidget(FormKit::fieldRow(zh(u8"平滑强度"), spin));
-        auto* tip = new QLabel(zh(u8"0~1：越大越平滑(静止时重平滑、快速移动时自动放开，所以不会拖慢甩枪)。"));
-        tip->setWordWrap(true);
-        crossCard->contentLayout()->addWidget(tip);
-        auto* tip2 = new QLabel(zh(u8"填 0 或很小都按默认 0.5 处理：这道防线不该被关掉 —— 开火时准星被火光/烟雾干扰出现的跳点，会直接变成控制器的错误输入。"));
-        tip2->setWordWrap(true);
-        crossCard->contentLayout()->addWidget(tip2);
-        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [](double v) {
-            std::lock_guard<std::recursive_mutex> lock(configMutex);
-            config.crosshair_smooth = static_cast<float>(v);
-            ConfigBridge::instance().markDirty();
-        });
-        layout->addWidget(crossCard);
-    }
+    // 背景(为什么没有可填的字段了):
+    //   现役控制链(mouse/aim_pid.h)全程在【鼠标计数】域输出: 控制器算完直接把计数交给
+    //   sendRawMove, 不存在"像素 -> 计数"这一步。mouse_pixels_per_count_x/y 与"发送后
+    //   生效延迟/误差范围"这三个参数, 本来就是旧 predictive_controller 用来"扣除自身
+    //   在途指令的像素位移"的写死标定 —— 没有任何代码读取它们。
+    //   帧龄估计同样是手填的猜测值, 控制器不吃任何延迟估计。
+    //   真实的端到端延迟由 latency_probe 逐帧实测并落进延迟日志(那个保留)。
 
     loadFieldsFromConfig();
 
@@ -176,6 +138,10 @@ HardwarePage::HardwarePage(QWidget* parent)
         ConfigManager::instance().setMakcuNewBaudrate(value);
     });
     connect(m_connectBtn, &QPushButton::clicked, this, &HardwarePage::reconnectDevice);
+
+    // 切换全局配置方案后, 设备类型/串口必须跟着新方案走。
+    connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
+            this, &HardwarePage::loadFieldsFromConfig);
 
     m_statusTimer = new QTimer(this);
     m_statusTimer->setInterval(2000);
@@ -199,6 +165,9 @@ void HardwarePage::loadFieldsFromConfig()
     m_makcuBaud->setValue(cm.makcuBaudrate());
     m_makcuNewPort->setText(cm.makcuNewPort());
     m_makcuNewBaud->setValue(cm.makcuNewBaudrate());
+
+    // 【2026-09-13 删除】原来这里还要单独还原 m_captureAgeOffset / m_crosshairSmooth
+    // 两个直接写 config.* 的控件; 两个控件都已删除, 这段跟着删。
 }
 
 void HardwarePage::onInputMethodChanged(int index)

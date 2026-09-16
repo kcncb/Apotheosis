@@ -206,6 +206,15 @@ std::vector<Detection> postProcessYolo(
 
     if (cols == 6)
     {
+        // ── End2End 输出 [1, N, 6] ────────────────────────────────────────
+        // 这是原神AI 用的模型形态 (YOLO26 + end2end=True): NMS/DFL 解码已经
+        // 烘进计算图, 输出直接是成品框 [x1, y1, x2, y2, conf, class_id]。
+        //
+        // 关键: 【不要再跑 NMS】。图内已经做过无 NMS 的选择, 这里的每一行
+        // 都是模型认为该保留的目标; 再叠一层 IoU 抑制会把"两个真实目标靠得
+        // 很近"的情况误删 —— 那是纯损失, 没有任何收益。
+        //
+        // 顺带一提 EfficientNMS 插件风格的引擎也是这个形状, 语义相同。
         int64_t numDetections = rows;
         for (int i = 0; i < numDetections; ++i)
         {
@@ -235,6 +244,13 @@ std::vector<Detection> postProcessYolo(
                 detections.push_back(detection);
             }
         }
+
+        if (nmsTime)
+            *nmsTime = std::chrono::duration<double, std::milli>(0);
+
+        applySmallTargetConfFilter(detections, smallTargetBaseConf, smallTargetAreaThreshPx);
+        applyDeleteBucketFilter(detections);
+        return detections;
     }
     else if (rows == numClasses + 4)
     {

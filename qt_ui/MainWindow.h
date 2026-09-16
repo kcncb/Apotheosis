@@ -39,6 +39,16 @@ private slots:
     void onSaveRequested();
     void pollMonitorTelemetry();
 
+    // ── 全局配置方案 ──
+    void onProfileSwitchRequested(const QString& name);
+    void onProfileSaveRequested();
+    void onProfileSaveAsRequested();
+    void onProfileRenameRequested();
+    void onProfileDeleteRequested();
+    void onProfileOpenDirRequested();
+    void onProfileRefreshRequested();
+    void refreshProfileControls();
+
 private:
     void beginSessionOperation(bool start);
     void pollSessionOperation();
@@ -77,6 +87,7 @@ private:
     class LogPage*           m_logPage{};
     class DebugPage*         m_debugPage{};
     class AutoCapturePage*   m_autoCapPage{};
+    class AutoTunePage*      m_autoTunePage{};
 
     // Last AppLog snapshot size — only tail-new lines get pushed each tick.
     int m_logCursor = 0;

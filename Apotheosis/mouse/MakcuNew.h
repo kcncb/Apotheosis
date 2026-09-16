@@ -38,6 +38,9 @@ public:
     void press(int button);
     void release(int button);
     void wheel(int delta);
+    // 键盘单键短按(0x22 KEY_TAP): HID usage id + 按住毫秒数, 固件内定时弹起。
+    // 只有 MAKCUNEW 有键盘通道 —— 自动急停(mouse/auto_stop.h)靠它。
+    bool tapKey(int hidKey, int holdMs, int mod = 0);
     void cancelMove();
     bool physicalButtonPressed(int button) const;
 

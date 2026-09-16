@@ -2,6 +2,8 @@
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
+// _mm_pause(): 自旋等待里的退让提示 (见 waitForEvent)。
+#include <intrin.h>
 
 #include <filesystem>
 #include <fstream>
@@ -31,6 +33,7 @@
 #include "capture.h"
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
+#include "runtime/sched_boost.h"
 
 int model_quant;
 std::vector<float> outputData;
@@ -321,9 +324,72 @@ void TrtDetector::freeTransposedBuffers()
     outputNeedsTranspose.clear();
 }
 
-void TrtDetector::allocatePinnedOutputs()
+// ─────────────────────────────────────────────────────────────────────────────
+// waitForEvent —— 自旋等待版的事件同步
+//
+// 为什么不用 cudaEventSynchronize:
+//   cudaEventSynchronize 内部把等待线程挂到内核事件对象上, GPU 完成时由
+//   驱动唤醒。一次"睡眠→唤醒"往返 10~40us, 而且唤醒后还要等调度器把线程
+//   放回 CPU —— 在系统繁忙时这个延迟会被放大到毫秒级。
+//
+//   原神AI 的日志里写着 `host_wait_spin=true`, 就是这条路: 不做阻塞等待,
+//   直接轮询。它换来的是【稳定的尾延迟】而不是更低的均值 —— 而瞄准链路的
+//   体感恰恰由尾部决定 (§inference-optimization-analysis.md §2.3)。
+//
+// 成本: 自旋期间占满一个核。推理线程本来就是专用线程, 且这段等待真实存在
+// (~2ms/帧), 所以没有挤占任何有用工作; 真要省电可以在 config 里关掉。
+//
+// 安全阀: 自旋超过 spin_wait_timeout_ms 就回退到阻塞式同步。这样 GPU 掉卡
+// 或上下文丢失时线程不会永远转下去, 而是交给 cudaEventSynchronize 的语义
+// 去处理 (它会一直等, 但至少 CPU 是睡着的, 可以被外部打断)。
+// ─────────────────────────────────────────────────────────────────────────────
+void TrtDetector::waitForEvent(cudaEvent_t ev)
 {
-    freePinnedOutputs();
+    if (!ev)
+        return;
+
+    const Config& cfg = *runtime_config::read();
+    const bool spin = cfg.use_spin_wait_sync;
+    const int  timeoutMs = cfg.spin_wait_timeout_ms;
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    if (spin)
+    {
+        const auto deadline = t0 + std::chrono::milliseconds(timeoutMs);
+        while (true)
+        {
+            const cudaError_t q = cudaEventQuery(ev);
+            if (q == cudaSuccess)
+            {
+                lastSyncUsedSpin = true;
+                lastSyncSpinMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                return;
+            }
+            if (q != cudaErrorNotReady)
+            {
+                // 事件本身出错 (上下文丢失等): 让下面的阻塞同步去暴露它。
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                ++syncFallbackCount;
+                break;
+            }
+            // 暂停提示: 超线程兄弟核可以让出执行资源, 同时不进内核态。
+            _mm_pause();
+        }
+    }
+
+    lastSyncUsedSpin = false;
+    cudaEventSynchronize(ev);
+    lastSyncSpinMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+}
+
+void TrtDetector::allocatePinnedOutputs()
+{    freePinnedOutputs();
 
     for (const auto& name : outputNames)
     {
@@ -1353,6 +1419,22 @@ void TrtDetector::processFrameGpu(GpuImage frame, runtime::FrameContext context)
 
 void TrtDetector::inferenceThread()
 {
+    // 把这条线程注册进 MMCSS, 对应原神AI 日志里的 mmcss=true / thread_qos=true。
+    // 作用: 系统为推理线程预留 CPU 带宽, 抑制其它线程对它的抢占 —— 消的是
+    // 调度抖动(1~5ms 量级), 不是均值。析构时自动反注册。
+    //
+    // 注意作用域: 它只覆盖本函数, 也就是整条推理线程的生命周期。
+    auto mmcssTask = runtime_config::read()->mmcss_task_name;
+    const bool wantMmcss = runtime_config::read()->use_mmcss;
+    std::unique_ptr<sched_boost::ScopedThreadBoost> threadBoost;
+    if (wantMmcss)
+    {
+        threadBoost = std::make_unique<sched_boost::ScopedThreadBoost>(mmcssTask.c_str());
+        if (threadBoost->active())
+            std::cout << "[Detector] Inference thread boosted (MMCSS task="
+                      << mmcssTask << ")" << std::endl;
+    }
+
     // Double-buffer pipeline state. When numSlots==1 prev_slot stays -1 and
     // post-processing runs inline on the just-submitted slot (legacy flow).
     int curr_slot = 0;
@@ -1572,7 +1654,7 @@ void TrtDetector::inferenceThread()
 
                         if (numSlots == 1)
                         {
-                            cudaEventSynchronize(copyCompleteEvent[curr_slot]);
+                            waitForEvent(copyCompleteEvent[curr_slot]);
                         }
                     }
                 }
@@ -1634,7 +1716,7 @@ void TrtDetector::inferenceThread()
                     if (numSlots == 1)
                     {
                         // Single-slot: block here as before.
-                        cudaEventSynchronize(copyCompleteEvent[curr_slot]);
+                        waitForEvent(copyCompleteEvent[curr_slot]);
                     }
                 }
 
@@ -1659,7 +1741,7 @@ void TrtDetector::inferenceThread()
                     if (numSlots > 1)
                     {
                         // Wait for this slot's GPU work chain to complete.
-                        cudaEventSynchronize(slotDoneEvent[post_slot]);
+                        waitForEvent(slotDoneEvent[post_slot]);
                     }
 
                     auto& postPinned = pinnedSlot(post_slot);
@@ -1765,6 +1847,9 @@ void TrtDetector::inferenceThread()
                 lastPreprocessTimeValue = std::chrono::duration<double, std::milli>(preprocessMs);
                 lastInferenceTimeValue = std::chrono::duration<double, std::milli>(inferenceMs);
                 if (post_slot >= 0) runtime::latency::noteEngineInferenceMs(inferenceMs);
+                // 同步/调度遥测: 自旋是否生效、回退过几次。chain log 的周期摘要
+                // 会把它打出来, 所以"优化到底有没有起作用"是可验证的而不是靠猜。
+                runtime::latency::noteSyncWait(lastSyncSpinMs, lastSyncUsedSpin, syncFallbackCount);
                 lastCopyTimeValue = std::chrono::duration<double, std::milli>(copyMs);
                 lastPostprocessTimeValue = t_post_end - t_post_start;
             }

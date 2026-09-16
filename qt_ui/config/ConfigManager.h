@@ -15,6 +15,11 @@ public:
     bool save();
     QString configPath() const;
 
+    // 生效配置被整体替换 (切换/新建配置方案) 之后调用: 让所有连了
+    // configLoaded 的页面把控件按新值重读一遍。
+    // 只发信号, 不改任何值 —— 值由 ConfigBridge::syncFromRuntime() 负责。
+    void notifyRuntimeReloaded();
+
     // ── Capture: 只有「采集卡」一种方式 ──
     // 所有参数都来自设备真实能力探测, UI 用 格式/分辨率/帧率 三级联动下拉让
     // 用户从中选。这里只是 Qt 侧的内存缓存, 真正落盘由 Config::saveConfig() 完成。
@@ -83,8 +88,7 @@ public:
     void setCrosshairMinPixelCount(int v);
     int crosshairCloseRadius() const;
     void setCrosshairCloseRadius(int v);
-    float crosshairSmooth() const;
-    void setCrosshairSmooth(float v);
+    // 【2026-09-13 删除】crosshairSmooth() / setCrosshairSmooth() —— 准星平滑已移除。
 
     // Crosshair color profiles
     struct ColorProfile {
@@ -138,17 +142,29 @@ public:
         int triggerDurationJitterMs = 0;
         int triggerIntervalJitterMs = 0;
         int triggerSwitchCooldownMs = 0;
+        // 自动开镜 (仿 AimMagic 的「开火方式」): 0 关 / 1 点按右键(切换) / 2 长按右键(按住)
+        int triggerAutoScope = 0;
+        int triggerScopeDelayMs = 0;
+        // 自动急停: 0 关 / 1 开; stopMs = 反方向键短按时长(只有 MAKCUNEW 生效)
+        int triggerAutoStop = 0;
+        int triggerStopMs = 60;
         // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
         QString aimClasses;
         bool crosshairDetectEnabled = false;
         bool dynamicFovEnabled = false;
         float dynamicFovStrength = 0.60f;
-        // Aim trajectory curve. 0=Linear, 1=Bezier, 2=Custom.
+        // Aim trajectory curve. 0=Linear, 1=Bezier, 2=Custom, 3=WindMouse.
         int   aimPathMode = 0;
         float aimPathBezierCx1 = 0.30f;
         float aimPathBezierCy1 = 0.00f;
         float aimPathBezierCx2 = 0.70f;
         float aimPathBezierCy2 = 0.00f;
+        // WindMouse 曲线 (mode=3): AM 的 wind_mouse_G0/W0/M0/D0 + curve_threshold。
+        float aimPathWindGravity   = 5.0f;
+        float aimPathWindWind      = 2.0f;
+        float aimPathWindStep      = 10.0f;
+        float aimPathWindDistance  = 8.0f;
+        int   aimPathWindThreshold = 10;
         // Comma-separated high-resolution floats. Empty = straight line.
         QString aimPathCustomSamples;
     };

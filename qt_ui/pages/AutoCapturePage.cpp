@@ -22,6 +22,7 @@
 #include "Apotheosis.h"
 #include "capture/auto_capture.h"
 #include "config.h"
+#include "config/ConfigManager.h"
 #include "config/config_bridge.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
@@ -194,6 +195,11 @@ AutoCapturePage::AutoCapturePage(QWidget* parent)
             this, &AutoCapturePage::onResetCounter);
 
     onLoadConfig();
+
+    // 切换全局配置方案后按新方案重读 (onLoadConfig 内部有 m_loading 守卫,
+    // 还原过程中不会回写)。
+    connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
+            this, &AutoCapturePage::onLoadConfig);
 }
 
 static QString joinKeys(const std::vector<std::string>& keys) {

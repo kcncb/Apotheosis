@@ -1,4 +1,5 @@
 #include "pages/TargetPage.h"
+#include "config/ConfigManager.h"
 #include "config/config_bridge.h"
 #include "widgets/CardWidget.h"
 
@@ -86,6 +87,11 @@ TargetPage::TargetPage(QWidget* parent)
     m_pollTimer->setInterval(500);
     connect(m_pollTimer, &QTimer::timeout, this, &TargetPage::refreshFromRuntime);
     m_pollTimer->start();
+
+    // 轮询本来就会自己发现变化; 这里额外挂一次是为了切换方案后立刻重建表格,
+    // 不用等下一个 500ms 周期。
+    connect(&ConfigManager::instance(), &ConfigManager::configLoaded,
+            this, &TargetPage::refreshFromRuntime);
 
     refreshFromRuntime();
 }

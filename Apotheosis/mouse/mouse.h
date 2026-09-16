@@ -54,6 +54,15 @@ public:
     void sendRawMove(int dx, int dy, int64_t capture_ns = 0, int64_t aim_ns = 0);
     void pressLeftButton();
     void releaseLeftButton();
+    // 自动开镜 (mouse/trigger_scope.h) 用的右键通道。
+    // MAKCU 系盒子按 HID 通道编号: 1=左, 2=右。
+    void pressRightButton();
+    void releaseRightButton();
+
+    // 自动急停 (mouse/auto_stop.h) 用的键盘通道。
+    // hid_key = HID usage id; hold_ms 由固件定时弹起(自清, 不会卡键)。
+    // 只有 MAKCUNEW 支持键盘注入, 其它输入方式返回 false(功能自动失效)。
+    bool tapKey(int hid_key, int hold_ms);
 
     // Input device hot-swap.
     void setMakcuConnection(MakcuConnection* makcu);
@@ -66,6 +75,8 @@ private:
 
     void sendLeftDownToDriver();
     void sendLeftUpToDriver();
+    void sendRightDownToDriver();
+    void sendRightUpToDriver();
 
     MouseRuntimeParams params_{};
     std::mutex outputMtx_;

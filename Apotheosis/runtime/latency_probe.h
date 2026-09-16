@@ -217,6 +217,11 @@ struct Shared
     int64_t    engine_update_ns      = 0;
     int64_t    reset_ns              = 0;
     bool       enabled               = true;
+
+    // 推理线程同步/调度遥测 (见 Snapshot 里的同名说明)
+    double     sync_wait_ms          = -1.0;
+    bool       sync_spun             = false;
+    uint64_t   sync_fallbacks        = 0;
 };
 
 inline Shared& shared()
@@ -359,6 +364,16 @@ struct Snapshot
     double   capture_interval_ms = 0.0;
     Stage    stages[kStageCount];
     double   engine_inference_ms = -1.0;
+
+    // ── 推理线程同步/调度遥测 (对应原神的 host_wait_spin / mmcss) ───────────
+    // sync_wait_ms  : 最近一次等待 GPU 事件实际花掉的时间。它包含在 total 里,
+    //                 是"推理之外"最容易被忽略的一段。
+    // sync_spun     : 该次等待走的是自旋还是回退到阻塞同步。
+    // sync_fallbacks: 自旋超时回退的次数累计。持续增长说明 GPU 侧真的卡住了
+    //                 (掉卡/上下文丢失/别的进程占满), 是排查方向的分界线。
+    double   sync_wait_ms        = -1.0;
+    bool     sync_spun           = false;
+    uint64_t sync_fallbacks      = 0;
 };
 
 inline void noteEngineInferenceMs(double ms)
@@ -369,6 +384,16 @@ inline void noteEngineInferenceMs(double ms)
     sh.engine_update_ns = nowNs();
 }
 
+// 推理线程每次等待 GPU 事件后调用。
+inline void noteSyncWait(double ms, bool spun, uint64_t fallbacks)
+{
+    auto& sh = shared();
+    std::lock_guard<std::mutex> lk(sh.mu);
+    sh.sync_wait_ms   = ms;
+    sh.sync_spun      = spun;
+    sh.sync_fallbacks = fallbacks;
+}
+
 inline Snapshot snapshot()
 {
     auto& sh = shared();
@@ -377,6 +402,9 @@ inline Snapshot snapshot()
     out.enabled             = sh.enabled;
     out.engine_inference_ms = nowNs() - sh.engine_update_ns <= 2'000'000'000
         ? sh.engine_inference_ms : -1.0;
+    out.sync_wait_ms        = sh.sync_wait_ms;
+    out.sync_spun           = sh.sync_spun;
+    out.sync_fallbacks      = sh.sync_fallbacks;
     out.frames_consumed     = sh.counters.frames_consumed;
     out.detections_seen     = sh.counters.detections_seen;
     out.capture_frames      = sh.counters.capture_frames;
@@ -609,12 +637,12 @@ inline std::string timestampNow()
 inline std::string summaryLine()
 {
     const Snapshot s = snapshot();
-    char buf[400];
+    char buf[520];
     std::snprintf(
         buf, sizeof(buf),
         "E2E=%.2f avg=%.2f pk=%.2f | cap2det=%.2f infer=%.2f pub2aim=%.2f "
         "aim2mv=%.2f total=%.2f | devq=%.2f | src=%.1ffps frames=%llu seen=%llu "
-        "dropped=%llu stale=%llu",
+        "dropped=%llu stale=%llu | sync=%.2f%s fb=%llu",
         s.stages[kEndToEnd].n > 0 ? s.stages[kEndToEnd].last_ms : -1.0, s.stages[kEndToEnd].ema_ms,
         s.stages[kEndToEnd].max_ms,
         s.stages[kCaptureWait].ema_ms, s.stages[kInference].ema_ms,
@@ -626,7 +654,12 @@ inline std::string summaryLine()
         s.capture_fps, static_cast<unsigned long long>(s.frames_consumed),
         static_cast<unsigned long long>(s.detections_seen),
         static_cast<unsigned long long>(s.dropped_capture),
-        static_cast<unsigned long long>(s.stale_consumes));
+        static_cast<unsigned long long>(s.stale_consumes),
+        // sync = 等待 GPU 事件花掉的时间; 后缀 spin/block 标明走的是哪条路径,
+        // fb = 自旋超时回退到阻塞同步的累计次数(持续增长 = GPU 侧真的卡住了)。
+        s.sync_wait_ms,
+        s.sync_spun ? "spin" : "block",
+        static_cast<unsigned long long>(s.sync_fallbacks));
     return buf;
 }
 
@@ -661,7 +694,12 @@ inline void logWorker(FileLogConfig cfg)
         const Snapshot s = snapshot();
 
         // ---- 事件: 丢帧 / 陈旧消费 (一发生就记, 与周期无关) ----
-        if (s.dropped_capture != last_dropped)
+        //
+        // ★ 2026-09-13 修: 原来这里是 `s.dropped_capture - last_dropped`, 两个都是
+        //   uint64_t。只要计数器在会话中途被重置过(dropped_capture 变小), 这个减法
+        //   就【下溢】, 日志里会打出 +18446744073709547723 这种读不懂的数(实测日志
+        //   末尾就有)。现在改成"只在变大时报增量, 变小视为重置并重新同步"。
+        if (s.dropped_capture > last_dropped)
         {
             char buf[200];
             std::snprintf(buf, sizeof(buf),
@@ -671,9 +709,11 @@ inline void logWorker(FileLogConfig cfg)
                           static_cast<unsigned long long>(s.dropped_capture),
                           static_cast<unsigned long long>(s.capture_frames));
             logLine(buf);
-            last_dropped = s.dropped_capture;
         }
-        if (s.stale_consumes != last_stale)
+        // 无论是否上报, 都同步到当前值 —— 计数器被重置时这一步把基准拉回, 不会下溢。
+        last_dropped = s.dropped_capture;
+        // 同样的下溢防护(stale_consumes 也是 uint64_t, 同样可能被重置)。
+        if (s.stale_consumes > last_stale)
         {
             char buf[200];
             std::snprintf(buf, sizeof(buf),
@@ -682,8 +722,8 @@ inline void logWorker(FileLogConfig cfg)
                           static_cast<unsigned long long>(s.stale_consumes - last_stale),
                           static_cast<unsigned long long>(s.stale_consumes));
             logLine(buf);
-            last_stale = s.stale_consumes;
         }
+        last_stale = s.stale_consumes;
 
         // ---- 事件: 尖峰 ----
         if (cfg.spike_ms > 0.0 && s.stages[kTotal].max_ms > last_max[kTotal] &&

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -13,7 +14,7 @@ namespace boss
 
 // Per-frame trajectory shaper.
 //
-// Three modes:
+// Four modes:
 //   Linear  — direct proportional move, identical to ART::drive(). Each
 //             frame the cursor steps `speed * err` toward the aim point.
 //             No anchoring, no arc; this is the legacy / default behaviour.
@@ -23,6 +24,11 @@ namespace boss
 //   Custom  — a high-resolution piecewise-linear deviation curve drawn by the
 //             user in the UI. Endpoints are pinned to zero so the path
 //             still ends on the goal.
+//   WindMouse — 仿 AimMagic 的 enable_mouse_curve: 用 WindMouse 物理模型
+//             (重力 G0 / 风力 W0 / 步长 M0 / 距离 D0) 生成一条"像人甩出来的"
+//             路径, 再把它重采样成同一条 Y(t) 偏差剖面走上面那套整形机制。
+//             额外带 AM 的 curve_threshold 门控: 误差很小时整段曲线旁路,
+//             直接走直线 (小修正保精度, 大甩枪才拟人化)。
 //
 // On lock or large goal drift the driver re-anchors: start = current cursor,
 // goal = current aim. Travel progress is then driven by cursor PROJECTION
@@ -30,6 +36,10 @@ namespace boss
 // you down doesn't break the shape; the cursor just takes more frames to
 // arrive. Residual pixels from sub-integer moves accumulate the same way
 // ART::drive does, so micro-motion still adds up correctly over time.
+//
+// ★ 四种模式都【只旋转不缩放】控制器原始输出: 曲线给出的是局部切线方向,
+//   幅值仍由 PID 决定。这是现役控制回路(46ms 死区 + Smith 在途补偿)不被
+//   轨迹层拖成振荡的前提, 加新模式时必须保持。
 class AimPathDriver
 {
 public:
@@ -38,9 +48,15 @@ public:
         Linear = 0,
         Bezier = 1,
         Custom = 2,
+        WindMouse = 3,
     };
 
     static constexpr int kCustomSamples = 32768;
+    // WindMouse 路径重采样成多少段 Y(t)。256 段足够平滑, 又不用在鼠标线程上
+    // 存一条几千点的折线。
+    static constexpr int kWindSamples = 256;
+    // 单段路径最多迭代多少步 (L/M0 量级; 纯保护, 正常几十步就收敛)。
+    static constexpr int kWindMaxSteps = 4096;
 
     struct Params
     {
@@ -57,6 +73,20 @@ public:
         std::shared_ptr<const std::vector<float>> custom_samples;
         bool neural_enabled = false;
         std::array<float, 25> neural_weights{};
+
+        // ── WindMouse (Mode::WindMouse) ────────────────────────────────────
+        // 单位都是【像素】, 与 AimMagic 的 wind_mouse_G0/W0/M0/D0 同名同量纲:
+        //   wind_gravity   重力(向目标的吸引) —— 越大越"坚决", 路径越直
+        //   wind_wind      风力(横向随机游走幅度) —— 越大越飘
+        //   wind_step      单步最大长度 —— 越小路径越碎、越慢
+        //   wind_distance  风力开始衰减的距离 —— 越接近目标风越小
+        //   wind_threshold 门控(px): 两个轴的误差都不超过它时整段曲线旁路。
+        //                  AM 的 curve_threshold。默认 10px: 微修正走直线。
+        double wind_gravity    = 5.0;
+        double wind_wind       = 2.0;
+        double wind_step       = 10.0;
+        double wind_distance   = 8.0;
+        double wind_threshold_px = 10.0;
 
         // Re-anchor when the goal drifts more than this many pixels from
         // the current path's endpoint. Below this we keep the existing
@@ -78,7 +108,11 @@ public:
             p.cx2 != p_.cx2 || p.cy2 != p_.cy2 ||
             p.custom_samples != p_.custom_samples ||
             p.neural_enabled != p_.neural_enabled ||
-            p.neural_weights != p_.neural_weights;
+            p.neural_weights != p_.neural_weights ||
+            p.wind_gravity != p_.wind_gravity ||
+            p.wind_wind != p_.wind_wind ||
+            p.wind_step != p_.wind_step ||
+            p.wind_distance != p_.wind_distance;
         if (shape_changed)
             reset();
         p_ = p;
@@ -94,6 +128,7 @@ public:
         axis_y_ = 0.0;
         smoothed_slope_ = 0.0;
         rx_ = ry_ = 0.0;
+        wind_profile_.clear();
     }
 
     // 由上层在最终 Y 力度缩放之后回报真正发送的位移。step() 只计算，
@@ -128,6 +163,26 @@ public:
         const double screen_err_y = aim_y - cur_y;
         const double screen_err_mag = std::hypot(screen_err_x, screen_err_y);
 
+        // ── AM 的 curve_threshold 门控 (只对 WindMouse 生效) ──
+        // 两个轴的误差都不超过阈值时整段曲线旁路: 微修正走直线(保精度),
+        // 只有大甩枪才走拟人路径。判据照抄 AimMagic FUN_140071a60 行 70-79
+        // 的逐轴形式 |dx| <= T && |dy| <= T。
+        // 旁路期间不维持路径状态: 误差再次超过阈值时重新起一段。
+        if (p_.mode == Mode::WindMouse)
+        {
+            const double gate = std::max(0.0, p_.wind_threshold_px);
+            if (std::abs(screen_err_x) <= gate && std::abs(screen_err_y) <= gate)
+            {
+                engaged_ = false;
+                wind_profile_.clear();
+                smoothed_slope_ = 0.0;
+                rx_ = ry_ = 0.0;
+                out.move_x = base_dx;
+                out.move_y = base_dy;
+                return out;
+            }
+        }
+
         // 每次锁定只固定一次轨迹坐标系。检测框的微小抖动不应每帧旋转
         // 曲线的法向量，否则 1~2 px 的目标噪声会被放大成交替侧向位移。
         const bool id_changed = (target_id >= 0 && target_id != last_id_);
@@ -144,6 +199,10 @@ public:
             }
             smoothed_slope_ = 0.0;
             rx_ = ry_ = 0.0;
+            // WindMouse 的路径是随机生成的, 每段重新摇一条; 段的长度就是
+            // 此刻的真实误差, 所以 G0/W0/M0/D0 的像素量纲才有意义。
+            if (p_.mode == Mode::WindMouse)
+                build_wind_profile(reference_length_, target_id);
         }
         last_id_ = target_id;
 
@@ -200,6 +259,8 @@ public:
             }
             smoothed_slope_ = 0.0;
             rx_ = ry_ = 0.0;
+            if (p_.mode == Mode::WindMouse)
+                build_wind_profile(reference_length_, last_id_);
         }
 
         // 自定义曲线有 32768 个采样点，直接逐点求导会把手绘噪声放大成
@@ -282,6 +343,124 @@ public:
 private:
     static double clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
+    // ── WindMouse 路径生成 (仿 AimMagic 的 enable_mouse_curve) ──────────────
+    //
+    // 在【局部坐标系】里跑一遍 WindMouse: 起点 (0,0)、终点 (L,0), L 是本段
+    // 锁定时的真实像素误差。跑出来的折线再按"进度 → 侧向偏移 / L"重采样成
+    // kWindSamples 段的归一化偏差剖面, 交给下面 curve_y()/curve_derivative()
+    // 与 Bezier/Custom 完全一样的整形路径使用。
+    //
+    // 这样做的两个理由:
+    //   ① G0/W0/M0/D0 的量纲是像素(AM 原样), 必须在真实尺度上生成才有意义;
+    //   ② 路径只提供【局部切线】, 幅值仍由 PID 决定 —— 不会和控制器打架。
+    void build_wind_profile(double length_px, int target_id)
+    {
+        wind_profile_.assign(kWindSamples, 0.0f);
+        std::vector<char> filled(kWindSamples, 0);
+
+        // 把目标 id 混进种子: 每锁定一个新目标都摇出不同的路径 —— 否则每一枪
+        // 抖成同一条, 既不自然也容易被看出来。同一串输入(含 id)仍然完全可复现,
+        // 回归测试才能断言具体位移。
+        rng_ ^= static_cast<std::uint32_t>(target_id) * 0x9E3779B1u;
+        rng_ |= 1u;   // xorshift32 的全零状态是吸收态
+
+        const double L = std::max(1.0, length_px);
+        const double gravity  = std::clamp(p_.wind_gravity, 0.0, 200.0);
+        const double wind     = std::clamp(p_.wind_wind, 0.0, 200.0);
+        const double dist0    = std::clamp(p_.wind_distance, 0.1, 200.0);
+        double step_max       = std::clamp(p_.wind_step, 0.1, 200.0);
+
+        constexpr double kSqrt3 = 1.7320508075688772;
+        constexpr double kSqrt5 = 2.2360679774997896;
+
+        // 固定种子的 xorshift32: 同一段锁定生成同一条路径, 回归测试可复现;
+        // 每次起新段推进一次状态, 所以连续几段不会长得一模一样。
+        auto rand01 = [this]() {
+            rng_ ^= rng_ << 13;
+            rng_ ^= rng_ >> 17;
+            rng_ ^= rng_ << 5;
+            return static_cast<double>(rng_) / 4294967296.0;
+        };
+
+        auto record = [&](double x, double y) {
+            const double t = clamp01(x / L);
+            int idx = static_cast<int>(std::lround(t * (kWindSamples - 1)));
+            idx = std::clamp(idx, 0, kWindSamples - 1);
+            wind_profile_[static_cast<size_t>(idx)] = static_cast<float>(y / L);
+            filled[static_cast<size_t>(idx)] = 1;
+        };
+
+        double cx = 0.0, cy = 0.0;
+        double vx = 0.0, vy = 0.0;
+        double wx = 0.0, wy = 0.0;
+        double dist = L;
+        record(0.0, 0.0);
+
+        for (int guard = 0; guard < kWindMaxSteps && dist >= 1.0; ++guard)
+        {
+            const double w_mag = std::min(wind, dist);
+            if (dist >= dist0)
+            {
+                wx = wx / kSqrt3 + (2.0 * rand01() - 1.0) * w_mag / kSqrt5;
+                wy = wy / kSqrt3 + (2.0 * rand01() - 1.0) * w_mag / kSqrt5;
+            }
+            else
+            {
+                wx /= kSqrt3;
+                wy /= kSqrt3;
+                if (step_max < 3.0)
+                    step_max = rand01() * 3.0 + 3.0;
+                else
+                    step_max /= kSqrt5;
+            }
+
+            vx += wx + gravity * (L - cx) / dist;
+            vy += wy + gravity * (0.0 - cy) / dist;
+
+            const double v_mag = std::hypot(vx, vy);
+            if (v_mag > step_max)
+            {
+                const double v_clip = step_max / 2.0 + rand01() * step_max / 2.0;
+                vx = vx / v_mag * v_clip;
+                vy = vy / v_mag * v_clip;
+            }
+
+            cx += vx;
+            cy += vy;
+            dist = std::hypot(L - cx, 0.0 - cy);
+            record(cx, cy);
+        }
+
+        // 端点必须落在目标上 (和自定义曲线同一个不变式), 否则尾部会留一个
+        // 永远收不掉的侧向偏移。
+        wind_profile_.front() = 0.0f;
+        wind_profile_.back()  = 0.0f;
+        filled.front() = 1;
+        filled.back()  = 1;
+
+        // 稀疏区间线性补齐: 路径点数与采样数不一定对得上, 空桶会变成
+        // 突兀的阶梯, 求导后就是每帧方向跳变。
+        int prev = -1;
+        for (int i = 0; i < kWindSamples; ++i)
+        {
+            if (!filled[static_cast<size_t>(i)])
+                continue;
+            if (prev >= 0 && i - prev > 1)
+            {
+                const double y0 = wind_profile_[static_cast<size_t>(prev)];
+                const double y1 = wind_profile_[static_cast<size_t>(i)];
+                for (int k = prev + 1; k < i; ++k)
+                {
+                    const double f = static_cast<double>(k - prev)
+                                   / static_cast<double>(i - prev);
+                    wind_profile_[static_cast<size_t>(k)] =
+                        static_cast<float>(y0 + (y1 - y0) * f);
+                }
+            }
+            prev = i;
+        }
+    }
+
     // Evaluate the deviation curve Y at progress t∈[0,1].
     double curve_y(double t) const
     {
@@ -329,13 +508,37 @@ private:
             const double y1 = static_cast<double>(samples[i1]);
             return y0 + (y1 - y0) * f;
         }
+        if (p_.mode == Mode::WindMouse)
+        {
+            return sample_profile(wind_profile_, t);
+        }
         return 0.0;
+    }
+
+    // 折线剖面求值 (和自定义曲线同一套线性插值)。
+    static double sample_profile(const std::vector<float>& profile, double t)
+    {
+        const int n = static_cast<int>(profile.size());
+        if (n < 2)
+            return 0.0;
+        const double pos = clamp01(t) * (n - 1);
+        int i0 = static_cast<int>(std::floor(pos));
+        int i1 = i0 + 1;
+        if (i0 < 0)     { i0 = 0;     i1 = 1; }
+        if (i1 > n - 1) { i1 = n - 1; i0 = i1 - 1; }
+        const double f = pos - i0;
+        return static_cast<double>(profile[static_cast<size_t>(i0)]) * (1.0 - f)
+             + static_cast<double>(profile[static_cast<size_t>(i1)]) * f;
     }
 
     double curve_derivative(double t) const
     {
         // 约覆盖 32768 点曲线的 196 个采样，避免手绘局部毛刺被求导放大。
-        constexpr double eps = 0.003;
+        // WindMouse 的剖面只有 256 段, 同样的 0.003 窗口小于一个采样间隔,
+        // 会在桶边界上得到分段常数的切线 —— 放宽到约 4 段, 切线才连续。
+        const double eps = (p_.mode == Mode::WindMouse)
+                               ? 4.0 / (kWindSamples - 1)
+                               : 0.003;
         const double ta = std::max(0.0, t - eps);
         const double tb = std::min(1.0, t + eps);
         return (tb > ta) ? (curve_y(tb) - curve_y(ta)) / (tb - ta) : 0.0;
@@ -360,6 +563,9 @@ private:
     double axis_x_ = 1.0, axis_y_ = 0.0;
     double smoothed_slope_ = 0.0;
     double rx_ = 0.0, ry_ = 0.0;
+    // WindMouse 每段路径的归一化偏差剖面 + 固定种子的 PRNG 状态。
+    std::vector<float> wind_profile_;
+    std::uint32_t rng_ = 0x9E3779B9u;
 };
 
 } // namespace boss

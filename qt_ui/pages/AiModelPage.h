@@ -16,6 +16,10 @@ class AiModelPage : public QWidget {
 public:
     explicit AiModelPage(QWidget* parent = nullptr);
 
+private slots:
+    // 切换全局配置方案后按新值重读一遍控件 (信号全部屏蔽, 不回写)。
+    void reloadFromConfig();
+
 private:
     void onBackendChanged(int index);
     void browseModel();

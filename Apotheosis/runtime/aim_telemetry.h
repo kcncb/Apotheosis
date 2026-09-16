@@ -74,4 +74,21 @@ extern std::atomic<float> g_mouse_queue_latency_ms;
 extern std::atomic<int> g_mouse_queue_backlog;
 extern std::atomic<unsigned long long> g_mouse_send_failures;
 
+
+// -------------------------------------------------------------------------
+// 【2026-09-13 删除】「每计数像素」标定遥测 (整个 runtime::calib 命名空间)
+//
+// 删除的字段: g_measure_request / g_measure_cancel / g_measuring /
+//   g_px_per_count_x/y / g_calib_ready / g_measure_fits / g_measure_fits_needed /
+//   g_reject_* (6 个) / g_measure_accepted / g_max_counts_span /
+//   g_max_anchor_span / g_history_size / g_effective_px_per_count
+//
+// 原因: 它们全是给"标定 k̂(每计数像素)"服务的。前馈删除后控制器不再消费 k̂,
+//       测量功能整个失去意义, 界面上的「测量」按钮也一并移除。
+//       详见 docs/aimmagic-comparison.md §6.8。
+//
+// 注: 这不是"暂时关掉"的开关, 是整条链路移除 —— k̂ 在本项目双机架构下
+//     根本无法可靠测得(§6.7), 留着遥测只会让人误以为它还能用。
+// -------------------------------------------------------------------------
+
 #endif // RUNTIME_AIM_TELEMETRY_H
