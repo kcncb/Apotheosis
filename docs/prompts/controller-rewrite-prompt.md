@@ -1,4 +1,16 @@
-# 控制器层重写 · 交给 AI 的提示词
+# 控制器层重写 · 交给 AI 的提示词 (2026-09-13 历史任务书)
+
+> ★★ **历史任务书说明 (2026-09-16 标注)**:
+> 本文是 2026-09-13 启动「重写瞄准控制器」时使用的历史需求提示词，保留作为
+> 任务背景和物理推导记录。**正文中提及的部分构件随后已进一步演进**：
+> 1. `mouse/aim_predict.h` 与 `tests/aim_predict_test.cpp` 已于 2026-09-16 随
+>    「经典 PID 档」一起**彻底删除**。
+> 2. 原提示词中构想的全局预测器已由 **`mouse/aim_tracker.h` 中的每轨预测状态机
+>    (`predictionLead`)** 完全取代。
+> 3. 项目目前只保留 **PID-EventSync** 这一条链路，分档开关 `aim_mode` 也已删除。
+> 当前架构与真实代码状态请以 **`docs/aiming-controller.md`** 和
+> **`docs/eventsync-mode.md`** 为准。
+
 
 > 用法：把下面 **`=== 提示词正文开始 ===` 到 `=== 提示词正文结束 ===`** 之间的内容整段复制给 AI。
 > 建议同时把 `Apotheosis/mouse/`、`tests/aim_pid_test.cpp`、`docs/control-architecture.md`、

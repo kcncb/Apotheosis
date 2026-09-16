@@ -195,7 +195,7 @@ int AimPid::step(double error_px, double dt)
     //
     // ★ 尺度【只】作用在增益上, 不参与任何"提前量 = v·T·f(s)"的构造 ——
     //   屏幕速度本身已是 1/d 的投影, 那样做等于把深度算两遍
-    //   (见 aim_scale.h 的 ⚠️ 与 aim_predict.h 顶部的纠错记录)。
+    //   (见 aim_scale.h 的 ⚠️ 与 docs/aiming-controller.md 的纠错记录)。
     const double s_eff = (params_.scale_min_gain > 0.0)
         ? std::max(scale_, params_.scale_min_gain)
         : scale_;

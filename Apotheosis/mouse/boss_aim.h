@@ -1,17 +1,21 @@
 #ifndef MOUSE_BOSS_AIM_H
 #define MOUSE_BOSS_AIM_H
 
-// 目标关联 + 瞄点 + 控制器
+// 目标关联 + 瞄点 + 控制器 (PID-EventSync 单档, 移植 AimMagic 1.0.30 全链路)
 //
-// 这一层负责三件事:
-//   1. 【锁谁】   —→target_selector (ava_exact)
-//   2. 【瞄哪一点】—→target_to_aimpoint (ava_exact)
-//   3. 【怎么动】 —→engine::AimPid, 见mouse/aim_pid.h
+// 这一层负责四件事:
+//   1. 【锁谁】   —→ target_selector (ava_exact)
+//   2. 【瞄哪一点】—→ target_to_aimpoint (ava_exact)
+//   3. 【身份/速度/提前量】—→ AimTracker, 见 mouse/aim_tracker.h
+//   4. 【怎么动】 —→ engine::AimPid, 见 mouse/aim_pid.h
 //
-// 旧AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、
+// 旧 AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、
 // aim_movement_pipeline、controller_orchestration、pid_input、qx_curve、
-// process_humanization 以及热键旁路)已整条删除, 由mouse/aim_pid.h 的新控制器
-// 取代, 接入点在 boss_aim.cpp 的tick()。
+// process_humanization 以及热键旁路)已整条删除, 由 mouse/aim_pid.h 的新控制器
+// 取代, 接入点在 boss_aim.cpp 的 tick()。
+//
+// ★ 2026-09-16: 「经典 PID（现役）」档与它的全局 AimPredict 预测已删除, 只保留
+//   PID-EventSync 这一套。原 aim_mode 分档开关也随之删除 —— 现在只有一条链路。
 
 #include <memory>
 #include <vector>
@@ -19,7 +23,6 @@
 #include <opencv2/opencv.hpp>
 
 #include "aim_pid.h"
-#include "aim_predict.h"
 #include "aim_scale.h"
 #include "aim_tracker.h"
 #include "anchor_filter.h"
@@ -29,36 +32,27 @@
 namespace boss
 {
 
-// ── 架构 (2026-09-13 重写, 抄原神 AI 的纯反馈路线) ──────────────────────────
+// ── 架构 (PID-EventSync, 移植 AimMagic 1.0.30) ──────────────────────────────
 //
-//   检测框 --(瞄点)--> 【α-β 框平滑器】--> PID --> 输出限幅 --> 发送
+//   检测框 --(选靶)--> 【AimTracker: 身份/速度/每轨预测】--> 【α-β 锚点平滑】-->
+//        【在途位移补偿(像素域 ÷ k̂)】--> PID --> 输出整形 --> 发送
 //
-// 就这三段。**没有观测器、没有前馈、没有预测、没有标定。**
+// █ 各段职责 ██
 //
-// ██ 为什么删掉观测器和前馈 ██
-//
-// 原来这条链是: 检测框 -> AnchorObserver(平滑+估速度+算在途位移) -> PID(+前馈)
-// 观测器干三件事, 后两件都需要 k̂(每计数像素), 而 k̂ 在本项目【双机架构】下
-// 测不准(游戏在另一台机器上, 详见 docs/aimmagic-comparison.md §6.7)。
-// 一个测不准的参数进了回路, 估错就直接变成固定瞄偏 —— 历史上 +6.2px @300px/s
-// 就是这么来的。
-//
-// 原神 AI 用高增益纯反馈 + 输出整形做到了同样的事, 而且它的预测开关是【关着】的
-// (aim_prediction_enabled = 0)。纯 P 回路追匀速目标的稳态滞后 = v/(Kp·换算),
-// Kp 够大时只有几个像素 —— 根本不需要前馈去补。
-//
-// ██ 各段职责 ██
-//
+//   跟踪器    : 给这一拍的选中框一个【跨帧稳定的身份】(IoU + 最近邻粘滞),
+//               并用采样窗估速度、每轨一份预测状态机。换目标才换 id。
 //   框平滑器  : 滤掉检测框的抖动(它每帧跳 1~2px, 在 8.3ms 里就是 230px/s 假速度)
 //               → 喂给 PID 的信号干净了, Kp 才敢开大
+//   在途补偿  : AM 的发送环 —— 已发出未生效的计数求和 ÷ k̂ 换回像素, 从误差里扣。
 //   PID       : 高增益纯反馈。Kp 决定"跟得紧不紧", Ki 磨掉稳态滞后
 //   P 项饱和  : 大误差段自动降增益 —— 甩枪/换靶不过冲, 且不像死区那样留盲区
-//   输出限幅  : 相当于原神的 smooth_max_pixel, 兜住极端输出
+//   输出限幅  : 兜住极端输出
 //
 // ██ 参数 ██
 //
-// 用户只调 5 个: 追踪增益(Kp) / 积分增益(Ki) / 震荡抑制(Kd) / 饱和阈值 / 输出限幅。
-// 平滑时间常数【故意不暴露】—— 它和 Kp 是耦合的, 一起调极容易调乱。
+// 用户调: 追踪增益(Kp) / 积分增益(Ki) / 震荡抑制(Kd) / 饱和阈值 / 输出限幅,
+// 外加跟踪器(min_hits/max_age/关联门限/速度窗)、预测(factor/宽度区间/上限/噪声门)
+// 与 k̂(每计数像素, 手填)。平滑时间常数【故意不暴露】—— 它和 Kp 是耦合的。
 
 // 框平滑时间常数(毫秒)。这是"平滑强度", 不是用户旋钮。
 //
@@ -112,38 +106,13 @@ struct EngineInput
     AimPidParams pid_x{};
     AimPidParams pid_y{};
 
-    // ── 预测补偿参数 (2026-09-13, 对齐 AimMagic 1.0.30) ──────────────────────
-    // 每拍从当前热键配置快照填入。字段含义见 mouse/aim_predict.h 与 config.h。
-    // factor 为 0(AM 的 UI 默认值) => 整条预测链路关闭, 行为与不做预测逐位相同。
-    double predict_factor_x = 0.0;
-    double predict_factor_y = 0.0;
-    double predict_min_width = 20.0;
-    double predict_max_width = 80.0;
-    double predict_damp = 0.25;
-    // 提前量硬上限(px) 与 速度噪声门(px/s)。见 aim_predict.h —— 这两条是任务书
-    // §4.2 第②③条的落地: 没有它们, 稳态瞄偏会随目标速度【线性增长】。
-    double predict_max_px = 12.0;
-    double predict_vel_floor = 60.0;
-
     // ── 距离尺度参数 (2026-09-13 新增, 见 mouse/aim_scale.h) ────────────────
     // 每拍从当前热键配置快照填入。全部为 0/负 => 尺度关闭, 行为与没有它逐位相同。
     // 唯一的距离代理是【检测框高】: 本项目双机架构下拿不到真实距离,
     // AimbotTarget::depth_at_pivot 是恒 -1 的占位常量, 不可用。
     AimScaleParams aim_scale{};
 
-    // 【2026-09-13 删除】px_per_count_x/y —— 控制器不再消费 k̂(前馈已整条移除)。
-    // 平滑由 boss_aim.cpp 里的 AnchorFilter 承担, 不需要这个量。
-    // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──────
-    // aim_mode: 0 = 现役纯反馈档(默认, 行为与本档存在之前逐位相同);
-    //           1 = EventSync 档(跟踪器 + 每轨预测 + 事件驱动消费)。
-    // ★ mode 1 的差异面只有三处, 全部在 boss_aim.cpp 里分支标注:
-    //   ① 身份/换目标判据走【跟踪器】(trackId 粘滞), 不再用 selector 的 generation;
-    //   ② 提前量走【每轨预测状态机】(AimTracker::predictionLead), 不走 predict_;
-    //   ③ 丢目标不清控制器状态(等跟踪器 max_age 到期), 避免 AM 那种"状态跨帧持有"
-    //      被本轮的重锁打断。
-    //   在途补偿不在这三者之列 —— 它仍然由 AimPid 在计数域完成(见 aim_pid.h),
-    //   AM 那条"发送日志 ÷ counts_per_pixel 换回像素"的路径需要 k̂, 不移植(§6.7)。
-    int aim_mode = 0;
+    // ── 跟踪器与预测参数 (移植 AimMagic 1.0.30 全链路) ─────────────────────
     AimTrackerParams esync{};
 };
 
@@ -214,9 +183,9 @@ struct EngineOutput
     double aim_scale_height_px = 0.0;// 本拍用于算尺度的框高(平滑后, 像素)
     bool   aim_scale_active = false; // false = 尺度关闭, 行为与没有它逐位相同
 
-    // ── EventSync 档遥测 (2026-09-15, 只在 aim_mode == 1 时有意义) ──────────
-    // 排查"EventSync 档为什么和现役档手感不同"先看这几个量。
-    bool   esync_active = false;       // 本拍走的是 EventSync 分支
+    // ── 跟踪器/预测遥测 (2026-09-15) ─────────────────────────────────────────
+    // 排查"为什么跟丢了 / 提前量没起来 / 手感变了"先看这几个量。
+    bool   esync_active = false;       // 本拍跟踪器给出了锁定轨迹
     int    esync_track_hits = 0;       // 跟踪器锁定轨迹的连续命中数
     int    esync_track_age = 0;        // 锁定轨迹的连续漏帧数(0 = 本帧有观测)
     bool   esync_track_confirmed = false;
@@ -242,10 +211,10 @@ public:
     void reset();
     EngineOutput tick(const EngineInput& in, double dt);
 
-    // ★ ⑤ EventSync 档 (aim_mode == 1) 专用: 把本拍【实际发出去】的整数计数登进
-    //   在途账本(AM 的发送环), 下一拍的误差合成会按 k̂ 换成像素扣掉。
+    // ★ ⑤ 把本拍【实际发出去】的整数计数登进在途账本(AM 的发送环), 下一拍的误差
+    //   合成会按 k̂ 换成像素扣掉。
     //   调用点在 mouse_thread_loop.cpp 的 sendRawMove 之后(登的必须是真发出去的值)。
-    //   非 EventSync 档调用它是安全的空操作(账本不属于那条路径)。
+    //   窗口配置为 0(默认)时它是空操作 —— 账本记了但没人读。
     void noteAimSend(int dx, int dy);
     int lockedTrackId() const { return current_id_; }
     const std::vector<Track>& tracks() const { return tracks_; }
@@ -281,9 +250,6 @@ private:
     AimPid pid_y_;
     AnchorFilter anchor_filter_x_;
     AnchorFilter anchor_filter_y_;
-    // 瞄点预测 (对齐 AimMagic 1.0.30「预测补偿」, 见 mouse/aim_predict.h)。
-    // 位置: 在算误差【之前】把偏移加到瞄点上, 所以 PID 追的是"目标将要到"的位置。
-    AimPredict predict_;
     // 距离尺度估计器 (2026-09-13)。X/Y 共用【一个】(距离是目标属性, 不分轴),
     // 结果通过 setScale() 分别注入两个 PID。见 mouse/aim_scale.h。
     AimScale aim_scale_;
@@ -293,11 +259,8 @@ private:
     float last_predict_lead_y_ = 0.0f;
     int last_counts_x_ = 0;  // 上一拍实际下发的计数(仅遥测/日志用)
     int last_counts_y_ = 0;
-    // 上一拍的瞄点, 用来判断"身份变化"到底是真换目标还是 tracker 把同一个目标重锁一次。
-    cv::Point2f last_anchor_{};
-    bool has_last_anchor_ = false;
 
-    // ── PID-EventSync 档的状态 (2026-09-15 新增) ─────────────────────────────
+    // ── 跟踪器状态 ───────────────────────────────────────────────────────────
     // 跟踪器跨帧持有(不因单帧漏检清空); 身份来自它, 速度与每轨预测状态也来自它。
     AimTracker esync_tracker_;
     int esync_locked_track_ = -1;   // 上一拍的跟踪器身份(判"换目标")

@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSpinBox>
 #include <QTimer>
 #include <QWidget>
@@ -42,6 +43,20 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
 
     std::printf("=== autotune_layout_test: 自动调参页真实几何 ===\n");
+
+    // ★★ 先清掉本进程上次留下的 QSettings ★★
+    // 页面构造时会 loadSettings(), 而【析构】时会 saveSettings() —— 本测试后面
+    // 又要切到「体感」模式去量感受框, 于是那个 index 被存下来; 下一次运行
+    // loadSettings() 读到它, "默认选中动态目标"这条断言就必然变红。也就是说
+    // 【这个测试第一次跑是绿的, 之后每次都红】—— 实测踩到过。
+    // 判据本身要测的是"没有用户偏好时的默认值", 所以正确做法是先删掉那个键。
+    {
+        QSettings s;
+        s.beginGroup(QStringLiteral("auto_tune"));
+        s.remove(QStringLiteral("mode"));
+        s.endGroup();
+        s.sync();
+    }
 
     AutoTunePage page;
     page.resize(900, 600);          // 接近程序默认窗口的可用区域

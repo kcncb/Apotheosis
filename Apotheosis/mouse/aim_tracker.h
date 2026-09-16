@@ -6,8 +6,9 @@
 // 这是 **AimMagic 1.0.30 跟踪器 + 预测状态机(FUN_14006e470 / FUN_1400824e0 选靶)
 // 的移植**, 对照语料: Downloads\AimMagic_RE_extracted\AimMagic_RE\v1030\。
 //
-// ★ 它只在 aim_mode == 1 (EventSync 档) 被接线; aim_mode == 0 (默认档) 的链路
-//   【一行都不会经过这里】, 行为与本文件存在之前逐位相同。
+// ★ 2026-09-16: 原先的「经典 PID」档已删除, 本文件是链路里【唯一】的身份来源。
+//   引擎每一拍都喂它(包括丢目标的那几拍), 所以换目标这件事只有一个判据:
+//   跟踪器锁定的轨迹号变了。
 //
 // ── 移植了 AM 的哪六件事 ─────────────────────────────────────────────────────
 //   ① 关联: trackId 优先 → 最近邻(平方距离, 不含置信度) → 新建轨迹
@@ -77,9 +78,8 @@ inline constexpr double kCountsPerPixelDefault = 1.0;
 inline constexpr double kCountsPerPixelMin = 0.001;
 inline constexpr double kCountsPerPixelMax = 10000.0;
 // 预测生效的目标速度门(像素/秒)。AM: DAT_1401f9aa0 读出 ≈3.51 —— 很低, 只挡
-// 完全静止。本方保持同一量级, 但允许配置收高(量化噪声在 60px/s 以下, 见
-// aim_predict.h 的实测: 静止目标 v̂ 噪声 p99=46px/s —— 所以默认取 60,
-// 与 aim_predict 的默认门一致; 想要 AM 的激进手感可以调回 4)。
+// 完全静止。本方保持同一量级, 但允许配置收高(量化噪声在 60px/s 以下, 实测
+// 静止目标 v̂ 噪声 p99=46px/s —— 所以默认取 60; 想要 AM 的激进手感可以调回 4)。
 inline constexpr double kPredVelFloorDefaultPxS = 60.0;
 // 自运动补偿的最大标定增益。AM 吃 runtime+0xC04(自身瞄准速度)乘一个用户系数。
 // ★ 这一项在本项目历史上是【删过一次的雷】(predictive_controller, 1a5a792):
@@ -442,13 +442,36 @@ public:
         lead_y = std::clamp(g * aim_vy, -cap, cap);
     }
 
+    // ── ⑤ 与计数域在途补偿的【二选一】判据 ───────────────────────────────────
+    //
+    // 引擎(boss_aim.cpp)用这个判据决定"在途补偿落在哪一域":
+    //   · 返回 false(窗口 = 0, 默认) ⇒ AM 这条像素域链根本没在跑
+    //     (inflightPixels() 恒返回 0), 在途补偿由 `AimPidParams::inflight_beta`
+    //     在计数域独家承担 —— **绝不能顺手把它清 0**;
+    //   · 返回 true(窗口 > 0) ⇒ 整条换成 AM 的像素域做法, 此时必须把计数域的
+    //     beta 置 0, 否则同一批在途指令被扣两次 = 过补偿 = 正反馈发散。
+    //
+    // ★★ 为什么写成函数而不是在 boss_aim.cpp 里直接比大小 ★★
+    //   `boss_aim.cpp` 依赖 OpenCV + `ava_exact`, 在非 Windows 上编不进逻辑回归,
+    //   所以"直接比大小"这个判据在自动化测试里【永远测不到】。这个项目已经吃过
+    //   "周边全绿、判据写错"的亏(见 CLAUDE.md 坑⑤), 而这一次的判据写错会把生产点
+    //   的主刹车(beta = 1.6)静默拆掉 —— 后果是 60fps 发散。放进本头文件之后,
+    //   `tests/aim_tracker_test.cpp` §[11] 就能把它钉死。
+    [[nodiscard]] static bool amTakesOverInflight(const AimTrackerParams& p) noexcept
+    {
+        return p.inflight_window_s > 0.0;
+    }
+
     // 在途窗口对应的拍数。
     // ★ 窗口 <= 0 时返回 0 —— 语义是【整条换算链关闭】(在途量恒为 0)。
     //   这与"窗口至少 1 拍"不冲突: 1 拍 = 只扣本拍, 那是"窗口极小"; 0 拍 =
     //   "这一项不参与"。两者必须能分开, 否则"全关时逐位一致"这条回归就不成立。
     std::size_t inflightWindowTicks() const
     {
-        if (!(params_.inflight_window_s > 0.0))
+        // ★ 与本文件里的"二选一"判据共用同一个谓词 —— 两处若各写一遍,
+        //   哪天判据改了(比如改成"窗口 >= 最小拍数")就会出现"引擎以为接管了、
+        //   跟踪器却一条账都没记"这种静默不一致。
+        if (!amTakesOverInflight(params_))
             return 0;
         const double ticks = params_.inflight_window_s / std::max(dt_, 1e-6);
         const auto n = static_cast<std::size_t>(std::max(1.0, std::floor(ticks + 0.5)));
@@ -613,7 +636,7 @@ private:
     static double clampHalf(double v)
     {
         if (!std::isfinite(v)) return 0.0;
-        return std::clamp(v, -0.2, 0.2);   // 与 aim_predict 同范围(§4.2 ①)
+        return std::clamp(v, -0.2, 0.2);   // 任务书 §4.2 ① 的系数范围
     }
 
     // k̂ 的夹取: 非有限 / 非正值一律回落到默认 1.0(= 不做换算)。
@@ -735,7 +758,7 @@ private:
     double aim_vy_ = 0.0;
 
 public:
-    // 提前量硬上限的绝对天花板与默认值 —— 与 aim_predict.h 保持一致。
+    // 提前量硬上限的绝对天花板与默认值 —— 与配置层的夹取保持一致。
     static constexpr double kDefaultMaxLeadPx = 12.0;
     static constexpr double kAbsMaxLeadPx = 64.0;
 };

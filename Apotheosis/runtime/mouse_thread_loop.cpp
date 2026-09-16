@@ -555,27 +555,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
     // dt 的一阶低通状态(见下面主循环里的说明)。0 = 尚未初始化。
     double dt_smoothed = 0.0;
 
-    // ── 预测推进 (use_prediction_tick) ────────────────────────────────────────
-    // 检测间歇期用 tracker 的预测分支继续推进控制器, 而不是干等下一帧。
-    // 详见 config.h 里 use_prediction_tick 的说明。
-    // 注意: 这些状态只在末尾的"无新检测"分支里用, 所以必须在循环外声明。
-    //
-    // ★ PID-EventSync 档 (aim_mode == 1) 会在【使用处】强制关掉它 —— 见下面
-    //   "无新检测"分支里的闸门。这里只保留全局开关本身。
-    const bool prediction_tick_enabled = runtime_config::read()->use_prediction_tick;
-    const int  prediction_tick_hz =
-        std::clamp(runtime_config::read()->prediction_tick_hz, 60, 1000);
-    const int  prediction_tick_max_run =
-        std::max(0, runtime_config::read()->prediction_tick_max_run);
-    const double prediction_min_interval_ms = 1000.0 / prediction_tick_hz;
-    auto last_prediction_tick_ts = std::chrono::steady_clock::time_point::min();
-    int  prediction_run = 0;
-    // 预测拍复用上一拍真实 tick 的参数/枢轴: 它们描述"这一帧该怎么瞄",
-    // 与检测是否更新无关。没有过一次真实 tick 之前不允许外推。
-    boss::EngineInput last_input{};
-    bool last_input_valid = false;
-    PivotResolved last_pivot{};
-    int64_t last_send_capture_ns = 0;
     // 【2026-09-13 删除】last_calib_log_ts —— 那是给「每计数像素」测量的诊断日志
     // 做 0.5s 节流用的。标定链路整体移除, 不再需要。
 
@@ -747,96 +726,15 @@ void mouseThreadFunction(MouseThread& mouseThread)
             //   · 分数余量 (residual += step): 累积节奏被改变
             // 结果就是"同一个参数手感完全不同"。所以这里必须保持 continue。
             //
-            // 【例外】use_prediction_tick: 见 config.h 的说明。开启后走下面的
-            // "预测推进"分支 —— 它不是把同一个检测结果重复消费(那正是上面注释
-            // 警告的错误做法), 而是用【空的检测集】调用同一个 tick, 让 tracker 走
-            // 它自己的预测分支(coasting, use_measurement=false), 观测器与控制器
-            // 按真实墙钟 dt 推进。这正是 AimMagic 的做法。
-            //
-            // 参数复用: 预测拍没有新配置可读, 直接复用上一拍真实 tick 填好的
-            // EngineInput 与枢轴 —— 它们描述的是"这一帧该怎么瞄", 与检测是否
-            // 更新无关。
-            // ★ PID-EventSync 档: 帧间【不许】外推补拍 —— 这是档位语义的一部分。
-            //   EventSync 的定义就是"每次推理只消费一次"; AimMagic 的 EventSync 档
-            //   在两次推理之间不发任何位移(它等条件变量睡到下一帧), 帧间插值是它
-            //   另一个档(kalman/FrameSync)的行为。两条同时开会叠成两层外推, 提前量
-            //   被算两遍 —— 同源于 aim_pid.h 里"同一个物理量不许扣两遍"的教训。
-            //   ★ 判定用 last_input.aim_mode(上一拍真实 tick 填进去的档位), 而不是
-            //     启动时读一次的全局量: 用户中途换档必须立刻生效。
-            if (last_input_valid && last_input.aim_mode == 1)
-                continue;
-
-            if (!prediction_tick_enabled || !last_input_valid)
-                continue;
-
-            if (!had_lock)
-            {
-                // 没有在锁的目标, 预测没有意义(没有东西可外推)。
-                continue;
-            }
-
-            // 节流到 prediction_tick_hz, 避免把串口写堆成新的死区。
-            {
-                const auto now_pred = std::chrono::steady_clock::now();
-                const double since_ms = std::chrono::duration<double, std::milli>(
-                    now_pred - last_prediction_tick_ts).count();
-                if (since_ms < prediction_min_interval_ms)
-                    continue;
-                last_prediction_tick_ts = now_pred;
-            }
-
-            if (prediction_run >= prediction_tick_max_run)
-            {
-                // 连续预测太多拍: 检测流可能真的断了(或目标已不可见)。
-                // 停止外推, 等下一帧真实观测 —— 不靠猜继续推着鼠标走。
-                continue;
-            }
-            ++prediction_run;
-
-            {
-                // 空检测集 → tracker 走预测分支。传空向量而不是 nullptr, 让
-                // selector 正常执行一次"本次无可用目标"的关联。
-                static const std::vector<cv::Rect2f> kEmptyBoxes;
-                static const std::vector<int> kEmptyClasses;
-                static const std::vector<float> kEmptyConfidences;
-
-                boss::EngineInput pin = last_input;
-                pin.boxes = &kEmptyBoxes;
-                pin.classes = &kEmptyClasses;
-                pin.confidences = &kEmptyConfidences;
-
-                const auto now_pred = std::chrono::steady_clock::now();
-                double pdt = std::chrono::duration<double>(now_pred - last_tick_ts).count();
-                if (!(pdt > 0.0) || pdt > 0.5) pdt = 1.0 / 60.0;
-                last_tick_ts = now_pred;
-
-                const boss::EngineOutput pout = engine.tick(pin, pdt);
-                publish_boss_debug(engine);
-                if (pout.have_target && pout.coasting)
-                {
-                    double pdx = pout.dx;
-                    double pdy = pout.dy;
-                    const auto pshaped = aim_path_driver.step(
-                        static_cast<double>(pout.anchor.x),
-                        static_cast<double>(pout.anchor.y),
-                        last_pivot.x, last_pivot.y, pdt, pout.current_track_id,
-                        pdx, pdy);
-                    pdx = pshaped.move_x;
-                    pdy = pshaped.move_y;
-
-                    mouseThread.sendRawMove(static_cast<int>(std::lround(pdx)),
-                        static_cast<int>(std::lround(pdy)),
-                        last_send_capture_ns, runtime::latency::nowNs());
-                }
-                runtime::chainlog::event(
-                    ",reason=prediction_tick,run=%d,coast=%d,dt_ms=%.2f",
-                    prediction_run, pout.coasting ? 1 : 0, pdt * 1000.0);
-            }
+            // ★ PID-EventSync (本档唯一链路): 帧间【不许】外推补拍 —— 这是档位语义
+            //   的一部分。EventSync 的定义就是"每次推理只消费一次"; AimMagic 的
+            //   EventSync 档在两次推理之间不发任何位移(它等条件变量睡到下一帧),
+            //   帧间插值是它另一个档(kalman/FrameSync)的行为。两条同时开会叠成两层
+            //   外推, 提前量被算两遍 —— 同源于 aim_pid.h 里"同一个物理量不许扣两遍"
+            //   的教训。所以这里直接等下一帧真实观测, 不做任何预测补拍。
+            //   (旧的 use_prediction_tick / prediction_tick_* 三个键已随之删除。)
             continue;
         }
-
-        // 收到真实观测: 预测连击计数归零, 重新允许下一段预测。
-        prediction_run = 0;
 
         if (hasNewDetection && (probed_frame_capture_ns <= 0 || (frameContext.width>0 &&
             (frameContext.width!=config_resolution || frameContext.height!=config_resolution))))
@@ -966,27 +864,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.pid_x = pid_params(*profile_ptr, true);
         in.pid_y = pid_params(*profile_ptr, false);
 
-        // ── 预测补偿参数 (2026-09-13, 对齐 AimMagic 1.0.30) ──────────────────
-        // 这几个量不吃"X 轴/Y 轴分别一套": AM 的预测系数虽然是 factor_x/factor_y 两个,
-        // 但尺寸区间和阻尼是【全 AimKey 共用】的 (QML 里 scope=2), 所以这里原样照搬,
-        // 只把系数分轴填。
-        in.predict_factor_x = static_cast<double>(profile_ptr->pidf_predict_x);
-        in.predict_factor_y = static_cast<double>(profile_ptr->pidf_predict_y);
-        in.predict_min_width = static_cast<double>(profile_ptr->pidf_predict_min_w);
-        in.predict_max_width = static_cast<double>(profile_ptr->pidf_predict_max_w);
-        in.predict_damp = static_cast<double>(profile_ptr->pidf_predict_damp);
-        // 提前量硬上限 + 速度噪声门 (2026-09-14, 任务书 §4.2 第②③条)。
-        // ★ 这两项不是"可选优化": 没有硬上限, 稳态瞄偏 = factor×sw×v 会随速度线性
-        //   增长(§4.2 禁止); 没有噪声门, 静止目标的 v̂ 噪声(p99=46px/s)会被乘成假
-        //   提前量, 在 Kp=35 下表现为瞄点上嗡嗡抖。
-        in.predict_max_px = static_cast<double>(profile_ptr->pidf_predict_max_px);
-        in.predict_vel_floor = static_cast<double>(profile_ptr->pidf_predict_vel_floor);
-
-        // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──
-        // aim_mode: 0 = 现役纯反馈档; 1 = EventSync 档(跟踪器 + 每轨预测)。
-        // ★ 在途补偿【不在这个开关里】—— 它一直在跑(pidf_inflight_*), 两条档位
-        //   共用同一套控制器与同一个计数域在途补偿(见 aim_pid.h / config.h 说明)。
-        in.aim_mode = profile_ptr->aim_mode;
+        // ─ PID-EventSync: 跟踪器 + 每轨预测状态机 (移植 AimMagic 1.0.30 全链路) ─
+        // ★ 提前量参数不使用"X 轴/Y 轴分别一套": AM 的预测系数虽然是 factor_x/factor_y
+        //   两个, 但尺寸区间与阻尼是【全 AimKey 共用】的 (QML 里 scope=2), 原样照搬。
         {
             boss::AimTrackerParams tp;
             tp.min_hits = profile_ptr->esync_min_hits;
@@ -1053,40 +933,36 @@ void mouseThreadFunction(MouseThread& mouseThread)
             static boss::AimPidParams last_x{};
             static boss::AimPidParams last_y{};
             static bool logged = false;
-            // 预测参数也要参与变化检测 —— 它们同样决定手感, 换档时必须留痕。
+            // 预测参数也要参与变化检测 —— 它们同样决定手感, 改动时必须留痕。
             static double last_pfx = 1e30, last_pfy = 1e30;
-            static double last_pmn = -1.0, last_pmx = -1.0, last_pdp = -1.0;
-            static int last_mode = -1;
+            static double last_pmn = -1.0, last_pmx = -1.0;
             const auto same = [](const boss::AimPidParams& a, const boss::AimPidParams& b) {
                 return a.kp == b.kp && a.ki == b.ki && a.kd == b.kd
                     && a.p_full_scale_px == b.p_full_scale_px && a.limit_counts == b.limit_counts;
             };
+            const boss::AimTrackerParams& trp = in.esync;
             if (!logged || !same(in.pid_x, last_x) || !same(in.pid_y, last_y)
-                || in.predict_factor_x != last_pfx || in.predict_factor_y != last_pfy
-                || in.predict_min_width != last_pmn || in.predict_max_width != last_pmx
-                || in.predict_damp != last_pdp || in.aim_mode != last_mode)
+                || trp.pred_factor_x != last_pfx || trp.pred_factor_y != last_pfy
+                || trp.pred_min_w != last_pmn || trp.pred_max_w != last_pmx)
             {
                 runtime::chainlog::event(
                     ",reason=pid_params,"
-                    "mode=%d,"
                     "x=(kp=%.1f,ki=%.2f,kd=%.3f,psat=%.0f,lim=%d),"
                     "y=(kp=%.1f,ki=%.2f,kd=%.3f,psat=%.0f,lim=%d),"
-                    "predict=(fx=%.3f,fy=%.3f,minw=%.0f,maxw=%.0f,damp=%.2f),"
+                    "predict=(fx=%.3f,fy=%.3f,minw=%.0f,maxw=%.0f,max_px=%.0f,vel_floor=%.0f),"
                     "filter_tau_ms=%.0f",
-                    in.aim_mode,
                     in.pid_x.kp, in.pid_x.ki, in.pid_x.kd,
                     in.pid_x.p_full_scale_px, in.pid_x.limit_counts,
                     in.pid_y.kp, in.pid_y.ki, in.pid_y.kd,
                     in.pid_y.p_full_scale_px, in.pid_y.limit_counts,
-                    in.predict_factor_x, in.predict_factor_y,
-                    in.predict_min_width, in.predict_max_width, in.predict_damp,
+                    trp.pred_factor_x, trp.pred_factor_y,
+                    trp.pred_min_w, trp.pred_max_w,
+                    trp.pred_max_lead_px, trp.pred_vel_floor,
                     boss::kAnchorFilterTauMs);
                 last_x = in.pid_x;
                 last_y = in.pid_y;
-                last_pfx = in.predict_factor_x; last_pfy = in.predict_factor_y;
-                last_pmn = in.predict_min_width; last_pmx = in.predict_max_width;
-                last_pdp = in.predict_damp;
-                last_mode = in.aim_mode;
+                last_pfx = trp.pred_factor_x; last_pfy = trp.pred_factor_y;
+                last_pmn = trp.pred_min_w; last_pmx = trp.pred_max_w;
                 logged = true;
             }
         }
@@ -1136,15 +1012,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
         const boss::EngineOutput out = engine.tick(in, dt);
 
-        // 缓存本拍输入与枢轴, 供检测间歇期的预测拍复用 (use_prediction_tick)。
-        // 只缓存"参数"这类与检测内容无关的量; boxes/classes 在预测拍会被替换成
-        // 空集, 所以这里不缓存它们。
-        last_input        = in;
-        last_input_valid  = true;
-        last_pivot        = pivot;
-        // 帧的采集戳原样使用 —— 不再减去手填的帧龄估计(该旋钮已删)。
-        last_send_capture_ns = probed_frame_capture_ns > 0 ? probed_frame_capture_ns : 0;
-
         publish_boss_debug(engine);
         if (!out.have_target)
         {
@@ -1191,8 +1058,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 drive_dx, drive_dy);
             drive_dx = shaped.move_x;
             drive_dy = shaped.move_y;
-            // 只有【真换目标】(身份变了且瞄点跳变>=25px)才清在途指令。tracker 重锁同一个目标
-            // 也清的话, 每秒会清 8 次, 在途位移被反复丢弃, 压枪/跟枪都会被拖断。
+            // 只有【真换目标】(跟踪器身份变了)才清在途指令。跟踪器在滑行窗口内重锁
+            // 同一个目标也清的话, 每秒会清 8 次, 在途位移被反复丢弃, 压枪/跟枪都会被拖断。
             if (out.target_switched)
                 mouseThread.clearQueuedMoves();
             // 老链路: 输出已经是计数, 直接发送。限幅/死区在PIDF 后处理里已经做过了
@@ -1202,13 +1069,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
             const int send_dy = static_cast<int>(std::lround(drive_dy));
             mouseThread.sendRawMove(send_dx, send_dy, send_capture_ns, aim_consume_ns);
 
-            // ★ ⑤ EventSync 档: 把这一拍【实际发出去】的计数登进在途账本
-            //   (AM 的发送环)。下一拍的误差合成会把它们按 k̂ 换成像素扣掉。
+            // ★ ⑤ 把这一拍【实际发出去】的计数登进在途账本(AM 的发送环)。
+            //   下一拍的误差合成会把它们按 k̂ 换成像素扣掉。
             //   ★ 登的是 lround 之后的【整数计数】—— 与真正发给盒子的值一致;
             //     用 drive_dx 的 double 会登进"还没被取整消化掉的零头", 那部分
             //     其实没发出去(零头由 PID 的 carry 攒到下一拍)。
-            if (in.aim_mode == 1)
-                engine.noteAimSend(send_dx, send_dy);
+            engine.noteAimSend(send_dx, send_dy);
 
             // 全链路日志: 本帧的完整现场(检测/找色枢轴/锚点/误差/控制器输出/整形/
             // 位移/队列/扳机相位/延迟探针)。字段含义见 runtime/chain_log.h。
@@ -1256,8 +1122,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 //   fits     观测器已接受的有效拟合窗口数(0 = 还没标定出来)
                 //   bbh      本拍检测框高度(像素)。调参 agent 用它学【基准框高】
                 //            (尺度调度的参照点), 见 mouse/aim_scale.h。
-                //   ── PID-EventSync 档新增 (2026-09-15, 只在 mode=1 时有意义) ──
-                //   mode     本拍档位(0 现役 / 1 EventSync)
+                //   ─ PID-EventSync (本档唯一链路) ──
                 //   tid      跟踪器身份(与 gen 不同源, 跨帧粘滞)
                 //   th/tm    锁定轨迹的连续命中数 / 连续漏帧数(tm>0 = 本拍在滑行)
                 //   tvx/tvy  跟踪器采样窗给出的目标速度(像素/秒)
@@ -1268,7 +1133,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     "ex=%.2f,ey=%.2f,eux=%.2f,euy=%.2f,"
                     "ipx=%.2f,ipy=%.2f,dpx=%.2f,dpy=%.2f,ix=%.2f,iy=%.2f,"
                     "carryx=%.2f,carryy=%.2f,cmdx=%.2f,cmdy=%.2f,lim=%d/%d,bbh=%.1f,"
-                    "mode=%d,tid=%d,th=%d,tm=%d,tvx=%.1f,tvy=%.1f,tkx=%.2f,tky=%.2f",
+                    "tid=%d,th=%d,tm=%d,tvx=%.1f,tvy=%.1f,tkx=%.2f,tky=%.2f",
                     out.pid_dt_ms, out.motion_suppressed ? 1 : 0, out.target_switched ? 1 : 0,
                     out.target_anchor_jump_px,
                     out.pid_error_px_x, out.pid_error_px_y,
@@ -1279,7 +1144,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     out.pid_cmd_x, out.pid_cmd_y,
                     out.pid_limit_x, out.pid_limit_y,
                     static_cast<double>(out.bbox.height),
-                    in.aim_mode, out.esync_track_id, out.esync_track_hits,
+                    out.esync_track_id, out.esync_track_hits,
                     out.esync_track_age, out.esync_vel_x, out.esync_vel_y,
                     out.esync_pred_k_x, out.esync_pred_k_y);
 

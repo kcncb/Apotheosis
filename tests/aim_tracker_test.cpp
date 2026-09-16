@@ -733,6 +733,73 @@ void test_inflight_chain()
     check(std::isfinite(px) && std::isfinite(py), "空账本必须返回有限值");
 }
 
+// ── [10.5] 在途补偿「二选一」的判据 ─────────────────────────────────────────
+//
+// ★★ 这条判据 2026-09-16 差点写错: 当时把"经典档/EventSync 档"的档位判断顺手改成
+//   "恒为真", 那会【无条件】把计数域的 inflight_beta 清 0 —— 而窗口默认为 0
+//   (= AM 那条替代链根本没在跑), 于是生产点的主刹车被静默拆掉
+//   (实测 beta=0 时 60fps 尾段 299.6px 且发散, beta=1.6 时 0.294px)。
+//   ★ 判据必须问"那条替代链到底有没有在跑", 不能问"现在是哪一档"。
+// ★ 这个谓词放在 aim_tracker.h 里, 就是为了让这一节能真的测到它: boss_aim.cpp
+//   依赖 OpenCV, 在本机编不进逻辑回归, "直接比大小"的写法在自动化测试里永远测不到。
+void test_inflight_arbitration()
+{
+    std::printf("[10.5] 在途补偿二选一判据 (窗口是否为 0)\n");
+    const double dt = 1.0 / 120.0;
+
+    // ① 默认(结构体默认值)必须是"不接管" ⇒ 计数域那项继续当家。
+    {
+        auto p = baseParams();
+        p.inflight_window_s = 0.0;
+        check(!boss::AimTracker::amTakesOverInflight(p),
+              "★ 窗口 = 0(默认) 必须【不】接管 —— 此时计数域 beta 是唯一的在途补偿");
+        boss::AimTracker t;
+        t.configure(p);
+        t.beginFrame(dt);
+        check(t.inflightWindowTicks() == 0, "窗口 0 ⇒ 拍数 0(账本整条关闭)");
+    }
+
+    // ② 窗口打开 ⇒ 接管, 引擎据此把计数域 beta 清 0(避免同一批指令被扣两次)。
+    {
+        auto p = baseParams();
+        p.inflight_window_s = boss::kInflightWindowMaxS;
+        check(boss::AimTracker::amTakesOverInflight(p), "窗口 > 0 ⇒ 接管");
+    }
+
+    // ③ 窗口极小但非 0 也算"跑起来了" —— 判据是"有没有在跑", 不是"够不够大"。
+    {
+        auto p = baseParams();
+        p.inflight_window_s = 1e-6;
+        check(boss::AimTracker::amTakesOverInflight(p), "窗口极小但非 0 也算接管");
+        boss::AimTracker t;
+        t.configure(p);
+        t.beginFrame(dt);
+        check(t.inflightWindowTicks() >= 1, "接管时拍数至少 1(不会出现 0 拍的空转)");
+    }
+
+    // ④ 非法输入(负窗口 / NaN)必须当成"关闭": 否则计数域 beta 被清 0 = 静默拆刹车。
+    {
+        auto p = baseParams();
+        p.inflight_window_s = -5.0;
+        check(!boss::AimTracker::amTakesOverInflight(p), "负窗口 = 关闭, 不许接管");
+        p.inflight_window_s = std::numeric_limits<double>::quiet_NaN();
+        check(!boss::AimTracker::amTakesOverInflight(p), "★ NaN 窗口不许接管");
+    }
+
+    // ⑤ 谓词必须与"拍数 > 0"完全一致(两处共用一个谓词, 这里把一致性钉住)。
+    {
+        auto p = baseParams();
+        for (double w : {0.0, 1e-6, 0.01, boss::kInflightWindowMaxS, 10.0, -1.0})
+        {
+            p.inflight_window_s = w;
+            boss::AimTracker t;
+            t.configure(p);
+            t.beginFrame(dt);
+            check(boss::AimTracker::amTakesOverInflight(p) == (t.inflightWindowTicks() > 0),
+                  "谓词必须与 inflightWindowTicks()>0 一致(窗口=" + std::to_string(w) + ")");
+        }
+    }
+}
 // ── [10] ⑥ 自运动补偿 (AM 的自身瞄准速度项) ─────────────────────────────────
 //
 // ★ 这一项在本项目被删过一次(predictive_controller, 1a5a792): 输出侧标定增益
@@ -831,6 +898,7 @@ int main()
     test_robustness();
     test_param_clamps();
     test_inflight_chain();
+    test_inflight_arbitration();
     test_self_motion();
     test_khat_consistency();
 

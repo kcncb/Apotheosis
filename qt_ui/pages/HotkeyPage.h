@@ -134,8 +134,8 @@ private:
     QSpinBox* m_predictMaxPx{};                         // 提前量硬上限 (px, 0=内置12)
     QSpinBox* m_predictVelFloor{};                      // 速度噪声门 (px/s)
     // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──────
-    // 档位下拉 + 跟踪器的四个参数。见 config.h 里 aim_mode / esync_* 的长注释。
-    QComboBox*      m_aimMode{};            // 0 = 经典 PID; 1 = EventSync(仿 AimMagic)
+    // 跟踪器的四个参数。见 config.h 里 esync_* 的长注释。
+    // (档位下拉 m_aimMode 已于 2026-09-16 随「经典 PID」档一起删除。)
     QSpinBox*       m_esyncMinHits{};       // 连续命中多少帧算确认轨迹
     QSpinBox*       m_esyncMaxAge{};        // 漏帧多少帧后删除轨迹(滑行窗口)
     QSpinBox*       m_esyncAssocRadius{};   // 关联最近邻门限 (px)

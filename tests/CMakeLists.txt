@@ -106,13 +106,6 @@ add_logic_test(inflight_comp_test "${CMAKE_CURRENT_LIST_DIR}/inflight_comp_test.
 # 本测试钉住两半: 抖动必须被压掉, 而真实的持续掉帧必须还能跟上。
 add_logic_test(dt_smooth_test "${CMAKE_CURRENT_LIST_DIR}/dt_smooth_test.cpp")
 
-# 瞄点预测 (2026-09-13 重做, 对齐 AimMagic 1.0.30 FUN_14006e470 的「预测补偿」)。
-# 依据: _amrev/AimMagic_RE/v1030/ANALYSIS_v1030.md §4.2 + v108/ANALYSIS.md §6.2/§6.3
-#       + v1030/qml_z/----_预测补偿...qml (真实 UI 参数名与默认值)
-# 锁住: sizeWeight 线性梯度端点/区间外、predX = factor*motion*sizeWeight 的形状、
-#       方向翻转 K_damp 阻尼、静止目标严格零偏移。
-add_logic_test(aim_predict_test "${CMAKE_CURRENT_LIST_DIR}/aim_predict_test.cpp")
-
 # 距离尺度估计 (mouse/aim_scale.h, 2026-09-13, G6「近大远小」)。
 # 它把 bbox.height 映射成一个【连续、有界、单调】的乘数 s ∈ [s_min, s_max],
 # 供控制器调制: 等效增益 / 提前量上限 / 速度可信门限 / 平滑强度。
@@ -170,9 +163,11 @@ add_logic_test(autotune_reload_test "${CMAKE_CURRENT_LIST_DIR}/autotune_reload_t
 # ★ NOMINMAX 是必须的: config.cpp 与 SimpleIni.h 都会用到 std::min/max, 而
 #   windows.h 的 min/max 宏会把它们撕成语法错误。主程序是通过 Apotheosis.h 里
 #   的定义拿到的, 逻辑测试没有那一层, 所以要显式加。
+if(EXISTS "${APP_SOURCE_ROOT}/modules/SimpleIni.h")
 add_logic_test(config_migration_test "${CMAKE_CURRENT_LIST_DIR}/config_migration_test.cpp"
     "${APP_SOURCE_ROOT}/config/config.cpp")
 target_compile_definitions(config_migration_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 # ── 界面几何 (2026-09-14) ───────────────────────────────────────────────────
 # ★ 为什么需要这一类测试: 列宽/裁切问题是【纯视觉】的, 逻辑测试完全测不到。
@@ -204,6 +199,8 @@ if(TARGET Qt6::Widgets)
     set_target_properties(autotune_layout_test PROPERTIES AUTOMOC ON)
     if(MSVC)
         target_compile_options(autotune_layout_test PRIVATE /utf-8 /Zc:char8_t-)
+    else()
+        target_compile_options(autotune_layout_test PRIVATE -fno-char8_t)
     endif()
     add_test(NAME autotune_layout_test COMMAND autotune_layout_test)
     set_tests_properties(autotune_layout_test PROPERTIES TIMEOUT 60)
@@ -225,6 +222,7 @@ endif()
 #
 # ★ 独立可执行文件, 链真实的 mouse_driver.cpp + 依赖库(Makcu / serial / ws2_32),
 #   不需要 Qt 或推理运行时。
+if(WIN32)
 add_executable(mouse_driver_test "${CMAKE_CURRENT_LIST_DIR}/mouse_driver_test.cpp"
     "${APP_SOURCE_ROOT}/mouse/mouse_driver.cpp"
     "${APP_SOURCE_ROOT}/mouse/Makcu.cpp"
@@ -252,3 +250,4 @@ if(MSVC)
 endif()
 add_test(NAME mouse_driver_test COMMAND mouse_driver_test)
 set_tests_properties(mouse_driver_test PROPERTIES TIMEOUT 10)
+endif()

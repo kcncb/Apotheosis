@@ -1,7 +1,9 @@
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -217,9 +219,6 @@ void Config::writeDefaultsInPlace()
     use_process_boost = true;
     use_mmcss = true;
     mmcss_task_name = "Games";
-    use_prediction_tick = false;
-    prediction_tick_hz = 240;
-    prediction_tick_max_run = 10;
     use_double_buffer = false;
     gpuMemoryReserveMB = 2048;
     enableGpuExclusiveMode = true;
@@ -358,9 +357,6 @@ bool Config::loadConfig(const std::string& filename)
     use_process_boost = get_bool("", "use_process_boost", true);
     use_mmcss = get_bool("", "use_mmcss", true);
     mmcss_task_name = get_string("", "mmcss_task_name", "Games");
-    use_prediction_tick = get_bool("", "use_prediction_tick", false);
-    prediction_tick_hz = static_cast<int>(std::clamp<long>(get_long("", "prediction_tick_hz", 240), 60L, 1000L));
-    prediction_tick_max_run = static_cast<int>(std::clamp<long>(get_long("", "prediction_tick_max_run", 10), 0L, 200L));
     gpuMemoryReserveMB = get_long("", "gpuMemoryReserveMB", 2048);
     enableGpuExclusiveMode = get_bool("", "enableGpuExclusiveMode", true);
 
@@ -558,12 +554,10 @@ bool Config::loadConfig(const std::string& filename)
             // (结构体默认是 -1 哨兵, 见 config.h)。
             hk.pidf_inflight_x = static_cast<float>(get_double(sec, "pidf_inflight_x", hk.pidf_inflight_x));
             hk.pidf_inflight_y = static_cast<float>(get_double(sec, "pidf_inflight_y", hk.pidf_inflight_y));
-            // PID-EventSync 档 (2026-09-15 新增, 见 config.h 的长注释)。
-            // ★ 全部是【新增键】, 老配置里没有它们 → 一律取结构体默认。
-            //   默认 aim_mode = 0 = 现役纯反馈档, 所以老配置读进来行为逐位不变 ——
-            //   这正是"新增键不需要推进 pidf_mapping_version"的原因: 版本号是
-            //   【旧槽位语义变更】的迁移机制, 这里没有任何旧槽位被改语义。
-            hk.aim_mode = static_cast<int>(get_long(sec, "aim_mode", hk.aim_mode));
+            // PID-EventSync (本档唯一链路, 见 config.h 的长注释)。
+            // ★ 2026-09-16: 原先的 aim_mode 键已删除 —— 现在只有这一条链路。
+            //   老配置里若还写着 aim_mode = 0, 读入时【忽略】(不报错): 那个档位
+            //   已不存在, 无法"回到"它。
             hk.esync_min_hits = static_cast<int>(get_long(
                 sec, "esync_min_hits", hk.esync_min_hits));
             hk.esync_max_age = static_cast<int>(get_long(
@@ -922,10 +916,7 @@ bool Config::loadConfig(const std::string& filename)
         if (hk.aim_scale_base_h > 0.0f && hk.aim_scale_base_h < 4.0f)
             hk.aim_scale_base_h = 0.0f;
 
-        // ── PID-EventSync 档 (2026-09-15 新增) ──────────────────────────────
-        // ★ 只认 0/1: 未知值一律回落到 0(现役档)。这是【安全方向】的回落 ——
-        //   档位读错时应当退化成"一行都不生效"的老行为, 而不是启一条没测过的链。
-        hk.aim_mode = (hk.aim_mode == 1) ? 1 : 0;
+        // ─ PID-EventSync (本档唯一链路) ─────────────────────────────────────
         if (!std::isfinite(hk.esync_assoc_iou))
             hk.esync_assoc_iou = 0.20f;
         // min_hits: 1..30。1 = 来一帧就确认(AM 有 min_hits=3, 但本项目上游 selector
@@ -1110,9 +1101,6 @@ bool Config::saveConfig(const std::string& filename)
         << "use_process_boost = " << to_bool_str(use_process_boost) << "\n"
         << "use_mmcss = " << to_bool_str(use_mmcss) << "\n"
         << "mmcss_task_name = " << mmcss_task_name << "\n"
-        << "use_prediction_tick = " << to_bool_str(use_prediction_tick) << "\n"
-        << "prediction_tick_hz = " << prediction_tick_hz << "\n"
-        << "prediction_tick_max_run = " << prediction_tick_max_run << "\n"
         << "gpuMemoryReserveMB = " << gpuMemoryReserveMB << "\n"
         << "enableGpuExclusiveMode = " << to_bool_str(enableGpuExclusiveMode) << "\n"
         << "cpuCoreReserveCount = " << cpuCoreReserveCount << "\n"
@@ -1202,8 +1190,7 @@ bool Config::saveConfig(const std::string& filename)
              << "pidf_inflight_x = " << hk.pidf_inflight_x << "\n"
              << "pidf_inflight_y = " << hk.pidf_inflight_y << "\n"
              << "pidf_inflight_window_ms = " << hk.pidf_inflight_window_ms << "\n"
-             // PID-EventSync 档 (2026-09-15 新增)。默认 0 = 现役纯反馈档。
-             << "aim_mode = " << hk.aim_mode << "\n"
+             // PID-EventSync (本档唯一链路; 原 aim_mode 键已于 2026-09-16 删除)。
              << "esync_min_hits = " << hk.esync_min_hits << "\n"
              << "esync_max_age = " << hk.esync_max_age << "\n"
              << "esync_assoc_radius_px = " << hk.esync_assoc_radius_px << "\n"

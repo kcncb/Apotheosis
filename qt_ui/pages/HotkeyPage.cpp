@@ -946,12 +946,9 @@ void HotkeyPage::buildBossAimCard()
     m_predictVelFloor = makeInt(0, 1000, 60);
     m_predictVelFloor->setSuffix(QString::fromUtf8(u8" px/s"));
 
-    // ── PID-EventSync 档 (2026-09-15 新增) ──────────────────────────────────
-    // 档位下拉: 0 = 经典 PID(现役)；1 = EventSync(照搬 AimMagic 1.0.30 全链路)。
-    // ★ 默认 0，与配置默认一致；老用户升级后行为完全不变。
-    m_aimMode = new QComboBox;
-    m_aimMode->addItem(QString::fromUtf8(u8"经典 PID（现役）"), 0);
-    m_aimMode->addItem(QString::fromUtf8(u8"EventSync（仿 AimMagic）"), 1);
+    // ── PID-EventSync (本档唯一链路; 档位下拉已于 2026-09-16 删除) ──────────
+    // 原先那个「经典 PID / EventSync」下拉连着已删除的架构 —— 现在只有一条链路,
+    // 所以不再需要"选档"这个动作。
     // 跟踪器四个参数 (默认值 = AimMagic 的 min_hits=3 / max_age=5)。
     m_esyncMinHits = makeInt(1, 30, 3);
     m_esyncMaxAge = makeInt(1, 60, 5);
@@ -1011,30 +1008,15 @@ void HotkeyPage::buildBossAimCard()
     m_pidfInflight[0]->setToolTip(inflightTip);
     m_pidfInflight[1]->setToolTip(inflightTip);
 
-    // ── 瞄准档位 / PID-EventSync (2026-09-15 新增) ──────────────────────────
-    // ★ 文案要说清"这是一个架构档位, 不是又一个力度旋钮", 否则用户会以为
-    //   它和上面的 Kp 一样可以随手来回拨。
-    const QString aimModeTip = QString::fromUtf8(
-        u8"瞄准档位。两个档【共用同一套控制器】(Kp/Ki/Kd、在途补偿、尺度调度全部照旧)，"
-        u8"区别只在「身份的来源」和「提前量住在哪」：\n"
-        u8"· 经典 PID（现役）：选靶层每帧报一个身份；提前量用一份全局状态(速度来自紧挨瞄点"
-        u8"的 α-β 滤波)。\n"
-        u8"· EventSync（仿 AimMagic）：多一层跟踪器，目标身份靠框重叠+最近邻【跨帧粘住】，"
-        u8"每条轨迹各自持有一份预测系数与速度采样窗；预测系数按 0.1/帧 爬升、-0.2/帧 回落。\n"
-        u8"★ 想抄 AimMagic 的手感就用 EventSync 档。它主要解决两件事：\n"
-        u8"① 目标被遮挡/闪帧时【不清控制器状态】(滑行窗口内身份与积分都还在)；\n"
-        u8"② 提前量的状态住在轨迹上，换目标不串味、重新锁定不用从 0 重爬。\n"
-        u8"★ 有意【没】抄的两样(本项目实测证伪)：AimMagic 用「每计数像素」把在途计数换回"
-        u8"像素的做法需要 k̂，本机双机架构测不出；以及「提前量正比于自己瞄准速度」的自运动项。"
-        u8"本档的在途补偿仍然在【计数域】完成(u -= beta×N/W)，全程不含 k̂。");
-    m_aimMode->setToolTip(aimModeTip);
-
+    // ── 跟踪器 / PID-EventSync ──────────────────────────────────────────────
     const QString esyncTrackerTip = QString::fromUtf8(
-        u8"跟踪器参数（只在 EventSync 档生效）。默认值就是 AimMagic 的 min_hits=3 / max_age=5。\n"
+        u8"跟踪器参数。默认值取自 AimMagic 的 min_hits=3 / max_age=5。\n"
+        u8"体系：每次推理先做「选靶」，再由跟踪器给这个框一个【跨帧稳定的身份】。"
+        u8"身份稳了，提前量才能住在轨迹上、目标闪一下也不用清控制器状态。\n"
         u8"确认命中帧数：连续命中多少帧才算「确认的轨迹」。注意它【不会】拖慢锁定 —— "
         u8"目标一旦被选中就能立刻瞄(min_hits 大了会出现「刚露头几帧锁不上」，实测过这个坑)，"
         u8"这个数只影响「锁定目标死了之后能不能自动转移到另一条轨迹」。\n"
-        u8"滑行帧数上限：漏帧多少帧后删除轨迹。它就是这个档位的【滑行窗口】——调大更能扛遮挡，"
+        u8"滑行帧数上限：漏帧多少帧后删除轨迹。它是【滑行窗口】——调大更能扛遮挡，"
         u8"但目标真走掉之后会多追几拍残影；调小反应快，但一次普通漏检就可能被当成丢目标。");
     m_esyncMinHits->setToolTip(esyncTrackerTip);
     m_esyncMaxAge->setToolTip(esyncTrackerTip);
@@ -1072,10 +1054,11 @@ void HotkeyPage::buildBossAimCard()
         u8"窗口(ms)：看多远之前发出去的指令。★ 上限被硬夹在 46ms —— 那就是本链路的真实死区，"
         u8"超过它会把早已生效的指令再扣一遍，变成正反馈发散。默认 0 = 整条链关闭。\n"
         u8"强度：AimMagic 在这一档是求和后直接除，没有额外增益（= 1.0）。\n"
-        u8"★★ 注意：打开这一项会【自动关掉】经典档那套「在途补偿强度」—— 两者是同一件事的"
-        u8"两种做法（一个在像素域、一个在计数域），同时开会把同一批指令扣两次，必定发散。\n"
-        u8"用法建议：先只调「在途补偿强度」（计数域、不需要 k̂），那是已验证的路子；"
-        u8"只有在你想完整复刻 AimMagic 形态时才打开这里，并且必须把上面的 k̂ 填对。");
+        u8"★★ 注意：窗口一开，程序会【自动把上面那个「在途补偿强度」置 0】—— 两者是"
+        u8"同一件事的两种做法（一个在像素域、一个在计数域），同时开会把同一批指令扣两次，"
+        u8"必定发散。所以这是【二选一】：窗口 = 0 时在途补偿走计数域（不需要 k̂，"
+        u8"那是已验证的路子）；窗口 > 0 时整条换成 AimMagic 的像素域做法，必须把上面的 k̂ 填对。\n"
+        u8"用法建议：默认保持 0。只有想完整复刻 AimMagic 形态时才打开这里。");
     m_esyncInflightWindow->setToolTip(esyncInflightTip);
     m_esyncInflightBeta->setToolTip(esyncInflightTip);
 
@@ -1243,10 +1226,10 @@ void HotkeyPage::buildBossAimCard()
         QString::fromUtf8(u8"速度可信门限"), m_predictVelFloor), extra_row + 2, 0, 1, 2);
     layout->addLayout(grid);
 
-    // ── 瞄准档位 / PID-EventSync (2026-09-15 新增) ──────────────────────────
-    // 单独一段: 它是一个【架构开关】(跟踪器 + 每轨预测 + 事件驱动消费),
+    // ── PID-EventSync: 跟踪器 + 每轨预测 + 事件驱动消费 ─────────────────────
+    // 单独一段: 它是【链路结构】的一组参数(身份怎么粘、提前量住在哪),
     // 和上面那些连续量旋钮不是一回事, 混在同一个网格里会被当成"又一个参数"。
-    auto* esyncTitle = new QLabel(QString::fromUtf8(u8"瞄准档位（PID-EventSync）"));
+    auto* esyncTitle = new QLabel(QString::fromUtf8(u8"跟踪与提前量（PID-EventSync）"));
     esyncTitle->setObjectName(QStringLiteral("SectionTitle"));
     layout->addWidget(esyncTitle);
 
@@ -1257,30 +1240,28 @@ void HotkeyPage::buildBossAimCard()
     esyncGrid->setColumnStretch(0, 1);
     esyncGrid->setColumnStretch(1, 1);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"档位"), m_aimMode), 0, 0, 1, 2);
+        QString::fromUtf8(u8"确认命中帧数"), m_esyncMinHits), 0, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"确认命中帧数"), m_esyncMinHits), 1, 0);
+        QString::fromUtf8(u8"滑行帧数上限"), m_esyncMaxAge), 0, 1);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"滑行帧数上限"), m_esyncMaxAge), 1, 1);
+        QString::fromUtf8(u8"关联距离门限"), m_esyncAssocRadius), 1, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"关联距离门限"), m_esyncAssocRadius), 2, 0);
+        QString::fromUtf8(u8"关联重叠门限"), m_esyncIoU), 1, 1);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"关联重叠门限"), m_esyncIoU), 2, 1);
-    esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"速度采样窗"), m_esyncVelWindow), 3, 0, 1, 2);
+        QString::fromUtf8(u8"速度采样窗"), m_esyncVelWindow), 2, 0, 1, 2);
     // ⑤ k̂(每计数像素) —— AM 的 kalman_counts_per_pixel, 用户手填, 默认 1.0。
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"每计数像素 X"), m_esyncCountsPerPixelX), 4, 0);
+        QString::fromUtf8(u8"每计数像素 X"), m_esyncCountsPerPixelX), 3, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"每计数像素 Y"), m_esyncCountsPerPixelY), 4, 1);
+        QString::fromUtf8(u8"每计数像素 Y"), m_esyncCountsPerPixelY), 3, 1);
     // ⑤ 在途换算链(AM 的发送环) —— 默认关闭(窗口 0)。
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"在途换算窗"), m_esyncInflightWindow), 5, 0);
+        QString::fromUtf8(u8"在途换算窗"), m_esyncInflightWindow), 4, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"在途换算强度"), m_esyncInflightBeta), 5, 1);
+        QString::fromUtf8(u8"在途换算强度"), m_esyncInflightBeta), 4, 1);
     // ⑥ 自运动补偿 —— 默认 0(关闭)。
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"自运动补偿"), m_esyncSelfMotionGain), 6, 0, 1, 2);
+        QString::fromUtf8(u8"自运动补偿"), m_esyncSelfMotionGain), 5, 0, 1, 2);
     layout->addLayout(esyncGrid);
 
     // ── 尺度调度 (2026-09-14 新增) ──────────────────────────────────────────
@@ -1333,9 +1314,7 @@ void HotkeyPage::buildBossAimCard()
             this, &HotkeyPage::saveUiToCurrentProfile);
     connect(m_scaleMin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &HotkeyPage::saveUiToCurrentProfile);
-    // 瞄准档位 / EventSync (2026-09-15)。
-    connect(m_aimMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &HotkeyPage::saveUiToCurrentProfile);
+    // 跟踪器 / EventSync (2026-09-15)。
     for (auto* spin : {m_esyncMinHits, m_esyncMaxAge, m_esyncAssocRadius})
         connect(spin, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
@@ -1733,8 +1712,7 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_predictMaxPx->setValue(hp.pidf_predict_max_px);
     m_predictVelFloor->setValue(hp.pidf_predict_vel_floor);
 
-    // 瞄准档位 / PID-EventSync (2026-09-15)
-    m_aimMode->setCurrentIndex(hp.aim_mode == 1 ? 1 : 0);
+    // 跟踪器 / PID-EventSync (2026-09-15; 档位下拉已于 2026-09-16 删除)
     m_esyncMinHits->setValue(hp.esync_min_hits);
     m_esyncMaxAge->setValue(hp.esync_max_age);
     m_esyncAssocRadius->setValue(hp.esync_assoc_radius_px);
@@ -1840,8 +1818,7 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.pidf_predict_max_w=m_predictMaxW->value();
     hp.pidf_predict_damp=static_cast<float>(m_predictDamp->value());
 
-    // 瞄准档位 / PID-EventSync (2026-09-15 新增)
-    hp.aim_mode = (m_aimMode->currentIndex() == 1) ? 1 : 0;
+    // 跟踪器 / PID-EventSync (2026-09-15 新增; 档位下拉已于 2026-09-16 删除)
     hp.esync_min_hits = m_esyncMinHits->value();
     hp.esync_max_age = m_esyncMaxAge->value();
     hp.esync_assoc_radius_px = m_esyncAssocRadius->value();

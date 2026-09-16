@@ -213,9 +213,9 @@ Defaults below are first-run defaults from `config.cpp`.
 | `use_process_boost` | bool | `true` | Raise the process to `HIGH_PRIORITY_CLASS` (same as 原神AI's `process_priority=0x8000`). Removes CPU preemption jitter; does not raise throughput. |
 | `use_mmcss` | bool | `true` | Register the inference thread with MMCSS so the OS reserves CPU bandwidth for it. |
 | `mmcss_task_name` | string | `Games` | MMCSS task class. Windows maps `Games` to `\Games\Games`. |
-| `use_prediction_tick` | bool | `false` | Advance the control loop through the tracker's prediction branch during detection gaps instead of `continue`-ing. Decouples the control cadence from the detection cadence (AimMagic's model). **Changes the PID `dt` sequence — re-sweep gains after enabling.** |
-| `prediction_tick_hz` | int | `240` | Cadence cap for prediction ticks (60–1000). Kept well under 1 kHz so serial writes don't become a new dead time. |
-| `prediction_tick_max_run` | int | `10` | Max consecutive prediction ticks before waiting for a real observation. At 240 Hz this allows ≈41 ms of detection gap. |
+| ~~`use_prediction_tick`~~ | — | — | **Removed 2026-09-16.** It let the control loop keep ticking through the tracker's prediction branch during detection gaps (AimMagic's other tier). The surviving EventSync chain is one displacement tick per inference frame with **no inter-frame extrapolation**, so the branch was dead code and the key is gone. A residual key in an old INI is ignored. |
+| ~~`prediction_tick_hz`~~ | — | — | Removed with `use_prediction_tick`. |
+| ~~`prediction_tick_max_run`~~ | — | — | Removed with `use_prediction_tick`. |
 | `gpuMemoryReserveMB` | int | `2048` | GPU reserve target |
 | `enableGpuExclusiveMode` | bool | `true` | Exclusive behavior toggle |
 | `capture_use_cuda` | bool | `true` | Direct GPU capture path for TRT + duplication API |
@@ -611,13 +611,13 @@ PID 的 P 项放大的是这个噪声，不是真实误差。
 | **在途增益 X/Y** | `pidf_inflight_x/y` | **把「已发出还没生效」的自身位移从误差里减掉**，解开 Kp 的死结 | 加过头会“发木”：接近目标时提前收手、落不到位 |
 | **在途时间窗** | `pidf_inflight_window_ms` | 多久之内发出的指令算“还没生效” | 太短压不住晃；太长把早已生效的也算进去，发木 |
 
-### 9.5 瞄准档位（PID-EventSync 档，2026-09-15 新增）
+### 9.5 跟踪与提前量（PID-EventSync，2026-09-15 新增；2026-09-16 起为**唯一**链路）
 
 完整说明见 **`docs/eventsync-mode.md`**。要点：
 
 | 界面名 | 配置键 | 默认 | 作用与调过头的后果 |
 | --- | --- | --- | --- |
-| 档位 | `aim_mode` | 0 | 0 = 现役纯反馈档；1 = EventSync（跟踪器 + 每轨预测）。**默认 0，老配置行为逐位不变** |
+| ~~档位~~ | ~~`aim_mode`~~ | — | **已删除（2026-09-16）**：原来 0 = 经典纯反馈档、1 = EventSync。经典档连同 `AimPredict`、`use_prediction_tick` 一起删掉了，EventSync 现在是唯一链路，因此不再需要开关。老配置里残留的 `aim_mode` 被**忽略**（不报错、也不影响任何键） |
 | 确认命中帧数 | `esync_min_hits` | 3 | 连续命中多少帧算“确认轨迹”。★ **不会拖慢锁定**，只影响“锁定目标死了能否自动转移” |
 | 滑行帧数上限 | `esync_max_age` | 5 | 漏帧多少帧后删除轨迹（= 滑行窗口）。调大更扛遮挡，但目标真走掉后会多追几拍残影 |
 | 关联距离门限 | `esync_assoc_radius_px` | 80 | 框心距离超过它判为新目标。太小 ⇒ 高速横穿时身份乱跳、积分反复清零 |
@@ -628,12 +628,18 @@ PID 的 P 项放大的是这个噪声，不是真实误差。
 | 在途换算强度 | `esync_inflight_beta` | 1.0 | ⑤ AimMagic 在这一档没有额外增益（= 1.0）。夹 [0, 4] |
 | 自运动补偿 | `esync_self_motion_gain` | 0.0 | ⑥ 提前量正比于**你自己甩枪的速度**。★ **默认关**；这类项在本项目被删过一次（标定增益进反馈回路 ⇒ 每拍反向极限环）。夹 ±1.0 |
 
-★★ **打开「在途换算窗」时会自动把 `pidf_inflight_beta` 置 0**（代码强制）。
+★★ **在途补偿严格「二选一」，判据是「在途换算窗」是否为 0**（`boss_aim.cpp` 的
+`am_inflight = (in.esync.inflight_window_s > 0.0)`）：
+窗口 = 0（默认）⇒ AM 那条像素域链**根本没在跑**（`inflightPixels()` 恒返回 0），
+在途补偿由计数域的 `pidf_inflight_beta`（生产 1.6）独家承担；
+窗口 > 0 ⇒ 引擎**自动把 `pidf_inflight_beta` 置 0**，整条换成 AM 的像素域做法。
 两者是同一个 Smith 预测器的两种做法（一个在像素域、一个在计数域），
 同时开 = 同一批在途指令被扣两次 = 过补偿 = **正反馈发散**。
+★ **反过来不要搞错**：窗口 = 0 时绝不能顺手把计数域那项也关掉 —— 实测 `beta = 0`
+不是"关掉一个可选优化"，而是**拆掉主刹车**（60fps 直接发散，见 §9.4.1 的扫描表）。
 
-★ 预测强度、尺寸区间、提前量上限、速度噪声门与现役档**共用** `pidf_predict_*` ——
-换档不需要重填一遍，两个档的预测强度也因此可以直接对照。
+★ 预测强度、尺寸区间、提前量上限、速度噪声门由 `pidf_predict_*` 提供，消费点是
+`AimTracker::predictionLead()`（**唯一的**提前量来源）。
 
 ★★ 关于 ⑤ 的 k̂：**它和 `pid_calib`（甩枪档的自动标定）不是一回事。**
 后者是"程序发一批已知计数、读光标、反算"，依赖单机架构，在本项目双机架构下

@@ -215,16 +215,17 @@ int main()
         }
     }
 
-    // ── [7] PID-EventSync 档: 新增键不推进版本号, 老配置必须落在"现役档" ────
+    // ── [7] EventSync 新增键不推进版本号, 老配置取结构体默认 ────────────────
     //
-    // ★ 这一段钉住的是一条【设计决定】: aim_mode / esync_* 是【新增键】, 没有任何
-    //   旧槽位被改语义, 所以 pidf_mapping_version 【不】推进(仍然是 7)。老配置里
-    //   没有这些键 -> 全部取结构体默认 -> aim_mode = 0 = 现役纯反馈档 ->
-    //   行为与这个档存在之前逐位相同。谁要是把默认值改成 1, 老用户升级后手感
-    //   会无声无息地变成另一条链路 —— 这条断言就是为了拦住那种改动。
-    std::printf("\n[7] EventSync 新增键: 不推进版本, 老配置落在现役档\n");
+    // ★ 这一段钉住的是一条【设计决定】: esync_* 是【新增键】, 没有任何旧槽位被改
+    //   语义, 所以 pidf_mapping_version 【不】推进(仍然是 7)。老配置里没有这些键
+    //   -> 全部取结构体默认。谁要是把某个默认值改掉, 老用户升级后手感会无声无息
+    //   地变 —— 这条断言就是为了拦住那种改动。
+    // ★ 2026-09-16: 原先的 aim_mode 键已删除(「经典 PID」档整档删除)。老配置里
+    //   若还写着 aim_mode = 0, 必须被【忽略而不是报错】—— 见下面的专门一节。
+    std::printf("\n[7] EventSync 新增键: 不推进版本, 老配置取默认\n");
     {
-        // 老配置(v7, 完全没有 esync/aim_mode 键)
+        // 老配置(v7, 完全没有 esync 键)
         const std::string p = write_config("esync_old.ini",
             "pidf_mapping_version = 7");
         Config c;
@@ -234,7 +235,6 @@ int main()
             const auto& hp = c.hotkeys[0];
             check(hp.pidf_mapping_version == 7,
                   "★ 新增键【不许】推进版本号(改的是版本号, 不是键)");
-            check(hp.aim_mode == 0, "★ 缺键 -> aim_mode = 0(现役档, 行为不变)");
             check(hp.esync_min_hits == 3, "缺键 -> min_hits 取 AM 默认 3");
             check(hp.esync_max_age == 5, "缺键 -> max_age 取 AM 默认 5");
             check(hp.esync_vel_window_ms == 100, "缺键 -> 速度采样窗 100ms");
@@ -259,33 +259,31 @@ int main()
         }
     }
 
-    // ── [8] EventSync 档位的值域夹取 ────────────────────────────────────────
-    // ★ 档位只认 0/1, 且未知值必须回落到 0(安全方向: 退化成"一行都不生效"的老行为,
-    //   而不是启一条没测过的链路)。
-    std::printf("\n[8] EventSync 档位与参数的夹取\n");
+    // ── [8] EventSync 参数的值域夹取 + 已删除的 aim_mode 键被忽略 ──────────
+    // ★ 2026-09-16: 档位键已删除。老配置里残留的 aim_mode(不管写 0 还是 1)必须被
+    //   安全地忽略: 既不报错, 也不影响任何参数 —— 因为那个档位已经不存在了,
+    //   "回到经典档"这件事在代码里已无对应物。
+    std::printf("\n[8] EventSync 参数夹取 + 已删除的 aim_mode 键被忽略\n");
     {
-        struct Case { const char* mode; int want; const char* name; };
-        const Case cases[] = {
-            {"0", 0, "0 = 现役档"},
-            {"1", 1, "1 = EventSync 档"},
-            {"7", 0, "未知档位 -> 回落到现役档(安全方向)"},
-            {"-3", 0, "负数 -> 回落到现役档"},
-        };
-        for (const auto& cs : cases)
+        for (const char* mode : {"0", "1", "7", "-3"})
         {
             const std::string p = write_config("esync_mode.ini",
                 "pidf_mapping_version = 7",
-                std::string("aim_mode = ") + cs.mode + "\n");
+                std::string("aim_mode = ") + mode + "\n"
+                "esync_min_hits = 4\n");
             Config c;
-            c.loadConfig(p);
+            check(c.loadConfig(p),
+                  std::string("残留 aim_mode = ") + mode + " 不报错(键已删除)");
             if (!c.hotkeys.empty())
-                check(c.hotkeys[0].aim_mode == cs.want, cs.name);
+                check(c.hotkeys[0].esync_min_hits == 4,
+                      std::string("残留 aim_mode = ") + mode
+                      + " 不影响其它键的读取");
         }
 
         // 参数越界 -> 夹到域内
         const std::string p2 = write_config("esync_range.ini",
             "pidf_mapping_version = 7",
-            "aim_mode = 1\nesync_min_hits = 999\nesync_max_age = 0\n"
+            "esync_min_hits = 999\nesync_max_age = 0\n"
             "esync_assoc_radius_px = 99999\nesync_assoc_iou = 5.0\n"
             "esync_vel_window_ms = 99999\n");
         Config c2;
@@ -293,7 +291,6 @@ int main()
         if (!c2.hotkeys.empty())
         {
             const auto& hp = c2.hotkeys[0];
-            check(hp.aim_mode == 1, "档位保留");
             check(hp.esync_min_hits <= 30 && hp.esync_min_hits >= 1,
                   "min_hits 被夹到 [1,30]");
             check(hp.esync_max_age >= 1 && hp.esync_max_age <= 60,
@@ -309,7 +306,7 @@ int main()
         // ⑤⑥ 新键的值域夹取。
         const std::string p3 = write_config("esync_range2.ini",
             "pidf_mapping_version = 7",
-            "aim_mode = 1\nesync_counts_per_pixel_x = 0\n"
+            "esync_counts_per_pixel_x = 0\n"
             "esync_counts_per_pixel_y = -5.0\nesync_inflight_window_ms = 9999\n"
             "esync_inflight_beta = -1.0\nesync_self_motion_gain = 42.0\n");
         Config c3;
@@ -332,7 +329,7 @@ int main()
         // ★ k̂ 越界(过小)也必须被夹到域内(不是"回落到默认")。
         const std::string p4 = write_config("esync_khat_small.ini",
             "pidf_mapping_version = 7",
-            "aim_mode = 1\nesync_counts_per_pixel_x = 0.0000001\n");
+            "esync_counts_per_pixel_x = 0.0000001\n");
         Config c4;
         c4.loadConfig(p4);
         if (!c4.hotkeys.empty())
