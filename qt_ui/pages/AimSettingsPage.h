@@ -74,6 +74,8 @@ private:
     void buildCrosshairCard();     // 准星找色开关
     void buildControllerCard();    // ★★ 通用控制器层（23 个 ctl_*）
     void buildDynamicFovCard();    // 动态 FOV
+    void buildTriggerCard();       // ★ 自动扳机（2026-09-17 恢复）
+    void buildTrajectoryCard();    // ★ 轨迹曲线 / 风力曲线（2026-09-17 恢复）
 
     // ★ 小工具：hint 文案必须走 class 属性而不是 objectName ——
     //   theme.qss 的选择器是 QLabel[class="hint"]，objectName 匹配不到任何规则，
@@ -86,6 +88,14 @@ private:
     // (漏了就是"界面能改、写不回配置"的静默失效)。
     QWidget* makeDoubleRow(const char* obj, const char* label,
                            double lo, double hi, double step, double def);
+    // ★ 带悬停说明的一行（2026-09-17）: 用户要求"每个参数都加上停留的参数说明"。
+    //   tip 会同时设到行 widget 与里面的控件上 —— 鼠标停在标签或控件上都出提示。
+    QWidget* makeIntRow(const char* obj, const char* label, int lo, int hi,
+                        int step, int def, const QString& tip);
+    QWidget* makeDoubleRowTip(const char* obj, const char* label, double lo, double hi,
+                              double step, double def, const QString& tip);
+    // 给一个已建好的行挂上 tip（含行内所有子控件）。
+    static void attachTip(QWidget* row, const QString& tip);
 
     void rebuildGroupCombo();
     void rebuildProfileList();
@@ -107,6 +117,12 @@ private:
     // ★ 用指针数组而不是"命名查找"，是为了让"漏一个"在代码里看得见。
     std::vector<QDoubleSpinBox*> m_ctlDoubles;
     std::vector<QSpinBox*>       m_ctlInts;
+    // 自动扳机卡的 int 控件（2026-09-17 恢复）
+    std::vector<QSpinBox*>       m_triggerInts;
+    // 轨迹曲线卡的 int / double 控件（2026-09-17 恢复）
+    std::vector<QSpinBox*>       m_pathInts;
+    std::vector<QDoubleSpinBox*> m_pathDoubles;
+    QLabel*                      m_pathSectionBezier = nullptr;
 
     TargetPage* m_targetPage = nullptr;
     bool m_loading = false;

@@ -57,6 +57,15 @@ struct ControlOutput
     Vec2 anchor;
     Vec2 cross;
     Vec2 error;
+    // ★ 本拍锁定目标的框（检测像素）。★ 2026-09-17 新增: 自动扳机要用它算
+    //   命中区 —— 命中区的判据是"准星是否落在【框】的某个区间里", 所以
+    //   下游必须有这个框。engaged=false 或无目标时 hasTarget=false。
+    Box targetBox{};
+    bool hasTarget = false;
+    // ★ 目标身份的稳定编号。选靶层的"锁定目标"在跨帧延续时这个值不变,
+    //   换目标才变 —— 扳机的转火冷却靠它判定。
+    //   （选靶层没有 track_id 概念, 这里由本层按"锁定框是否延续"生成。）
+    int targetId = -1;
     // 诊断：为什么没出力。调参时最需要的就是这个。
     enum class IdleReason
     {
@@ -118,6 +127,11 @@ private:
     // 上一次实际喂给滤波器的框（用于判断"框变了没"）。
     bool hasLastBox_ = false;
     Box lastBox_;
+
+    // ★ 目标身份计数器。选靶层没有 track_id 概念, 这里按稳定器的判决生成:
+    //   Snap / NoHistory = 换目标(或首次) ⇒ 推进;  Ok = 延续 ⇒ 不变。
+    //   自动扳机的转火冷却挂在这个编号的变化上。
+    int targetIdCounter_ = 0;
 };
 
 } // namespace control

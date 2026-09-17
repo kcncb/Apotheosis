@@ -234,18 +234,22 @@ int main()
             "aim_scale_enabled = 1\naim_scale_max = 1.5\n"
             "aim_scale_min = 0.7\naim_scale_base_h = 123.5\n"
             "aim_scale_near_h = 160\naim_scale_far_h = 45\n"
-            // ── 已删除: 瞄准轨迹曲线 ──
+            // ── ★ 已恢复: 瞄准轨迹曲线 (2026-09-17) ──
+            //   后端 mouse/aim_path.h 已重建, 这些键重新被读/写。
             "aim_path_mode = 3\naim_path_influence = 40\n"
             "aim_path_bezier_cx1 = 0.3\naim_path_bezier_cy1 = 0.0\n"
             "aim_path_bezier_cx2 = 0.7\naim_path_bezier_cy2 = 0.0\n"
             "aim_path_wind_gravity = 5\naim_path_wind_wind = 2\n"
             "aim_path_wind_step = 10\naim_path_wind_distance = 8\n"
             "aim_path_wind_threshold = 10\n"
+            // ★ 这三个是【真的删除、不恢复】的键: 手绘曲线采样点的编辑器与
+            //   神经权重都没重建, 所以它们仍必须被安全忽略。
             "aim_path_custom_samples = 0.0,0.5,0.0\n"
             "aim_path_custom_file = whatever.curve\n"
             "aim_path_neural_enabled = true\n"
             "aim_path_neural_weights = 1,2,3\n"
-            // ── 已删除: 扳机 / 自动开镜 / 自动急停 ──
+            // ── ★ 已恢复: 扳机 / 自动开镜 / 自动急停 (2026-09-17) ──
+            //   后端 mouse/trigger_fsm.h + trigger_scope.h + auto_stop.h 已重建。
             "trigger_enabled = true\ntrigger_fire_delay = 50\n"
             "trigger_fire_duration = 100\ntrigger_fire_interval = 200\n"
             "trigger_y_percent = 100\n"
@@ -282,6 +286,16 @@ int main()
             check(hp.name == "Aim" && hp.keys.size() == 1 &&
                   hp.keys[0] == "RightMouseButton",
                   "★★ 活着的 name / keys 未受影响");
+            // ★★ 2026-09-17: 这一大段"已删除的键"里, trigger_* 与 aim_path_*
+            //   已经【恢复成活键】—— 所以它们不再是"被安全忽略"的样本,
+            //   而是"被正确读回"的样本。上面那份 config 给的是
+            //   aim_path_mode=3 / aim_path_influence=40 / trigger_enabled=true /
+            //   trigger_fire_delay=50 / trigger_auto_scope=2, 逐条钉住。
+            check(hp.aim_path_mode == 3, "★ 恢复的 aim_path_mode 读到 3");
+            check(hp.aim_path_influence == 40, "★ 恢复的 aim_path_influence 读到 40");
+            check(hp.trigger_enabled, "★ 恢复的 trigger_enabled 读到 true");
+            check(hp.trigger_fire_delay == 50, "★ 恢复的 trigger_fire_delay 读到 50");
+            check(hp.trigger_auto_scope == 2, "★ 恢复的 trigger_auto_scope 读到 2");
         }
     }
 
@@ -308,12 +322,23 @@ int main()
         f.close();
 
         check(!body.empty(), "写出的文件非空");
+        // ★★ 2026-09-17 变更: `trigger_*` 与 `aim_path_*` 不再属于这一类。
+        //   用户要求把自动扳机与风力曲线加回来, 后端已重建
+        //   (mouse/trigger_fsm.h / aim_path.h), 这两个键族【重新变成活键】——
+        //   它们现在必须被读、被写、被落盘, 所以从"已删除"名单里移出,
+        //   并转入选下面的"仍然写出/真的往返"那一段。
         for (const char* gone : {"pidf_mapping_version", "pidf_kp_x",
-                                 "esync_min_hits", "aim_scale_base_h",
-                                 "trigger_enabled", "aim_path_mode"})
+                                 "esync_min_hits", "aim_scale_base_h"})
         {
             check(body.find(gone) == std::string::npos,
                   std::string("★ 已删除的键不再写出: ") + gone);
+        }
+        // ★ 恢复的键必须【真的往返】—— 不只看它出现在文件里。
+        //   只查字符串会漏掉"写了个默认值回去"这种假通过。
+        for (const char* back : {"trigger_enabled", "aim_path_mode"})
+        {
+            check(body.find(back) != std::string::npos,
+                  std::string("★ 恢复的键重新写出: ") + back);
         }
         // 活着的键必须还在文件里 —— 否则"瘦身"就变成了"失忆"。
         for (const char* kept : {"fovX", "fovY", "crosshair_detect_enabled",
@@ -321,6 +346,39 @@ int main()
         {
             check(body.find(kept) != std::string::npos,
                   std::string("活着的键仍然写出: ") + kept);
+        }
+
+        // ★★ 恢复的键: 值真的往返 (2026-09-17)。
+        //   只查键名会漏掉"写了个默认值回去"—— 那种假通过让用户改了参数
+        //   重启就丢, 正是本仓库反复踩的静默失效。这里逐字段比对字面值。
+        {
+            const std::string p2 = write_config("restored.ini",
+                "trigger_enabled = true\ntrigger_fire_delay = 45\n"
+                "trigger_fire_interval = 133\ntrigger_y_percent = 150\n"
+                "trigger_auto_scope = 1\ntrigger_auto_stop = 1\ntrigger_stop_ms = 77\n"
+                "aim_path_mode = 3\naim_path_influence = 63\n"
+                "aim_path_wind_gravity = 7.5\naim_path_wind_wind = 3.25\n"
+                "aim_path_wind_threshold = 12\n");
+            Config c2;
+            check(c2.loadConfig(p2), "恢复的键: 配置能加载");
+            if (!c2.hotkeys.empty())
+            {
+                const auto& e = c2.hotkeys[0];
+                check(e.trigger_enabled, "trigger_enabled 读到 true");
+                check(e.trigger_fire_delay == 45, "trigger_fire_delay 读到 45");
+                check(e.trigger_fire_interval == 133, "trigger_fire_interval 读到 133");
+                check(e.trigger_y_percent == 150, "trigger_y_percent 读到 150");
+                check(e.trigger_auto_scope == 1, "trigger_auto_scope 读到 1");
+                check(e.trigger_auto_stop == 1, "trigger_auto_stop 读到 1");
+                check(e.trigger_stop_ms == 77, "trigger_stop_ms 读到 77");
+                check(e.aim_path_mode == 3, "aim_path_mode 读到 3");
+                check(e.aim_path_influence == 63, "aim_path_influence 读到 63");
+                check(e.aim_path_wind_gravity > 7.4f && e.aim_path_wind_gravity < 7.6f,
+                      "aim_path_wind_gravity 读到 7.5");
+                check(e.aim_path_wind_wind > 3.2f && e.aim_path_wind_wind < 3.3f,
+                      "aim_path_wind_wind 读到 3.25");
+                check(e.aim_path_wind_threshold == 12, "aim_path_wind_threshold 读到 12");
+            }
         }
     }
 

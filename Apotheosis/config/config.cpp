@@ -579,6 +579,36 @@ bool Config::loadConfig(const std::string& filename)
             hk.ctl_random_seed =
                 static_cast<int>(get_double(sec, "ctl_random_seed", hk.ctl_random_seed));
 
+            // ── 自动扳机 (2026-09-17 恢复) ────────────────────────────────
+            // ★ 这些键在 2026-09-17 那轮被连同后端一起删掉过。老配置里若还留着
+            //   它们(旧版本写出去的), 现在【重新生效】—— 这是有意的:
+            //   用户要求把扳机加回来, 那旧值就该继续可用。
+            hk.trigger_enabled = get_bool(sec, "trigger_enabled", false);
+            hk.trigger_fire_delay = static_cast<int>(get_double(sec, "trigger_fire_delay", hk.trigger_fire_delay));
+            hk.trigger_fire_duration = static_cast<int>(get_double(sec, "trigger_fire_duration", hk.trigger_fire_duration));
+            hk.trigger_fire_interval = static_cast<int>(get_double(sec, "trigger_fire_interval", hk.trigger_fire_interval));
+            hk.trigger_y_percent = static_cast<int>(get_double(sec, "trigger_y_percent", hk.trigger_y_percent));
+            hk.trigger_delay_jitter_ms = static_cast<int>(get_double(sec, "trigger_delay_jitter_ms", hk.trigger_delay_jitter_ms));
+            hk.trigger_duration_jitter_ms = static_cast<int>(get_double(sec, "trigger_duration_jitter_ms", hk.trigger_duration_jitter_ms));
+            hk.trigger_interval_jitter_ms = static_cast<int>(get_double(sec, "trigger_interval_jitter_ms", hk.trigger_interval_jitter_ms));
+            hk.trigger_switch_cooldown_ms = static_cast<int>(get_double(sec, "trigger_switch_cooldown_ms", hk.trigger_switch_cooldown_ms));
+            hk.trigger_auto_scope = static_cast<int>(get_double(sec, "trigger_auto_scope", hk.trigger_auto_scope));
+            hk.trigger_scope_delay_ms = static_cast<int>(get_double(sec, "trigger_scope_delay_ms", hk.trigger_scope_delay_ms));
+            hk.trigger_auto_stop = static_cast<int>(get_double(sec, "trigger_auto_stop", hk.trigger_auto_stop));
+            hk.trigger_stop_ms = static_cast<int>(get_double(sec, "trigger_stop_ms", hk.trigger_stop_ms));
+
+            // ── 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────
+            hk.aim_path_mode = static_cast<int>(get_double(sec, "aim_path_mode", hk.aim_path_mode));
+            hk.aim_path_influence = static_cast<int>(get_double(sec, "aim_path_influence", hk.aim_path_influence));
+            hk.aim_path_bezier_cx1 = static_cast<float>(get_double(sec, "aim_path_bezier_cx1", hk.aim_path_bezier_cx1));
+            hk.aim_path_bezier_cy1 = static_cast<float>(get_double(sec, "aim_path_bezier_cy1", hk.aim_path_bezier_cy1));
+            hk.aim_path_bezier_cx2 = static_cast<float>(get_double(sec, "aim_path_bezier_cx2", hk.aim_path_bezier_cx2));
+            hk.aim_path_bezier_cy2 = static_cast<float>(get_double(sec, "aim_path_bezier_cy2", hk.aim_path_bezier_cy2));
+            hk.aim_path_wind_gravity = static_cast<float>(get_double(sec, "aim_path_wind_gravity", hk.aim_path_wind_gravity));
+            hk.aim_path_wind_wind = static_cast<float>(get_double(sec, "aim_path_wind_wind", hk.aim_path_wind_wind));
+            hk.aim_path_wind_step = static_cast<float>(get_double(sec, "aim_path_wind_step", hk.aim_path_wind_step));
+            hk.aim_path_wind_distance = static_cast<float>(get_double(sec, "aim_path_wind_distance", hk.aim_path_wind_distance));
+            hk.aim_path_wind_threshold = static_cast<int>(get_double(sec, "aim_path_wind_threshold", hk.aim_path_wind_threshold));
 
             hotkeys.push_back(std::move(hk));
         }
@@ -668,6 +698,42 @@ bool Config::loadConfig(const std::string& filename)
             std::swap(hk.ctl_min_aspect, hk.ctl_max_aspect);
         // 种子: 负值无意义(0 已经是"用固定常数"), 夹到非负。
         hk.ctl_random_seed = std::max(0, hk.ctl_random_seed);
+
+        // ── 自动扳机 (2026-09-17 恢复) ────────────────────────────────────
+        // 三个延迟/时长都夹到非负; interval 至少 1ms —— 0 会让 Cooldown
+        // 立刻结束, 在命中区里退化成每拍 press/release 的抖动。
+        hk.trigger_fire_delay    = std::max(0, hk.trigger_fire_delay);
+        hk.trigger_fire_duration = std::max(0, hk.trigger_fire_duration);
+        hk.trigger_fire_interval = std::max(1, hk.trigger_fire_interval);
+        hk.trigger_delay_jitter_ms    = std::max(0, hk.trigger_delay_jitter_ms);
+        hk.trigger_duration_jitter_ms = std::max(0, hk.trigger_duration_jitter_ms);
+        hk.trigger_interval_jitter_ms = std::max(0, hk.trigger_interval_jitter_ms);
+        hk.trigger_switch_cooldown_ms = std::max(0, hk.trigger_switch_cooldown_ms);
+        hk.trigger_scope_delay_ms = std::max(0, hk.trigger_scope_delay_ms);
+        // ★ 命中区百分比下限 10: 比 bbox 小太多的"命中区"几乎不可能命中,
+        //   等于把扳机变成静默失效。上限 300 允许"预开火"(框上方也算)。
+        hk.trigger_y_percent = std::clamp(hk.trigger_y_percent, 10, 300);
+        hk.trigger_auto_scope = std::clamp(hk.trigger_auto_scope, 0, 2);
+        hk.trigger_auto_stop = hk.trigger_auto_stop > 0 ? 1 : 0;
+        // 与旧实现一致: 20~300ms。太短固件来不及弹起, 太长玩家被推着走。
+        hk.trigger_stop_ms = std::clamp(hk.trigger_stop_ms, 20, 300);
+
+        // ── 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────────
+        hk.aim_path_mode = std::clamp(hk.aim_path_mode, 0, 3);
+        hk.aim_path_influence = std::clamp(hk.aim_path_influence, 0, 100);
+        // Bezier 控制点: X 夹到 [0,1] 保证不出现折返; Y 夹到 [-1,1] 是
+        // 弦长的比例 —— 超出会让路径横向甩出去。
+        hk.aim_path_bezier_cx1 = std::clamp(hk.aim_path_bezier_cx1, 0.0f, 1.0f);
+        hk.aim_path_bezier_cx2 = std::clamp(hk.aim_path_bezier_cx2, 0.0f, 1.0f);
+        hk.aim_path_bezier_cy1 = std::clamp(hk.aim_path_bezier_cy1, -1.0f, 1.0f);
+        hk.aim_path_bezier_cy2 = std::clamp(hk.aim_path_bezier_cy2, -1.0f, 1.0f);
+        // WindMouse: 重力/风力/步长/距离都必须为正, 否则物理模型退化
+        // (G=0 或 M=0 会让路径根本走不动)。
+        hk.aim_path_wind_gravity = std::clamp(hk.aim_path_wind_gravity, 0.1f, 100.0f);
+        hk.aim_path_wind_wind    = std::clamp(hk.aim_path_wind_wind, 0.0f, 100.0f);
+        hk.aim_path_wind_step    = std::clamp(hk.aim_path_wind_step, 1.0f, 200.0f);
+        hk.aim_path_wind_distance = std::clamp(hk.aim_path_wind_distance, 1.0f, 200.0f);
+        hk.aim_path_wind_threshold = std::max(0, hk.aim_path_wind_threshold);
     };
     for (auto& hk : hotkeys)
         clamp_target_fields(hk);
@@ -888,6 +954,37 @@ bool Config::saveConfig(const std::string& filename)
              << "ctl_min_aspect = "         << hk.ctl_min_aspect << "\n"
              << "ctl_max_aspect = "         << hk.ctl_max_aspect << "\n"
              << "ctl_random_seed = "        << hk.ctl_random_seed << "\n";
+
+        // ── ★★ 自动扳机 (2026-09-17 恢复) ────────────────────────────────
+        // 后端在 mouse/trigger_fsm.h + mouse/trigger_scope.h + mouse/auto_stop.h,
+        // 接线在 runtime/aim_loop.cpp。
+        file << "trigger_enabled = "        << to_bool_str(hk.trigger_enabled) << "\n"
+             << "trigger_fire_delay = "     << hk.trigger_fire_delay << "\n"
+             << "trigger_fire_duration = "  << hk.trigger_fire_duration << "\n"
+             << "trigger_fire_interval = "  << hk.trigger_fire_interval << "\n"
+             << "trigger_y_percent = "      << hk.trigger_y_percent << "\n"
+             << "trigger_delay_jitter_ms = "    << hk.trigger_delay_jitter_ms << "\n"
+             << "trigger_duration_jitter_ms = " << hk.trigger_duration_jitter_ms << "\n"
+             << "trigger_interval_jitter_ms = " << hk.trigger_interval_jitter_ms << "\n"
+             << "trigger_switch_cooldown_ms = " << hk.trigger_switch_cooldown_ms << "\n"
+             << "trigger_auto_scope = "     << hk.trigger_auto_scope << "\n"
+             << "trigger_scope_delay_ms = " << hk.trigger_scope_delay_ms << "\n"
+             << "trigger_auto_stop = "      << hk.trigger_auto_stop << "\n"
+             << "trigger_stop_ms = "        << hk.trigger_stop_ms << "\n";
+
+        // ── ★★ 瞄准轨迹曲线 (2026-09-17 恢复) ────────────────────────────
+        // 后端在 mouse/aim_path.h, 接线在 runtime/aim_loop.cpp。
+        file << "aim_path_mode = "          << hk.aim_path_mode << "\n"
+             << "aim_path_influence = "     << hk.aim_path_influence << "\n"
+             << "aim_path_bezier_cx1 = "    << hk.aim_path_bezier_cx1 << "\n"
+             << "aim_path_bezier_cy1 = "    << hk.aim_path_bezier_cy1 << "\n"
+             << "aim_path_bezier_cx2 = "    << hk.aim_path_bezier_cx2 << "\n"
+             << "aim_path_bezier_cy2 = "    << hk.aim_path_bezier_cy2 << "\n"
+             << "aim_path_wind_gravity = "  << hk.aim_path_wind_gravity << "\n"
+             << "aim_path_wind_wind = "     << hk.aim_path_wind_wind << "\n"
+             << "aim_path_wind_step = "     << hk.aim_path_wind_step << "\n"
+             << "aim_path_wind_distance = " << hk.aim_path_wind_distance << "\n"
+             << "aim_path_wind_threshold = " << hk.aim_path_wind_threshold << "\n";
 
         file << "\n";
     }

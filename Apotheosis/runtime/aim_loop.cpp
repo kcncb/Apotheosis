@@ -10,6 +10,16 @@
 
 #include "control/aim_controller.h"
 
+// ★ 轨迹整形与自动扳机 (2026-09-17 恢复)。
+//   aim_path.h      —— 四种轨迹模式(直线/贝塞尔/手绘/WindMouse), 只旋转不缩放。
+//   trigger_fsm.h   —— 命中区 + 五相状态机。
+//   trigger_scope.h —— 自动开镜(点按/长按右键)。
+//   auto_stop.h     —— 开火那一拍补反方向键。
+#include "mouse/aim_path.h"
+#include "mouse/auto_stop.h"
+#include "mouse/trigger_fsm.h"
+#include "mouse/trigger_scope.h"
+
 #include "Apotheosis.h"   // 设备指针 (makcuSerial / makcuNewSerial / kmboxNetSerial)
 #include "config/config.h"
 #include "crosshair/crosshair_runtime.h"
@@ -23,6 +33,10 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+
+#ifdef _WIN32
+#  include <windows.h>   // GetAsyncKeyState —— 自动急停读物理方向键
+#endif
 
 namespace runtime::aim_loop
 {
@@ -75,6 +89,55 @@ MouseThread* ensureMouse()
 std::chrono::steady_clock::time_point g_last_tick{};
 bool g_first_tick = true;
 uint64_t g_frame_index = 0;
+
+// ── 轨迹整形 / 扳机 的状态 (2026-09-17 恢复) ─────────────────────────────
+// ★ 与 g_controller 同锁保护: 它们都在检测线程上跑。
+boss::AimPathDriver      g_path;
+boss::TriggerFsm         g_trigger;
+boss::ScopeController    g_scope;
+boss::AutoStopController g_autoStop;
+
+// 把配置翻译成 AimPathDriver::Params。
+boss::AimPathDriver::Params pathParamsFrom(const HotkeyProfile& hk)
+{
+    boss::AimPathDriver::Params p;
+    p.mode = static_cast<boss::AimPathDriver::Mode>(
+        std::clamp(hk.aim_path_mode, 0, 3));
+    // ★ 界面存 0..100, 驱动器要 0..1。
+    p.strength = std::clamp(hk.aim_path_influence, 0, 100) / 100.0;
+    p.cx1 = hk.aim_path_bezier_cx1;
+    p.cy1 = hk.aim_path_bezier_cy1;
+    p.cx2 = hk.aim_path_bezier_cx2;
+    p.cy2 = hk.aim_path_bezier_cy2;
+    p.custom_samples = hk.aim_path_custom_samples;
+    p.wind_gravity  = hk.aim_path_wind_gravity;
+    p.wind_wind     = hk.aim_path_wind_wind;
+    p.wind_step     = hk.aim_path_wind_step;
+    p.wind_distance = hk.aim_path_wind_distance;
+    p.wind_threshold_px = hk.aim_path_wind_threshold;
+    return p;
+}
+
+// 单调毫秒时钟 —— 与旧实现同源(steady_clock), 不受系统时间调整影响。
+int64_t nowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// 读取物理按下的 WASD。★ 只在真的开火那一拍调用 —— 不在每拍读,
+//   省掉每秒上百次 GetAsyncKeyState。
+boss::AutoStopController::Keys readPhysicalMoveKeys()
+{
+    boss::AutoStopController::Keys k;
+#ifdef _WIN32
+    k.forward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    k.back    = (GetAsyncKeyState('S') & 0x8000) != 0;
+    k.left    = (GetAsyncKeyState('A') & 0x8000) != 0;
+    k.right   = (GetAsyncKeyState('D') & 0x8000) != 0;
+#endif
+    return k;
+}
 
 // 取准星位置（检测图像素）。
 //
@@ -240,9 +303,136 @@ bool tick()
         out = g_controller->update(in);
     }
 
+    // ★★ 先把驱动通道取到手，再进 g_mtx —— 不要嵌套加锁。
+    //   ensureMouse() 内部要拿 g_mouse_mtx；若在持有 g_mtx 时调它，
+    //   就形成 g_mtx → g_mouse_mtx 的嵌套。reset() 也是这个顺序，今天不会
+    //   死锁，但只要将来有人写一条反序路径就会。取到裸指针后再加锁是免费的。
+    MouseThread* mouse = ensureMouse();
+
     if (!out.engaged)
+    {
+        // ★ 丢目标/滑行 ⇒ 接敌途中的复位。点按模式下【不重新武装】(旧 ③④ 条):
+        //   否则每次重新锁到目标都会再点一下右键, 在"切换开镜"的游戏里把镜来回切。
+        //   欠下的抬指照样补发, 右键不会卡住。
+        std::lock_guard<std::mutex> lk(g_mtx);
+        const auto act = g_scope.flushUp();
+        if (mouse && act.release_right)
+            mouse->releaseRightButton();
         return false;
-    if (out.counts.x == 0 && out.counts.y == 0)
+    }
+
+    // ── 4.5 轨迹整形（恢复: mouse/aim_path.h）────────────────────────────
+    //
+    // ★★ 四种模式【只旋转不缩放】控制器输出: 曲线只提供局部切线方向, 幅值
+    //    仍由 PID 决定。这是"轨迹层不把控制器拖成振荡"的前提。
+    // ★ 直线模式(mode=0)逐位透传 —— 与不开轨迹整形完全一致。
+    int move_x = out.counts.x;
+    int move_y = out.counts.y;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_path.configure(pathParamsFrom(hk));
+        // 只有非直线模式才需要跑整形(省掉每拍的开销)。
+        if (hk.aim_path_mode != 0)
+        {
+            const auto shaped = g_path.step(
+                /*aim_x*/ out.anchor.x,      /*aim_y*/ out.anchor.y,
+                /*cur_x*/ cross.x,           /*cur_y*/ cross.y,
+                /*dt*/ dtSec,
+                /*target_id*/ out.targetId,
+                /*base_dx*/ static_cast<double>(out.counts.x),
+                /*base_dy*/ static_cast<double>(out.counts.y));
+            move_x = static_cast<int>(std::lround(shaped.move_x));
+            move_y = static_cast<int>(std::lround(shaped.move_y));
+        }
+    }
+
+    // ── 4.6 自动扳机（恢复: mouse/trigger_fsm.h + trigger_scope.h + auto_stop.h）──
+    const int64_t ms = nowMs();
+    if (mouse)
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+
+        // 命中区: 以【框】为基准的区间, 与瞄点解耦（旧实现同一公式）。
+        bool inZone = false;
+        if (hk.trigger_enabled && out.hasTarget)
+        {
+            inZone = boss::TriggerFsm::inHitZone(
+                cross.x, cross.y,
+                out.targetBox.x, out.targetBox.y,
+                out.targetBox.w, out.targetBox.h,
+                hk.trigger_y_percent);
+        }
+
+        // ── 自动开镜: 必须在左键【之前】—— ready() 当闸门, 保证第一颗
+        //    子弹是开着镜打出去的（旧实现有意与 AM 不同: AM 是同一拍先左键
+        //    再右键, 那第一枪其实没开镜）。
+        // ★ 热键自己绑了右键 ⇒ 不介入, 否则会把镜切回去。
+        const bool scopeAllowed = std::none_of(
+            hk.keys.begin(), hk.keys.end(),
+            [](const std::string& k) { return k == "RightMouseButton"; });
+        const int scopeMode = std::clamp(hk.trigger_auto_scope, 0, 2);
+        const int scopeDelay = std::max(0, hk.trigger_scope_delay_ms);
+
+        // ★ 外层已经拿到 mouse 指针, 这里不再调 ensureMouse() —— 那会二次
+        //   获取 g_mouse_mtx 并与内层变量同名遮蔽。
+        {
+            const auto scopeAct = g_scope.tick(inZone, scopeAllowed, scopeMode, scopeDelay, ms);
+            // ★ 先抬后按 —— 同一拍里既有抬又有按时必须先 up 再 down,
+            //   否则会变成"按着不放"。
+            if (scopeAct.release_right) mouse->releaseRightButton();
+            if (scopeAct.press_right)   mouse->pressRightButton();
+
+            const bool scopeReady = g_scope.ready(scopeAllowed, scopeMode, scopeDelay, ms);
+
+            // 连点 vs 长按: trigger_fire_duration == 0 视为长按。
+            const bool holdMode = (hk.trigger_fire_duration <= 0);
+
+            boss::TriggerFsm::Input tin;
+            tin.in_zone  = inZone;
+            tin.track_id = out.targetId;
+            tin.now_ms   = ms;
+
+            boss::TriggerFsm::Action tAct;
+            if (hk.trigger_enabled && scopeReady)
+            {
+                tAct = g_trigger.tick(tin, holdMode,
+                    hk.trigger_fire_delay, hk.trigger_fire_duration,
+                    hk.trigger_fire_interval, hk.trigger_switch_cooldown_ms,
+                    hk.trigger_delay_jitter_ms, hk.trigger_duration_jitter_ms,
+                    hk.trigger_interval_jitter_ms);
+            }
+            else if (!hk.trigger_enabled)
+            {
+                // ★ 关掉扳机时必须把按住的左键还回去, 否则会卡在按下。
+                if (g_trigger.reset())
+                    mouse->releaseLeftButton();
+            }
+
+            if (tAct.release_left) mouse->releaseLeftButton();
+            if (tAct.press_left)   mouse->pressLeftButton();
+
+            // ── 自动急停: 开火那一拍若玩家按着 WASD, 补一个反方向键短按。
+            //    多数 FPS 里相反方向键同时存在 = 抵消 = 立刻停住, 这一枪才是
+            //    站定打的。★ 只有 MAKCUNEW/KMBOXNET 有键盘通道, 其它输入方式
+            //    整项跳过（不静默假装成功）。
+            if (tAct.fired)
+            {
+                const auto snap = runtime_config::read();
+                const bool kbCapable = snap && (snap->input_method == "MAKCUNEW" ||
+                                                snap->input_method == "KMBOXNET");
+                if (hk.trigger_auto_stop > 0 && kbCapable)
+                {
+                    const int stopMs = std::clamp(hk.trigger_stop_ms, 20, 300);
+                    const auto keys = readPhysicalMoveKeys();
+                    const auto stopAct = g_autoStop.tick(true, keys, true, stopMs, ms);
+                    if (stopAct.tap)
+                        mouse->tapKey(stopAct.hid_key, stopMs);
+                }
+            }
+        }
+    }
+
+    if (move_x == 0 && move_y == 0)
         return false;
 
     // ── 5. 下发 ───────────────────────────────────────────────────────
@@ -252,7 +442,7 @@ bool tick()
     // ★ 走 sendRawMove（与旧控制链同一条驱动通道）: 它内部有下标队列
     //   (LatestMoveSlot)，慢驱动不会把这个线程拖住。
     if (MouseThread* mouse = ensureMouse())
-        mouse->sendRawMove(out.counts.x, out.counts.y);
+        mouse->sendRawMove(move_x, move_y);
     return true;
 }
 
@@ -262,6 +452,12 @@ void reset()
         std::lock_guard<std::mutex> lk(g_mtx);
         if (g_controller)
             g_controller->reset();
+        // ★ 轨迹整形/扳机/开镜/急停的状态也要清 —— 会话停止后重新开始
+        //   必须是一段全新的接敌, 不能带着上一次的相位和路径进度。
+        g_path.reset();
+        g_trigger.reset();
+        g_scope.forceRelease();
+        g_autoStop.reset();
         g_first_tick = true;
         g_frame_index = 0;
         g_last_tick = std::chrono::steady_clock::time_point{};
@@ -272,6 +468,9 @@ void reset()
     std::lock_guard<std::mutex> lk(g_mouse_mtx);
     if (g_mouse)
     {
+        // ★ 退出前把可能按着的左右键还回去 —— 否则键盘/鼠标会卡在按下。
+        g_mouse->releaseLeftButton();
+        g_mouse->releaseRightButton();
         g_mouse->clearQueuedMoves();
         g_mouse.reset();
     }

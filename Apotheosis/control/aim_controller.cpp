@@ -117,6 +117,17 @@ ControlOutput AimController::update(const ControlInput& in)
     // ★ 用【滤波后的中心点】+【稳定器的框尺寸】—— 滤波只有中心点被平滑。
     out.anchor = computeAnchor(filteredCenter, stab.box, cfg_.aimPoint, in.frameIndex);
 
+    // ── ④b 目标框与身份（供自动扳机算命中区 / 判转火）──────────────────
+    // ★ 用【稳定后的框】而不是原始 sel.box —— 命中区应当跟着控制实际用的
+    //   那个框走, 否则误检的漂移会让扳机跟着抽。
+    out.targetBox = stab.box;
+    out.hasTarget = true;
+    // 身份: 稳定器每帧要么延续同一个目标(Common), 要么判为换目标(Snap/NoHistory)。
+    // ★ 只有"换目标"才推进编号 —— 扳机的转火冷却就挂在这个变化上。
+    if (stab.verdict == StabilizerVerdict::Snap || stab.verdict == StabilizerVerdict::NoHistory)
+        ++targetIdCounter_;
+    out.targetId = targetIdCounter_;
+
     // ── ⑤⑥ PID + 量化 ────────────────────────────────────────────────
     out.error = out.anchor - out.cross;
     out.counts = pid_.update(out.anchor, out.cross, in.dtSec);

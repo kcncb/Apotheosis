@@ -192,6 +192,66 @@ struct HotkeyProfile
     // ★ 非 0 时每局随机, 让 y 偏移的抖动不可预测。
     int ctl_random_seed = 0;
 
+    // ─────────────────────────────────────────────────────────────────────
+    // ★★ 自动扳机 (2026-09-17 恢复)
+    //
+    // 这一组在 2026-09-17 那轮"只留采集+推理"里随 mouse_thread_loop.cpp 一起
+    // 被删除(连同触发它的 FSM)。现按用户要求重建 —— 后端在
+    // `mouse/trigger_fsm.h`, 接线在 `runtime/aim_loop.cpp`。
+    //
+    // ★ 语义与旧版一致(见 docs/ 里旧文档): 命中区 = 准星落在检测框水平中心
+    //   附近、且纵向位于框的 trigger_y_percent 高度处。准星进区就开火。
+    // ─────────────────────────────────────────────────────────────────────
+    bool trigger_enabled = false;
+    // 进入命中区后延迟 N ms 才按下(0=立即)。想"停稳再开枪"就调大它。
+    int  trigger_fire_delay = 0;
+    // 单次按住时长上限(ms)。0 = 用连点模式的 hold 常数。
+    int  trigger_fire_duration = 0;
+    // 连点模式的冷却间隔 / 长按模式离开命中区后的再触发间隔(ms)。
+    int  trigger_fire_interval = 200;
+    // 命中区占 bbox 的百分比(纵向): 100=整框, >100=框上方也预开火。
+    int  trigger_y_percent = 100;
+    // 三个延迟各自的随机 ±N ms 抖动(破除机械感)。
+    int  trigger_delay_jitter_ms    = 0;
+    int  trigger_duration_jitter_ms = 0;
+    int  trigger_interval_jitter_ms = 0;
+    // 目标身份变化时的转火冷却(ms)。
+    int  trigger_switch_cooldown_ms = 0;
+    // 自动开镜: 0 关 / 1 点按右键一下(不收镜) / 2 长按右键。
+    int  trigger_auto_scope = 0;
+    // 开镜后等多久才允许开火(ms) —— 保证第一颗子弹是开着镜打出去的。
+    int  trigger_scope_delay_ms = 0;
+    // 自动急停: 开火那一拍若玩家按着 WASD, 就补一个反方向键的短按。
+    // ★ 只有 MAKCUNEW 有键盘通道; 其它输入方式整项跳过。
+    int  trigger_auto_stop = 0;    // 0 = 关, 1 = 开
+    int  trigger_stop_ms   = 60;   // 反方向键的短按时长(ms), 20~300
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ★★ 瞄准轨迹曲线 (2026-09-17 恢复)
+    //
+    // 同一轮里被删(mouse/aim_path.h)。现恢复为 `mouse/aim_path.h`, 接线在
+    // `runtime/aim_loop.cpp`。★ 四种模式【只旋转不缩放】控制器原始输出 ——
+    // 曲线只提供局部切线方向, 幅值仍由 PID 决定。
+    // ─────────────────────────────────────────────────────────────────────
+    // 0 直线 / 1 贝塞尔 / 2 自定义手绘 / 3 WindMouse(风力曲线)
+    int   aim_path_mode = 0;
+    // 曲线对 PIDF 主方向的影响量。0=完全透传, 1=完整曲线切线。
+    int   aim_path_influence = 25;   // 0..100
+    float aim_path_bezier_cx1 = 0.30f;
+    float aim_path_bezier_cy1 = 0.00f;
+    float aim_path_bezier_cx2 = 0.70f;
+    float aim_path_bezier_cy2 = 0.00f;
+    // ── WindMouse 曲线 (aim_path_mode = 3) ─────────────────────────────────
+    // 单位都是像素, 与 AimMagic 的 wind_mouse_G0/W0/M0/D0 同名同量纲。
+    float aim_path_wind_gravity   = 5.0f;   // 重力: 越大越坚决, 路径越直
+    float aim_path_wind_wind      = 2.0f;   // 风力: 越大越飘
+    float aim_path_wind_step      = 10.0f;  // 单步最大长度: 越小路径越碎
+    float aim_path_wind_distance  = 8.0f;   // 风力衰减距离: 越近风越小
+    // 门控(px): 两轴误差都不超过它时整段曲线旁路(AM 的 curve_threshold)。
+    int   aim_path_wind_threshold = 10;
+    // 自定义手绘曲线采样点(由 UI 画, 运行时只读)。空 = 用直线。
+    std::shared_ptr<const std::vector<float>> aim_path_custom_samples;
+
 };
 
 // One entry in the shared crosshair color palette. Red needs two entries

@@ -169,6 +169,70 @@ Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chin
 `AimSettingsPage` 是 `config.hotkeys[]` 的**唯一界面写入者**；
 `TargetPage` 管**全局** `class_filters`；两者的关系是"全局打底、逐热键提升"。
 
+## ★★ 2026-09-17 (第四轮): 自动扳机 + 风力曲线已【重建】并接进主程序
+
+用户要求"把自动扳机和风力曲线加回来"。**注意用词: 这是重建, 不是恢复** ——
+上一轮删掉的那些文件**没有回来**, 新件是照旧语义在新位置重写的:
+
+| 新件 | 职责 | 与旧实现的关系 |
+|---|---|---|
+| `mouse/trigger_fsm.h` | 命中区几何 + 五相状态机 (Idle/Delay/Pressed/Cooldown/SwitchCooldown) | 语义逐条对齐旧 `mouse_thread_loop.cpp` 289-370 / 1222-1446 行 |
+| `mouse/trigger_scope.h` | 自动开镜 (点按/长按右键) | 逐字搬回 (本来就零依赖) |
+| `mouse/auto_stop.h` | 开火那一拍补反方向键 | 逐字搬回 |
+| `mouse/aim_path.h` | 四种轨迹 (直线/贝塞尔/手绘/WindMouse) | 逐字搬回 (`boss::AimPathDriver`, 零依赖) |
+
+★★ **为什么把它们拆成独立头文件**: 旧的扳机 FSM 住在 1536 行的
+`runtime/mouse_thread_loop.cpp` 里, 那个文件要 include OpenCV/Windows ⇒
+**本机编不了 ⇒ 零覆盖**。拆出来之后它们是零依赖的, 任何平台都能编、能单测 ——
+这正是 `trigger_path_test` 能存在的前提。
+
+★ **配置面**: `trigger_*` (13 个) 与 `aim_path_*` (11 个) **重新变成活键**,
+load/clamp/save 三处都对齐了。`config_migration_test` 里原来那两条
+"已删除的键不再写出: trigger_enabled / aim_path_mode" **已按事实改写** ——
+它们现在断言的是"这些键**重新**写出且值真的往返"。
+**仍然删除、不恢复**的是 `aim_path_custom_samples` / `aim_path_custom_file` /
+`aim_path_neural_*` (手绘编辑器与神经权重都没重建), 它们继续被安全忽略。
+
+★ **接线点** `runtime/aim_loop.cpp`: 控制器算完之后
+① `g_path.step()` 整形 (只旋转不缩放) → ② `g_scope` 自动开镜 →
+③ `g_trigger.tick()` 出 press/release → ④ `g_autoStop` 补键 → ⑤ `sendRawMove`。
+★★ **顺序是契约**: 开镜必须在左键**之前** (`ready()` 当闸门, 保证第一颗子弹
+是开着镜打出去的), `release_left` 必须先于 `press_left`。
+
+### ★★ 这批断言的覆盖是【验过】的, 而且验的过程抓出了真问题
+
+`trigger_path_test` 现在让 `ctest` 从 10 个变成 **11 个**。
+★★ **它的价值来自"15 处反向变异, 13 处变红"** —— 不来自"全绿"。
+逐条改坏被测行为确认真的失败, 过程中抓到 4 个假覆盖并修掉:
+
+| 假覆盖 | 为什么原来抓不住 | 修法 |
+|---|---|---|
+| 门控测试 | "误差 <1px 早退"和"progress=0 时 entry_fade=0"**两条别的旁路**把输出也变成透传 ⇒ 把 gate 改成 -1.0(永不旁路)照样绿 | 先把驱动器"跑热", 再收误差进门控带 |
+| target_id 测试 | 只写 `sample(42) != sample(43)`。progress_ 的累积会让**很靠后的拍**出现极小浮点差异 ⇒ `!=` 成立。抹掉 target_id 后照样绿 | 改成**定量**断言: 前 10 拍的横向分量差异必须 > 0.1 |
+| 幅值不缩放 | 上界写成"不超过 3 倍"。实现里有显式的 `restore = base_mag/mixed_mag` ⇒ 真实比值恒为 1.000, 3 倍的上界抓不住去掉 restore 的变异 | 改成**逐位精确相等** |
+| Delay 相位 | 原来的序列是在 **Idle** 相位离开命中区的 ⇒ Delay 分支的清理代码**根本没执行** | 补一段"在 Delay 相位中途离开"的序列 |
+
+★ 剩下 2 处未捕获的变异已确认为**无效变异**(语义中性的代码), 不是覆盖缺口:
+`if (target_delay <= 0) → if (false)` (`now-now>=0` 同拍仍成立) 与
+`reset()` 里的 `progress_ = 0.0` (紧接的 `engaged_=false` 分支会再置一次)。
+两条都写进了测试注释, 免得后人重走。
+
+★★ **另有一条实测结论, 值得记住**: `AimPathDriver::reset()` 目前
+**等价于"换一个 target_id"** —— 把 reset 整个改成 no-op, 输出逐位不变。
+原因: `step()` 的 `id_changed` 路径本来就做完了 reset 做的全部事情,
+而 `rng_` 两者都不回拨(有意: 否则每次会话第一枪都抖成同一条死曲线)。
+★ 它仍被 `aim_loop.cpp` 在会话结束时调用, 保留是有意的(语义上表达
+"这段接敌结束了"), 只是当前没有额外的可观察效果。**测试不假装它有效果**。
+
+★★ **验证边界(诚实)**: 本轮**真的启动了 `Apotheosis.exe`** 并做了实测 ——
+往 `config.ini` 写非默认值 (`trigger_enabled=true` / `trigger_fire_delay=45` /
+`trigger_stop_ms=77` / `aim_path_mode=3` / `aim_path_wind_gravity=7.5`),
+启动应用、正常退出, 再读回: **5 个值逐条保留**。这证明 schema→load→clamp→save
+整条链在**真实二进制**里成立 —— 不只是单测里成立。
+★ 但**没有验证**的是: 扳机真的点到了游戏、曲线真的让鼠标走成曲线、以及
+新加的两张卡在界面上的**外观**(截图工具在本模型下看不了图)。
+这两件事仍然必须在真机上由用户确认。
+
 ## Current build
 
 - Windows x64 C++20 / CUDA C++17 application with a Qt6 Widgets UI.
@@ -225,7 +289,7 @@ Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chin
 
 ## Validation
 
-★ **2026-09-17 (第三轮) 之后的实情**: 本机能跑的只有 `APOTHEOSIS_LOGIC_TESTS_ONLY=ON`, 现在 **8 个**测试:
+★ **2026-09-17 (第四轮) 之后的实情**: 本机能跑的只有 `APOTHEOSIS_LOGIC_TESTS_ONLY=ON`, 现在 **11 个**测试:
 
 ```
 cmake -S . -B build/logic-tests -DAPOTHEOSIS_LOGIC_TESTS_ONLY=ON
@@ -235,7 +299,8 @@ ctest --test-dir build/logic-tests --output-on-failure
 
 它们是 `latency_probe_test` / `capture_card_caps_test` / `device_frame_age_test` /
 `interruptible_slot_test` / `gpu_ready_event_test` / `raw_frame_layout_test` /
-**`control_wiring_test`** / **`control_layer_test`**
+**`control_wiring_test`** / **`control_layer_test`** / **`trigger_path_test`** /
+`config_migration_test` / `mouse_driver_test`
 
 前 6 个是**采集与推理数据面**的回归(逐帧时序、被覆盖的输入计数、设备时间戳有效性/新鲜度、
 可取消的采样等待、GPU 事件所有权)。

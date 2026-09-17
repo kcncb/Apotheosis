@@ -76,6 +76,23 @@ add_logic_test(control_layer_test "${CMAKE_CURRENT_LIST_DIR}/control_layer_test.
     "${APP_SOURCE_ROOT}/control/pid_controller.cpp"
     "${APP_SOURCE_ROOT}/control/aim_controller.cpp")
 
+# ── ★★ 自动扳机 + 轨迹曲线回归 (2026-09-17 恢复) ─────────────────────────────
+#
+# ★ 这两个后端是【从已删除状态重建】的: 原来的扳机 FSM 住在 1536 行的
+#   runtime/mouse_thread_loop.cpp 里, 轨迹整形住在 mouse/aim_path.h —— 两者
+#   都在"只留采集+推理"那轮被删。现在按用户要求加回来。
+#
+# ★★ 它们【零依赖】(不引 OpenCV / Windows / Qt), 所以任何平台都能编 ——
+#    这正是把它们从那个巨文件里拆成独立头文件的理由之一。
+#    留在巨文件里就是零覆盖: "编过"都不算, 更别说"跑对"。
+#
+# ★ 钉的核心不变量:
+#   触发侧 —— 零延迟直通、延迟计时中途离开要重来、连点/长按的相位区别、
+#             转火冷却只在"换目标且不在命中区"时生效、reset 必须归还左键。
+#   轨迹侧 —— 直线模式逐位透传、【四种模式只旋转不缩放】、WindMouse 门控旁路、
+#             同一 target_id 轨迹可复现、reset 后等价于全新驱动器。
+add_logic_test(trigger_path_test "${CMAKE_CURRENT_LIST_DIR}/trigger_path_test.cpp")
+
 # ── 配置解析 (2026-09-14) ─────────────────────────────────────────────────────
 # 需要 config.cpp (解析/夹取) 与 SimpleIni。
 # ★ NOMINMAX 是必须的: config.cpp 与 SimpleIni.h 都会用到 std::min/max, 而
