@@ -865,35 +865,25 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.pid_y = pid_params(*profile_ptr, false);
 
         // ─ PID-EventSync: 跟踪器 + 每轨预测状态机 (移植 AimMagic 1.0.30 全链路) ─
-        // ★ 提前量参数不使用"X 轴/Y 轴分别一套": AM 的预测系数虽然是 factor_x/factor_y
-        //   两个, 但尺寸区间与阻尼是【全 AimKey 共用】的 (QML 里 scope=2), 原样照搬。
+        // ★ 键名与 AM 一一对应(2026-09-16 重建): 跟踪器四个 + 预测四个。
+        //   此前那一堆(关联半径 / 换算窗 / k̂ / 在途 beta / 自运动增益)在 AM 里
+        //   **没有对应键**, 已整条删除 —— 见 docs/aimmagic-ground-truth.md §2.5。
         {
             boss::AimTrackerParams tp;
+            tp.enable_tracking = true;   // 本档即跟踪器链路, 没有单独的开关
             tp.min_hits = profile_ptr->esync_min_hits;
             tp.max_age = profile_ptr->esync_max_age;
-            tp.assoc_radius_px = static_cast<double>(profile_ptr->esync_assoc_radius_px);
             tp.assoc_iou = static_cast<double>(profile_ptr->esync_assoc_iou);
-            tp.vel_window_s = static_cast<double>(profile_ptr->esync_vel_window_ms) / 1000.0;
-            // ★ 预测系数/尺寸区间/硬上限/噪声门与现役档【共用同一组槽位】
-            //   (pidf_predict_*): 换档不该让用户把提前量重填一遍, 而且这样两个档的
-            //   预测强度可以直接对照 —— 差别只剩下"状态住在哪"(每轨 vs 全局)。
-            tp.pred_factor_x = static_cast<double>(profile_ptr->pidf_predict_x);
-            tp.pred_factor_y = static_cast<double>(profile_ptr->pidf_predict_y);
-            tp.pred_min_w = static_cast<double>(profile_ptr->pidf_predict_min_w);
-            tp.pred_max_w = static_cast<double>(profile_ptr->pidf_predict_max_w);
+            tp.vel_sample_ms = static_cast<double>(profile_ptr->esync_vel_sample_ms);
+            // 预测补偿 (AM 的 AimKey 作用域)。
+            tp.pred_factor_x = static_cast<double>(profile_ptr->esync_pred_factor_x);
+            tp.pred_factor_y = static_cast<double>(profile_ptr->esync_pred_factor_y);
+            tp.pred_min_w = static_cast<double>(profile_ptr->esync_pred_min_w);
+            tp.pred_max_w = static_cast<double>(profile_ptr->esync_pred_max_w);
+            // ★ 本项目自加的两道安全阀: 0 = 关闭 = 与 AM 逐位一致。
+            //   沿用 pidf_predict_* 那组槽位(它们在 config.h 里仍存在)。
             tp.pred_max_lead_px = static_cast<double>(profile_ptr->pidf_predict_max_px);
             tp.pred_vel_floor = static_cast<double>(profile_ptr->pidf_predict_vel_floor);
-            // ── ⑤ k̂ / 在途换算链 (AM: kalman_counts_per_pixel + mouse_effect_delay) ──
-            // ★ k̂ 默认 1.0 = 不做换算; 窗口默认 0 = 整条链关闭(在途量恒 0)。
-            //   两者都要用户明确设置才生效 —— 见 config.h 里那一段历史。
-            tp.counts_per_pixel_x = static_cast<double>(profile_ptr->esync_counts_per_pixel_x);
-            tp.counts_per_pixel_y = static_cast<double>(profile_ptr->esync_counts_per_pixel_y);
-            tp.inflight_window_s =
-                static_cast<double>(profile_ptr->esync_inflight_window_ms) / 1000.0;
-            tp.inflight_beta = static_cast<double>(profile_ptr->esync_inflight_beta);
-            // ── ⑥ 自运动补偿 (AM: 提前量与自身瞄准速度成正比) ──────────────────
-            // ★ 默认 0 = 关闭。本项目删过一次的那类项, 必须由用户明确开启。
-            tp.self_motion_gain = static_cast<double>(profile_ptr->esync_self_motion_gain);
             in.esync = tp;
         }
 
@@ -971,6 +961,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
         in.fov_radius_x = fov_rx;
         in.fov_radius_y = fov_ry;
         in.image_size   = static_cast<double>(config_resolution);
+        // 跟踪器的速度采样窗要一个【单调时钟】: AM 的 tracking_velocity_sample_ms
+        // 是"两次观测的真实间隔超过 20ms 就重算", 用"拍数×dt"累加也能近似, 但窗的
+        // 边界会随 dt 抖动。steady_clock 与 dt 同源(下面 dt 就是它算的), 所以一致。
+        in.now_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
 
         // dt = 两次 tick 之间的墙钟间隔(秒)。首个 tick 用 1/120 兜底。
         //
@@ -1069,12 +1064,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
             const int send_dy = static_cast<int>(std::lround(drive_dy));
             mouseThread.sendRawMove(send_dx, send_dy, send_capture_ns, aim_consume_ns);
 
-            // ★ ⑤ 把这一拍【实际发出去】的计数登进在途账本(AM 的发送环)。
-            //   下一拍的误差合成会把它们按 k̂ 换成像素扣掉。
-            //   ★ 登的是 lround 之后的【整数计数】—— 与真正发给盒子的值一致;
-            //     用 drive_dx 的 double 会登进"还没被取整消化掉的零头", 那部分
-            //     其实没发出去(零头由 PID 的 carry 攒到下一拍)。
-            engine.noteAimSend(send_dx, send_dy);
+            // ── 【2026-09-16 删除】noteAimSend(send_dx, send_dy) ────────────────
+            // 它是 AM 发送环的登记入口(供像素域在途补偿 ÷ k̂ 用)。整条像素域在途
+            // 补偿已随 k̂ 一起删除 —— AM 里那条链由 FrameSync/EventSync 档消费, 而
+            // k̂ 在双机架构下无法测量。在途补偿现在只有计数域一种落点
+            // (AimPidParams::inflight_beta, 生产 1.6)。见 ground-truth §6/§8。
 
             // 全链路日志: 本帧的完整现场(检测/找色枢轴/锚点/误差/控制器输出/整形/
             // 位移/队列/扳机相位/延迟探针)。字段含义见 runtime/chain_log.h。

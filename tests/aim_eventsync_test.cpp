@@ -153,37 +153,34 @@ RunResult run_eventsync(const Plant& pl, boss::AimPidParams pid_params,
 
             if (use_tracker)
             {
-                tr.beginFrame(pl.dt);
+                // ★ 2026-09-16 重写: 跟踪器 API 已按 AM 逐字移植。
+                //   · beginFrame 现在要【单调时钟秒】, 不只是 dt(速度采样窗按真实
+                //     时间判"过了多久", AM 用的是 ns 计数)。
+                //   · 自身速度进 setPlatformVelocity(AM 读 runtime+0xC04/+C08)。
+                tr.beginFrame(pl.dt, static_cast<double>(i) * pl.dt + 10.0);
                 boss::TrackBox b;
                 b.x = static_cast<float>(fed - pl.box_w * 0.5);
                 b.y = static_cast<float>(-pl.box_h * 0.5);
                 b.w = static_cast<float>(pl.box_w);
                 b.h = static_cast<float>(pl.box_h);
-                tr.offer(b, fed, 0.0);
+                tr.offer(b, 0);
                 tr.endFrame();
-                // ★ ⑥ 自身瞄准速度必须每拍喂 —— AM 的系数涨落有【第二个条件】:
+                // ★ ⑥ 自身速度必须每拍喂 —— AM 的系数涨落有【第二个条件】:
                 //   自己没在动时系数只落不涨(FUN_14006e470 行 135)。不喂它 = 自己
-                //   永远算"没在动" = 预测永远不启动。这里用"镜头移动速度"当自身速度
-                //   (引擎里就是从锚点差分估出来的那个量)。
-                tr.setAimVelocity(aim_vx, aim_vy);
+                //   永远算"没在动" = 预测永远不启动。
+                tr.setPlatformVelocity(aim_vx, aim_vy);
                 double ly = 0.0;
                 tr.predictionLead(lead_x, ly);
                 r.max_lead = std::max(r.max_lead, std::abs(lead_x));
             }
 
-            // ★ ⑤ AM 的误差合成(FUN_140067000 行 1208-1209):
-            //     误差 = 目标位置 + 提前量 − 在途自身位移(像素)
-            //   ★ 顺序很重要: 先取【上一拍为止】的在途量(本拍还没发出去),
-            //     算完误差、【发完之后】才把本拍登进账本。
-            double if_x = 0.0, if_y = 0.0;
-            if (use_tracker)
-                tr.inflightPixels(if_x, if_y);
-            const double err = fed + lead_x - if_x;
+            // ★ 误差合成: 误差 = 目标位置 + 提前量。
+            // ★★ 2026-09-16: AM 的"像素域在途链"已整条删除(见 docs/aimmagic-
+            //    ground-truth.md §6)。在途补偿现在**只有计数域**那一条
+            //    (AimPidParams::inflight_beta, 生产值 1.6), 它由 pid.step() 内部
+            //    处理, 这里不再额外扣像素。
+            const double err = fed + lead_x;
             const int counts = pid.step(err, pl.dt);
-
-            // 本拍发出去的计数登账(引擎里这一步紧跟 sendRawMove)。
-            if (use_tracker)
-                tr.noteSend(counts, 0);
 
             act_line.push_back(static_cast<double>(counts) * pl.k);
             camera += act_line.front();
@@ -244,42 +241,41 @@ boss::AimPidParams productionPid()
 boss::AimTrackerParams trackerParams(double factor_x, double factor_y)
 {
     boss::AimTrackerParams p;
+    // ★ 2026-09-16 重写: 全部与 AM 1.0.30 的 Group 作用域默认值对齐
+    //   (docs/aimmagic-ground-truth.md §2)。
     p.min_hits = 3;
     p.max_age = 5;
-    p.assoc_radius_px = 80.0;
-    p.assoc_iou = 0.20;
-    p.vel_window_s = 0.10;
+    p.assoc_iou = 0.30;         // AM tracking_iou_threshold
+    p.vel_sample_ms = 20.0;     // AM tracking_velocity_sample_ms
     p.pred_factor_x = factor_x;
     p.pred_factor_y = factor_y;
-    p.pred_min_w = 20.0;
-    p.pred_max_w = 80.0;
+    p.pred_min_w = 20.0;        // AM prediction_min_width
+    p.pred_max_w = 80.0;        // AM prediction_max_width
+    // ★ 本项目自加的两道阀 —— 默认关闭(与 AM 逐位一致)。本测试【故意】留着它们
+    //   开着的版本, 因为 §4.2 要求提前量必须有界, 而 AM 原文没有硬上限。
+    //   上面 [2] 那一节测的就是"阀开着时有界"。
     p.pred_max_lead_px = 12.0;
     p.pred_vel_floor = 60.0;
     return p;
 }
 
-// ── [1] 三样新件全关时: EventSync 链路必须与"不用跟踪器"的链路逐位一致 ───────
+// ── [1] 预测关掉时: EventSync 链路必须与"不用跟踪器"的链路逐位一致 ───────────
 //
-// 这条最重要 —— 它是"换档不改变行为"的硬证据。跟踪器在三样新件都关掉时唯一的
-// 作用是身份, 而身份不参与控制, 所以两条链路的每拍误差必须完全相同。
+// 这条最重要 —— 它是"跟踪器只提供身份, 不参与控制"的硬证据。
 //
-// ★ 2026-09-15 更新: 之前这一节的标题是"关预测时逐位一致", 那时 EventSync 链路
-//   只有"预测"一件新东西。现在它有三件(⑤在途换算链 / ⑥自运动项 / 预测), 所以
-//   逐位一致的前提是【三件全关】:
-//     · pred_factor_x/y = 0      → 目标速度那一项不参与
-//     · self_motion_gain = 0     → 自运动项不参与
-//     · inflight_window_s = 0    → 在途换算链不参与(窗口 0 拍 ⇒ 在途量恒 0)
-//   只要有一件开着, 链路就【应该】与现役档不同 —— 那是设计意图, 不是 bug。
+// ★★ 2026-09-16 重写: 原来这一节的前提是"三件全关"(在途换算链 / 自运动项 /
+//    预测)。逐字移植之后, **在途换算链和自运动项都已整条删除** —— 它们在 AM
+//    里的消费者是 FrameSync/EventSync 的像素域链, 而那条链我们没移植
+//    (k̂ 在双机架构下测不出来, 见 CLAUDE.md)。所以现在只剩【一件】可关: 预测。
+//    ⇒ 逐位一致的前提简化为 pred_factor_x/y = 0, 且此时提前量必须恒为 0。
 void test_prediction_off_identity()
 {
-    std::printf("[1] 三件新件全关时与现役链路逐位一致\n");
+    std::printf("[1] 关预测时: 与不用跟踪器的链路逐位一致\n");
     Plant pl;
     const auto pid = productionPid();
 
-    // "全关"的参数: 三件新件全部失效。
+    // "全关": 预测系数 0 ⇒ 提前量恒 0 ⇒ 跟踪器只剩身份作用。
     auto off = trackerParams(0.0, 0.0);
-    off.self_motion_gain = 0.0;
-    off.inflight_window_s = 0.0;
 
     const auto plain = run_eventsync(pl, pid, off, false,
                                      motion_linear, 2.0, 1.0);
@@ -291,38 +287,9 @@ void test_prediction_off_identity()
     for (std::size_t i = 0; identical && i < plain.errors.size(); ++i)
         if (plain.errors[i] != tracked.errors[i]) identical = false;
     check(identical,
-          "三件新件全关时, EventSync 链路必须与现役链路【逐位一致】");
+          "关预测时, EventSync 链路必须与不用跟踪器的链路【逐位一致】");
     check(tracked.max_lead == 0.0, "关预测时提前量必须恒为 0");
     check(plain.finite && tracked.finite, "两条链路都必须有限(无 NaN/Inf)");
-
-    // ── 反向验证(这条不能省) ─────────────────────────────────────────────
-    // 如果"逐位一致"是因为那条比较根本没接上, 上面那条断言就是空转。所以再跑一次
-    // 【开预测】的链路: 它必须与被比较的两条不同。不同 => 比较确实有分辨力。
-    //
-    // ★ 但"开预测"要真的产生提前量, 必须同时满足 AM 的两个条件(目标在动 且 自己
-    //   也在动, 见 aim_tracker.h 的说明)。这个闭环里"自己"就是镜头, 它整段只动
-    //   几个像素 ⇒ 自身速度远达不到 3.5px/帧 的门 ⇒ 系数只落不涨 ⇒ 提前量恒 0。
-    //   所以反向验证改用【自运动项】来制造差异 —— 它不依赖自身速度门(它吃的就是
-    //   自身速度本身), 只要 gain 非零、自身速度非零就一定有输出。
-    auto sm_on = off;
-    sm_on.self_motion_gain = 0.5;
-    const auto with_sm = run_eventsync(pl, pid, sm_on, true,
-                                       motion_linear, 2.0, 1.0);
-    bool differs = false;
-    for (std::size_t i = 0; i < plain.errors.size() && i < with_sm.errors.size(); ++i)
-        if (plain.errors[i] != with_sm.errors[i]) { differs = true; break; }
-    check(differs, "开自运动项后链路必须与关掉时不同(否则上一条断言是空转)");
-    check(with_sm.max_lead > 0.0, "开自运动项后提前量必须真的非零");
-
-    // ④ 在途换算链: 打开窗口(k̂=1)后, 链路也必须与"全关"不同 —— 证明 ⑤ 真的接上了。
-    auto if_on = off;
-    if_on.inflight_window_s = boss::kAimDeadTimeS;
-    const auto with_if = run_eventsync(pl, pid, if_on, true,
-                                       motion_linear, 2.0, 1.0);
-    bool if_differs = false;
-    for (std::size_t i = 0; i < plain.errors.size() && i < with_if.errors.size(); ++i)
-        if (plain.errors[i] != with_if.errors[i]) { if_differs = true; break; }
-    check(if_differs, "★ 开在途换算链后链路必须不同(证明 ⑤ 真的参与了误差合成)");
 }
 
 // ── [2] 开预测: 提前量有界 + 闭环不发散 ──────────────────────────────────────
@@ -400,7 +367,7 @@ void test_identity_stability()
     for (int i = 0; i < 600; ++i)   // 5 秒
     {
         x += 2.5;                    // 300px/s
-        tr.beginFrame(dt);
+        tr.beginFrame(dt, 10.0 + static_cast<double>(i) * dt);
         if (i % 10 != 0)             // 每 10 帧漏一帧
         {
             ++observed_frames;
@@ -410,7 +377,7 @@ void test_identity_stability()
             b.y = 240.0f;
             b.w = 60.0f;
             b.h = 120.0f;
-            tr.offer(b, x + jitter, 300.0);
+            tr.offer(b, 0);          // 类别固定; 身份靠 IoU 粘滞, 与类别无关
         }
         tr.endFrame();
         double lx = 0.0, ly = 0.0;

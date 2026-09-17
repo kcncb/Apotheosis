@@ -1,57 +1,73 @@
-// mouse/aim_tracker.h 的回归 —— PID-EventSync 档的目标跟踪器
-// (移植 AimMagic 1.0.30 的 FUN_140089ac0 / FUN_14006e470 语义)。
+// ── 跟踪器 + 预测状态机回归 (tests/aim_tracker_test.cpp) ─────────────────────
 //
-// ── 这个测试回答的问题 ───────────────────────────────────────────────────────
-// 跟踪器在 EventSync 档里承担三件事, 每一件都必须【可判定】:
-//   ① 身份: 同一目标跨帧必须拿同一个 id(即使框在抖、即使漏一两帧);
-//      真的换了目标必须换 id。这是"积分不再被每秒清 8 次"的全部依据。
-//   ② 速度: 采样窗给出的速度必须收敛到真实速度, 而且窗排空前【保持上一次】
-//      的值(跨帧持有)—— 不是每帧从相邻两框心重建(那在 8.3ms 下是几百 px/s 噪声)。
-//   ③ 预测: 系数按 0.1/帧 爬、-0.2/帧 落; 提前量有【硬上限】与【噪声门】,
-//      关预测(系数 0)时是彻底恒等变换。
+// 对象: mouse/aim_tracker.h —— AimMagic 1.0.30 的逐字移植 (2026-09-16 重写)。
+// 全部判据的行号/常量来自 docs/aimmagic-ground-truth.md, 语料在
+//   C:\Users\Administrator\Downloads\AimMagic_RE_extracted\AimMagic_RE\v1030\
 //
-// ── 判定哲学 ─────────────────────────────────────────────────────────────────
-// 只断言可判定的性质: 同一个 id、单调爬升、有界、恒等、确定。不断言精确浮点值。
+// ★★ 这一版测试的写法与前一代【不同】: 前一代测的是"我们自己的设计意图"
+//    (关联半径 / 累加窗速度 / 自运动增益 …), 而重写后这些都【不存在】了 ——
+//    它们在 AM 里没有对应, 已整条删除。所以现在的断言直接写 AM 的行为:
+//    常量真值、严格不等号、<= 与 < 的差别、两轴衰减不对称、落点就地改写。
+//
+// 覆盖:
+//   [1]  关联: 类别必须相等 + IoU 严格大于门限(等于不算)
+//   [2]  生命周期: min_hits/max_age 的 <= 语义与"漏 max_age 帧仍存活"
+//   [3]  速度: 窗内沿用旧值(且不刷新时间戳) / 窗外 0.25/0.75 混合
+//   [4]  滑行外推: 位置按 v*clamp(dt) 外推 + X*0.95 / Y*0.8 衰减
+//   [5]  尺寸权重: 吃【框高】; h<=min 时权重保持 1.0, h>=max 时才是 0
+//   [6]  系数 FSM: 涨 0.1 / 落 0.2 / 夹 [0,1]; "目标够快 且 自己在动"才涨
+//   [7]  提前量: 用【平台位移】而不是目标速度(语义正确性的核心断言)
+//   [8]  落点: 就地改写框心(out_cx/out_cy)
+//   [9]  本项目自加的两道阀默认关闭 —— 默认行为必须与 AM 逐位一致
+//  [10]  常量真值表(防止再次把 0.8 写成 0.75 / 把 10.0 写成 3.5057)
 
-#include "mouse/aim_pid.h"       // 只用它的 kAimDeadTimeS(一致性断言)
 #include "mouse/aim_tracker.h"
 
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <string>
 #include <vector>
 
 namespace
 {
 
-int g_failures = 0;
-int g_checks = 0;
+int g_pass = 0;
+int g_fail = 0;
+std::string g_section;
+
+void section(const char* name)
+{
+    g_section = name;
+    std::printf("\n== %s ==\n", name);
+}
 
 void check(bool ok, const std::string& what)
 {
-    ++g_checks;
-    if (!ok)
+    if (ok)
     {
-        std::printf("  [FAIL] %s\n", what.c_str());
-        ++g_failures;
+        ++g_pass;
+    }
+    else
+    {
+        ++g_fail;
+        std::printf("[FAIL] %s :: %s\n", g_section.c_str(), what.c_str());
     }
 }
 
 void check_near(double got, double want, double tol, const std::string& what)
 {
-    ++g_checks;
-    if (!(std::abs(got - want) <= tol))
+    const bool ok = std::abs(got - want) <= tol;
+    if (!ok)
     {
-        std::printf("  [FAIL] %s: got %.6f want %.6f (tol %.6f)\n",
-                    what.c_str(), got, want, tol);
-        ++g_failures;
+        std::printf("[FAIL] %s :: %s (got %.9g, want %.9g, tol %.3g)\n",
+                    g_section.c_str(), what.c_str(), got, want, tol);
     }
+    check(ok, what);
 }
 
-boss::TrackBox box(double cx, double cy, double w = 60.0, double h = 120.0)
+boss::TrackBox box(double cx, double cy, double w = 60.0, double h = 80.0)
 {
-    boss::TrackBox b;
+    boss::TrackBox b{};
     b.x = static_cast<float>(cx - w * 0.5);
     b.y = static_cast<float>(cy - h * 0.5);
     b.w = static_cast<float>(w);
@@ -59,849 +75,657 @@ boss::TrackBox box(double cx, double cy, double w = 60.0, double h = 120.0)
     return b;
 }
 
-boss::AimTrackerParams baseParams()
-{
-    boss::AimTrackerParams p;
-    p.min_hits = 3;
-    p.max_age = 5;
-    p.assoc_radius_px = 80.0;
-    p.assoc_iou = 0.20;
-    p.vel_window_s = 0.10;
-    p.pred_max_lead_px = 12.0;
-    p.pred_vel_floor = 60.0;
-    return p;
-}
+// ★ 预测相关用例专用的夹具参数。三条约束必须同时满足, 否则断言会变成空转:
+//
+//   ① 尺寸门 (sizeWeight): 高度必须落进 (pred_min_w, pred_max_w) 区间。
+//      h = 20 == pred_min_w 时 `lo < h` 为假 ⇒ sw 保持 1.0(AM 的边界语义)。
+//      想让 sw 取中间值就取 50。这里用 h=20 是为了压低下一条的门限。
+//
+//   ② 位移门 (系数涨落): X 轴门限 = max(30, 0.8 × 框高) × (1 + 1.5k)。
+//      h = 20 ⇒ 0.8*20 = 16 < 30 ⇒ 门限被 30 托住。要涨, 目标每帧位移须 > 30px
+//      ⇒ @120fps 需 > 3600px/s。取 9000px/s ⇒ 75px/帧, 留足余量。
+//
+//   ③ 关联必须撑得住: 框太窄时高速目标两帧不再重叠 ⇒ IoU 归零 ⇒ 每帧新建轨迹
+//      ⇒ 速度永远重算不出来。取宽 400px, 9000px/s 下重叠仍充足。
+//      ★ 这两个尺寸是夹具的选择, 不是 AM 的常数。
+constexpr double kBoxW = 400.0;
+constexpr double kBoxH = 20.0;
+// 平台(自身)速度: 门限是 > 10px/帧 ⇒ @120fps 需 > 1200px/s。取 1500 ⇒ 12.5px/帧。
+constexpr double kSelfV = 1500.0;
+// 目标速度: 见 ②, 取 9000px/s。
+constexpr double kTargetV = 9000.0;
 
-// 喂一帧: 只有一个候选。
-// ★ 同时调用 predictionLead() —— 引擎(tests 之外的 boss_aim.cpp)就是每拍调一次,
-//   而预测系数 FSM 只在 predictionLead() 里推进。测试如果不调它, 系数永远是 0。
-// ★★ 每帧只许调一次: FSM 的爬升/回落是按【调用次数】推进的, 调两次等于一拍走两步。
-//   所以需要提前量的用例走 lead_x/lead_y 出口, 不许再自己调一次。
-void feed(boss::AimTracker& tr, double cx, double cy, double dt,
-          double* lead_x = nullptr, double* lead_y = nullptr)
-{
-    tr.beginFrame(dt);
-    tr.offer(box(cx, cy), cx, cy);
-    tr.endFrame();
-    double lx = 0.0, ly = 0.0;
-    tr.predictionLead(lx, ly);
-    if (lead_x) *lead_x = lx;
-    if (lead_y) *lead_y = ly;
-}
+constexpr double kDt = 1.0 / 120.0;
 
-// ── [1] 身份粘滞: 抖动的同一个目标不能被当成新目标 ────────────────────────────
-void test_identity_sticky()
+// ── 一个把时间推着走的喂帧助手 ──────────────────────────────────────────────
+struct Feeder
 {
-    std::printf("[1] 身份粘滞 (同一目标跨帧同 id)\n");
     boss::AimTracker tr;
-    tr.configure(baseParams());
+    double t = 10.0;   // 单调时钟(秒)
 
-    feed(tr, 500.0, 300.0, 1.0 / 120.0);
-    const int first = tr.lockedId();
-    check(first > 0, "第一帧必须已经锁定(不许等 min_hits)");
-
-    // 横向匀速移动 + 每帧 ±0.5px 抖动(模拟检测框量化噪声)。
-    for (int i = 1; i <= 60; ++i)
+    void step(const boss::TrackBox& b, int cls = 0, double dt = kDt)
     {
-        const double jitter = (i % 2 == 0) ? 0.5 : -0.5;
-        feed(tr, 500.0 + i * 2.0 + jitter, 300.0 + jitter, 1.0 / 120.0);
-        check(tr.lockedId() == first, "抖动/移动中身份必须保持不变");
+        tr.beginFrame(dt, t);
+        tr.offer(b, cls);
+        tr.endFrame();
+        t += dt;
     }
-    check(static_cast<int>(tr.tracks().size()) == 1,
-          "全程只应有一条轨迹(没有误建新轨迹)");
+    void miss(double dt = kDt)
+    {
+        tr.beginFrame(dt, t);
+        tr.endFrame();
+        t += dt;
+    }
+};
 
-    // ★ 反向验证: 真的换目标(跳到 300px 外, 远超声明的关联门限)必须换 id。
-    feed(tr, 900.0, 300.0, 1.0 / 120.0);
-    check(tr.lockedId() != first, "跳到关联门限之外必须算作新目标(换 id)");
+// ═══ [1] 关联: 类别相等 + IoU 严格大于 ══════════════════════════════════════
+void test_association()
+{
+    section("[1] 关联 = 类别相等 + IoU 严格大于门限");
+
+    {
+        boss::AimTracker tr;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        tr.configure(p);
+        double t = 1.0;
+        for (int i = 0; i < 6; ++i)
+        {
+            tr.beginFrame(kDt, t);
+            tr.offer(box(400.0, 300.0), 7);
+            tr.endFrame();
+            t += kDt;
+        }
+        check(tr.tracks().size() == 1, "同类别静止目标只建一条轨迹");
+    }
+    {
+        // ★ 同位置、不同类别 ⇒ 各建各的(类别是必要条件)。
+        boss::AimTracker tr;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        tr.configure(p);
+        tr.beginFrame(kDt, 1.0);
+        tr.offer(box(400.0, 300.0), 1);
+        tr.offer(box(400.0, 300.0), 2);
+        tr.endFrame();
+        check(tr.tracks().size() == 2, "★ 类别不等即使在同位置也不关联");
+    }
+    {
+        // ★ IoU 恰好等于门限 ⇒ 不命中。两个完全相同的框 IoU = 1.0;
+        //   门限设成 1.0 时 "1.0 < 1.0" 为假 ⇒ 不命中。
+        boss::AimTracker tr;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.assoc_iou = 1.0;
+        tr.configure(p);
+        tr.beginFrame(kDt, 1.0);
+        tr.offer(box(400.0, 300.0), 0);
+        tr.endFrame();
+        tr.beginFrame(kDt, 1.0 + kDt);
+        tr.offer(box(400.0, 300.0), 0);
+        tr.endFrame();
+        check(tr.tracks().size() == 2,
+              "★ IoU == 门限不算命中(AM 用严格大于) ⇒ 新建第二条");
+    }
+    {
+        boss::AimTracker tr;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.assoc_iou = 0.99;
+        tr.configure(p);
+        tr.beginFrame(kDt, 1.0);
+        tr.offer(box(400.0, 300.0), 0);
+        tr.endFrame();
+        tr.beginFrame(kDt, 1.0 + kDt);
+        tr.offer(box(400.0, 300.0), 0);
+        tr.endFrame();
+        check(tr.tracks().size() == 1, "IoU > 门限时关联上(不新建)");
+    }
+    {
+        // ★ 没有距离半径: 门限 0 时无重叠(IoU=0)仍不关联 —— AM 没有距离兜底。
+        boss::AimTracker tr;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.assoc_iou = 0.0;
+        tr.configure(p);
+        tr.beginFrame(kDt, 1.0);
+        tr.offer(box(100.0, 100.0), 0);
+        tr.endFrame();
+        tr.beginFrame(kDt, 1.0 + kDt);
+        tr.offer(box(900.0, 700.0), 0);
+        tr.endFrame();
+        check(tr.tracks().size() == 2,
+              "★ 无重叠时 IoU=0 不大于门限 0 ⇒ 新建(AM 没有距离兜底)");
+    }
 }
 
-// ── [2] 生命期: min_hits 不挡锁定; 超龄轨迹被删除 ────────────────────────────
+// ═══ [2] 生命周期: <= 的语义 ════════════════════════════════════════════════
 void test_lifecycle()
 {
-    std::printf("[2] 生命期 (min_hits 不挡锁定 / max_age 淘汰)\n");
-    auto p = baseParams();
-    p.min_hits = 3;
-    p.max_age = 5;
-    boss::AimTracker tr;
-    tr.configure(p);
+    section("[2] 生命周期 (min_hits / max_age 的 <= 语义)");
 
-    // ① 只喂一帧: 必须【立刻】能锁定 —— 上游 selector 已经决定了瞄谁,
-    //    跟踪器没有资格因为 min_hits 把这个决定推迟 3 帧(port-spec §2.3 的坑)。
-    feed(tr, 400.0, 400.0, 1.0 / 120.0);
-    check(tr.locked() != nullptr, "第一帧就必须可锁定(min_hits 不许挡锁定)");
-    check(tr.locked() != nullptr && !tr.locked()->confirmed,
-          "第一帧还不是 confirmed(hits=1 < min_hits=3)");
-
-    // ② 连续命中到 min_hits: 必须变成 confirmed。
-    feed(tr, 400.0, 400.0, 1.0 / 120.0);
-    feed(tr, 400.0, 400.0, 1.0 / 120.0);
-    check(tr.locked() != nullptr && tr.locked()->confirmed,
-          "连续 3 帧命中后必须 confirmed");
-
-    // ③ 空观测连续 max_age 帧: 轨迹必须被删掉。
-    for (int i = 0; i < p.max_age; ++i)
     {
-        tr.beginFrame(1.0 / 120.0);
-        tr.endFrame();
-        check(tr.locked() != nullptr, "max_age 之内轨迹必须还活着(滑行窗口)");
+        // AM L511: max_age < misses 才删 ⇒ 漏 max_age 帧后【仍存活】。
+        Feeder f;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.max_age = 3;
+        f.tr.configure(p);
+        f.step(box(400.0, 300.0));
+        check(f.tr.tracks().size() == 1, "首次观测建立轨迹");
+
+        f.miss();
+        check(f.tr.tracks().size() == 1, "漏 1 帧: 存活");
+        f.miss();
+        check(f.tr.tracks().size() == 1, "漏 2 帧: 存活");
+        f.miss();
+        check(f.tr.tracks().size() == 1, "★ 漏 3 帧(= max_age): 仍存活(判据是严格 <)");
+        f.miss();
+        check(f.tr.tracks().empty(), "漏 4 帧(= max_age+1): 删除");
     }
-    tr.beginFrame(1.0 / 120.0);
-    tr.endFrame();
-    check(tr.locked() == nullptr, "超过 max_age 之后轨迹必须被删除");
-    check(tr.tracks().empty(), "轨迹表必须清空");
+    {
+        // emits(): min_hits <= hits && misses <= max_age(两个都是 <=)。
+        Feeder f;
+        boss::AimTrackerParams p;
+        p.min_hits = 3;
+        p.max_age = 5;
+        f.tr.configure(p);
+        f.step(box(400.0, 300.0));
+        const auto* t1 = f.tr.locked();
+        check(t1 && t1->hits == 1, "第 1 帧 hits == 1");
+        check(t1 && !f.tr.emits(*t1), "hits=1 < min_hits=3 ⇒ 还不够格输出");
+
+        f.step(box(400.0, 300.0));
+        f.step(box(400.0, 300.0));
+        const auto* t3 = f.tr.locked();
+        check(t3 && t3->hits == 3, "第 3 帧 hits == 3");
+        check(t3 && f.tr.emits(*t3), "★ hits == min_hits 就够格(判据是 <=)");
+    }
+    {
+        // ★ hits 是【累计】不是"连续": AM 命中 +1, 漏帧时【不清零】。
+        Feeder f;
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.max_age = 10;
+        f.tr.configure(p);
+        f.step(box(400.0, 300.0));
+        f.step(box(400.0, 300.0));
+        const int hits_before = f.tr.locked() ? f.tr.locked()->hits : -1;
+        f.miss();
+        const auto* t = f.tr.locked();
+        check(t && t->hits == hits_before,
+              "★ 漏帧不把 hits 清零(AM 的 hits 是累计命中数)");
+        check(t && t->misses == 1, "漏帧让 misses +1");
+    }
 }
 
-// ── [2b] 锁定轨迹死掉后, 身份接管给现存已确认轨迹 ────────────────────────────
-//
-// boss_aim.cpp 靠"locked id 变了"来判换目标并复位控制器。如果锁定轨迹死了以后
-// lockedId() 停在 -1 或者跳到一条没确认的轨迹上, 那些 downstream 判据就会误判。
-void test_lock_takeover()
+// ═══ [3] 速度: 窗内沿用 / 窗外混合 ══════════════════════════════════════════
+void test_velocity()
 {
-    std::printf("[2b] 锁定轨迹死亡后的身份接管\n");
-    auto p = baseParams();
-    p.min_hits = 3;
-    p.max_age = 5;
-    boss::AimTracker tr;
-    tr.configure(p);
-    const double dt = 1.0 / 120.0;
+    section("[3] 速度估计 (窗内沿用旧值 / 窗外 0.25:0.75 混合)");
 
-    // 目标 A(左)与目标 B(右), 相距足够远(不会被互相关联)。
-    // 先各喂 3 帧把两条都做成 confirmed。
-    for (int i = 0; i < 3; ++i)
     {
-        tr.beginFrame(dt);
-        tr.offer(box(400.0, 300.0), 400.0, 300.0);
-        tr.offer(box(900.0, 300.0), 900.0, 300.0);
-        tr.endFrame();
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.vel_sample_ms = 20.0;
+        Feeder f;
+        f.tr.configure(p);
+
+        double cx = 400.0;
+        const double v = 600.0;                     // px/s
+        const double per_frame = v * kDt;
+        f.step(box(cx, 300.0));
+        check(f.tr.locked() && !f.tr.locked()->vel_valid,
+              "首帧没有上一次观测 ⇒ vel_valid 仍为假");
+
+        cx += per_frame;
+        f.step(box(cx, 300.0));                     // 8.33ms < 20ms ⇒ 沿用
+        check_near(f.tr.locked() ? f.tr.locked()->vel_x : -1.0, 0.0, 1e-9,
+                   "★ 窗内(8.33ms < 20ms)沿用旧速度 ⇒ 仍是 0");
+
+        cx += per_frame;
+        f.step(box(cx, 300.0));                     // 16.7ms < 20ms ⇒ 沿用
+        check_near(f.tr.locked() ? f.tr.locked()->vel_x : -1.0, 0.0, 1e-9,
+                   "窗内(16.7ms < 20ms)继续沿用");
+
+        // 第 4 帧: 距上次刷新的时间戳已 25ms > 20ms ⇒ 重算。
+        cx += per_frame;
+        f.step(box(cx, 300.0));
+        const double vel_after = f.tr.locked() ? f.tr.locked()->vel_x : -1.0;
+        // = (15px/0.025s)*0.25 + 0*0.75 = 150 px/s
+        check_near(vel_after, 150.0, 1.0,
+                   "★ 窗外重算: (15px/0.025s)*0.25 + 0*0.75 = 150 px/s");
+        check(f.tr.locked() && f.tr.locked()->vel_valid, "重算之后 vel_valid 置真");
     }
-    // ★ 一帧多候选: 锁定必须落在【先喂的那个】(上游 selector 的顺序就是优先级)。
-    check(tr.lockedId() >= 0, "多候选帧里必须有锁定");
-    check(tr.tracks().size() == 2, "两个远隔的候选必须建成两条轨迹");
-    const int id_a = tr.lockedId();
-
-    // A 消失, 只剩 B 被观测: A 逐步超龄, B 的 confirmed 状态保持。
-    for (int i = 0; i < p.max_age + 2; ++i)
     {
-        tr.beginFrame(dt);
-        tr.offer(box(900.0, 300.0), 900.0, 300.0);
-        tr.endFrame();
-    }
-    const int id_b = tr.lockedId();
-    check(id_b >= 0, "A 死了以后必须仍然有锁定(接管给 B)");
-    check(id_b != id_a, "★ 接管后 id 必须变化(否则下游判不出换目标)");
-    // ★ 关键: 接管的是【B】, 而且 B 必须是 confirmed 的轨迹。
-    check(tr.locked() != nullptr && tr.locked()->confirmed,
-          "接管的必须是一条已确认的轨迹(不许接管刚出生两帧的噪声轨迹)");
-
-    tr.reset();
-    check(tr.lockedId() == -1 && tr.tracks().empty(),
-          "reset 必须清空身份与轨迹");
-}
-
-// ── [3] 速度采样窗: 收敛到真实速度, 且窗排空前保持上一次的值 ─────────────────
-void test_velocity_window()
-{
-    std::printf("[3] 速度采样窗 (收敛 + 跨帧持有)\n");
-    auto p = baseParams();
-    p.vel_window_s = 0.10;   // 120fps 下 = 12 拍
-    boss::AimTracker tr;
-    tr.configure(p);
-
-    const double dt = 1.0 / 120.0;
-    const double speed = 300.0;   // px/s, 向右
-    double x = 400.0;
-    feed(tr, x, 300.0, dt);
-    for (int i = 1; i <= 120; ++i)   // 1 秒
-    {
-        x += speed * dt;
-        feed(tr, x, 300.0, dt);
-    }
-    const auto* t = tr.locked();
-    check(t != nullptr, "轨迹还在");
-    if (t)
-    {
-        check(t->vel_valid, "跑满一个窗之后速度必须已结算");
-        check_near(t->vel_x, speed, 15.0, "速度必须收敛到真实值 300px/s");
-        check_near(t->vel_y, 0.0, 5.0, "Y 速度必须约等于 0");
-    }
-
-    // ★ 跨帧持有: 窗内(未排空)的拍上, vel 必须还是上一次结算的值 —— 不许归零、
-    //   也不许每帧重算成噪声(那正是"速度不跨帧持有"的老毛病)。
-    std::vector<double> within_window;
-    for (int i = 1; i < 12; ++i)
-    {
-        x += speed * dt;
-        feed(tr, x, 300.0, dt);
-        const auto* tt = tr.locked();
-        if (tt) within_window.push_back(tt->vel_x);
-    }
-    bool held = true;
-    for (double v : within_window)
-        if (std::abs(v - speed) > 15.0) held = false;
-    check(held, "窗内每拍都必须保持上一窗结算的速度(不许清零/重算)");
-
-    // 静止目标: 速度必须回落到 0 附近(不能一直卡在 300)。
-    for (int i = 0; i < 60; ++i)
-        feed(tr, x, 300.0, dt);
-    const auto* t2 = tr.locked();
-    if (t2)
-        check(std::abs(t2->vel_x) < 20.0, "目标停下后速度必须回落到 0 附近");
-}
-
-// ── [4] 预测系数 FSM: 爬升/回落速率、上下限 ──────────────────────────────────
-void test_prediction_fsm()
-{
-    std::printf("[4] 预测系数 FSM (0.1 爬 / 0.2 落)\n");
-    auto p = baseParams();
-    // 让预测系数非零, 否则 sizeWeight 分支不会推进 FSM 之外的量。
-    p.pred_factor_x = 0.2;
-    p.pred_factor_y = 0.2;
-    p.pred_vel_floor = 0.0;   // 关掉噪声门, 单独测 FSM
-    // ★ 关联门限必须放宽: 这个用例的目标速度(20000px/s)每帧走 166px, 超过默认的
-    //   80px 门限 —— 那样每帧都会新建轨迹, 速度采样窗永远攒不满(vel_valid 恒 0),
-    //   系数也就永远是 0。这不是代码 bug, 是"目标快到跟丢"的物理必然。
-    p.assoc_radius_px = 400.0;
-    boss::AimTracker tr;
-    tr.configure(p);
-
-    const double dt = 1.0 / 120.0;
-    // ★★ AM 的系数涨落是【两个条件同时满足】才涨(见 FUN_14006e470 行 133-146):
-    //     ① 目标位移 > max(30, 0.75×框宽) × (1+1.5×系数)  ← 目标动得够快
-    //     ② 自身瞄准速度 > 3.5 px/帧                       ← 自己也在动
-    //    少了 ②, 系数只落不涨, 预测永远不启动。所以这个用例必须同时喂自身速度。
-    //    自身速度必须超过换算到速度域的门: 3.5057 ÷ (1/120) ≈ 421 px/s。
-    const double self_v = 3000.0;   // 自己猛甩; 远超 421px/s 的门
-    auto setSelf = [&]() { tr.setAimVelocity(self_v, 0.0); };
-    setSelf();
-
-    // ① 目标高速移动 → 系数必须逐帧爬升, 每次 +0.1, 上限 1.0。
-    //   ★ 注意爬升的【前置条件】: 速度采样窗要先排空一次(vel_valid = true),
-    //     在那之前"目标在不在动"无从判断, 系数保持 0 —— 这是刻意的, 不许拿
-    //     一个还没结算的速度去决定要不要预测。
-    double x = 400.0;
-    feed(tr, x, 300.0, dt);
-    const double k0 = tr.locked() ? tr.locked()->pred_k_x : -1.0;
-    check_near(k0, 0.0, 1e-9, "首帧系数必须从 0 开始(AM: track+0x18 初始化 0)");
-
-    std::vector<double> ks;
-    for (int i = 0; i < 90; ++i)
-    {
-        // 目标速度必须超过门限: max(30, 0.75×60)=45px × (1+1.5k) ÷ (1/120)
-        //   k=0 时 = 5400px/s; k=1 时 = 13500px/s。取 20000px/s 保证全程都能涨。
-        // ★ 但每帧位移不能超过关联门限(80px), 否则每帧都会新建轨迹、速度窗永远
-        //   攒不起来(实测: 166px/帧时 vel_valid 恒为 0, 系数永远 0)。
-        //   120fps × 80px = 9600px/s —— 所以这个用例要把关联门限放宽。
-        x += 20000.0 * dt;
-        setSelf();
-        feed(tr, x, 300.0, dt);
-        if (tr.locked()) ks.push_back(tr.locked()->pred_k_x);
-    }
-    bool monotone = true;
-    for (std::size_t i = 1; i < ks.size(); ++i)
-        if (ks[i] < ks[i - 1] - 1e-12) monotone = false;
-    check(monotone, "目标持续高速移动 + 自己在甩时, 系数必须单调不降");
-    check(!ks.empty() && std::abs(ks.back() - 1.0) < 1e-9, "系数必须爬到上限 1.0 并夹住");
-
-    // ★ 爬升步长必须是 0.1(AM 的 DAT_1401f461c), 回落步长必须是 0.2。
-    //   取"从 0 变正的那一拍"与"下一拍"来量步长 —— 之前的速度窗拍上系数恒为 0。
-    double first_rise = -1.0, second_rise = -1.0;
-    for (std::size_t i = 0; i + 1 < ks.size(); ++i)
-    {
-        if (ks[i] > 1e-9 && ks[i] < 1.0 - 1e-9 && ks[i + 1] > ks[i])
+        // ★ 混合是 0.25 新 + 0.75 旧(不是"累加后除窗"): 缓慢逼近真值。
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.vel_sample_ms = 1.0;   // 每帧都重算
+        Feeder f;
+        f.tr.configure(p);
+        double cx = 400.0;
+        const double per_frame = 600.0 * kDt;   // 5px
+        double prev = 0.0;
+        f.step(box(cx, 300.0));
+        for (int i = 0; i < 8; ++i)
         {
-            first_rise = ks[i];
-            second_rise = ks[i + 1];
-            break;
+            cx += per_frame;
+            f.step(box(cx, 300.0));
+            const double v = f.tr.locked() ? f.tr.locked()->vel_x : -1.0;
+            if (i > 0)
+            {
+                const double expect = 600.0 * 0.25 + prev * 0.75;
+                check_near(v, expect, 1.0, "混合递推 0.25 新 + 0.75 旧");
+            }
+            check(v >= prev - 1e-9, "速度单调逼近真值(不上冲)");
+            check(v <= 600.0 + 1e-6, "★ 混合不会瞬时冲到真值(有 0.75 惯性)");
+            prev = v;
         }
     }
-    check(first_rise > 0.0, "必须存在爬升过程(否则步长断言是空转)");
-    if (first_rise > 0.0)
-        check_near(second_rise - first_rise, 0.1, 1e-9, "爬升步长必须是 0.1/帧");
-
-    // ② 目标停下 → 系数必须以 -0.2/帧 回落, 下限 0。
-    //   ★ 回落有【两段延迟】, 都不是 bug:
-    //     ① 速度采样窗要先排空(窗内速度还停在旧值上, 系数会继续涨) —— 12 拍;
-    //     ② 然后系数才按 0.2/帧 落下 —— 5 拍。
-    //   所以这里要跑够 30 拍, 少了量到的就是"还没开始落"。
-    //   ★ 自身速度【继续喂】—— 这样回落就唯一归因于"目标停了", 不是自身条件。
-    std::vector<double> fall;
-    for (int i = 0; i < 30; ++i)
-    {
-        setSelf();
-        feed(tr, x, 300.0, dt);
-        if (tr.locked()) fall.push_back(tr.locked()->pred_k_x);
-    }
-    check(!fall.empty() && std::abs(fall.back()) < 1e-9, "停下后系数必须回落到 0");
-    // 回落要等速度窗也排空(窗内速度还停在旧值上, 系数会继续涨) —— 找第一处下降。
-    double first_fall = -1.0, second_fall = -1.0;
-    for (std::size_t i = 0; i + 1 < fall.size(); ++i)
-    {
-        if (fall[i + 1] < fall[i] - 1e-12)
-        {
-            first_fall = fall[i];
-            second_fall = fall[i + 1];
-            break;
-        }
-    }
-    check(first_fall > 0.0, "必须存在回落过程");
-    if (first_fall > 0.0)
-        check_near(second_fall - first_fall, -0.2, 1e-9, "回落步长必须是 0.2/帧");
 }
 
-// ── [5] 提前量的两道安全阀: 硬上限 + 噪声门 ──────────────────────────────────
-void test_lead_clamps()
+// ═══ [4] 滑行外推 + 两轴衰减不对称 ══════════════════════════════════════════
+void test_coasting()
 {
-    std::printf("[5] 提前量硬上限与速度噪声门\n");
-    auto p = baseParams();
-    p.pred_factor_x = 0.2;
-    p.pred_factor_y = 0.2;
-    p.pred_max_lead_px = 12.0;
-    p.pred_vel_floor = 60.0;
+    section("[4] 滑行外推 (位置 v*clamp(dt) + X*0.95 / Y*0.8)");
+
+    boss::AimTrackerParams p;
+    p.min_hits = 1;
+    p.max_age = 20;
+    p.vel_sample_ms = 1.0;
+    Feeder f;
+    f.tr.configure(p);
+
+    double cx = 400.0, cy = 300.0;
+    const double per = 600.0 * kDt;
+    for (int i = 0; i < 40; ++i)
+    {
+        f.step(box(cx, cy));
+        cx += per;
+        cy += per;
+    }
+    const auto* t = f.tr.locked();
+    check(t && t->vel_valid, "滑行前速度已有效");
+    const double vx = t ? t->vel_x : 0.0;
+    const double vy = t ? t->vel_y : 0.0;
+    check(vx > 100.0 && vy > 100.0, "速度已逼近 600(两轴都非零)");
+
+    const double last_cx = t ? t->out_cx : 0.0;
+    const double last_cy = t ? t->out_cy : 0.0;
+    f.miss();
+    const auto* c1 = f.tr.locked();
+    check(c1 != nullptr, "漏 1 帧后轨迹仍在(max_age=20)");
+    if (c1)
+    {
+        check(c1->out_cx > last_cx + 1.0,
+              "★ 滑行期位置按速度外推(不再原地不动)");
+        check(c1->out_cy > last_cy + 1.0, "Y 轴同样外推");
+        check_near(c1->vel_x, vx * 0.95, 1.0, "★ 滑行衰减 X = *0.95");
+        check_near(c1->vel_y, vy * 0.8, 1.0, "★ 滑行衰减 Y = *0.8(与 X 不同!)");
+        check(c1->vel_x > c1->vel_y - 1e-9,
+              "★ X 衰减比 Y 慢 ⇒ 同初始速度下 X 速度更大(AM 原文如此)");
+    }
+    const double vx1 = c1 ? c1->vel_x : 0.0;
+    f.miss();
+    const auto* c2 = f.tr.locked();
+    check(c2 && c2->vel_x < vx1, "继续滑行时速度继续衰减");
+}
+
+// ═══ [5] 尺寸权重: 吃框高 + 边界语义 ════════════════════════════════════════
+void test_size_weight()
+{
+    section("[5] 尺寸权重 (吃【框高】; h<=min 时保持 1.0)");
+
+    boss::AimTracker tr;
+    boss::AimTrackerParams p;
     p.pred_min_w = 20.0;
     p.pred_max_w = 80.0;
-    // ★ 同上: 这个用例用 24000px/s 的目标, 每帧 200px —— 必须放宽关联门限,
-    //   否则每帧新建轨迹、速度窗攒不满(vel_valid 恒 0)、提前量恒 0。
-    p.assoc_radius_px = 400.0;
-    boss::AimTracker tr;
     tr.configure(p);
 
-    const double dt = 1.0 / 120.0;
-    double x = 400.0;
-    feed(tr, x, 300.0, dt);
-    double lead_max = 0.0;
-    for (int i = 0; i < 200; ++i)
-    {
-        x += 200.0;   // 24000 px/s —— 必须超过速度域门限(45×(1+1.5k)÷dt)
-        tr.setAimVelocity(3000.0, 0.0);
-        double lx = 0.0, ly = 0.0;
-        feed(tr, x, 300.0, dt, &lx, &ly);
-        lead_max = std::max(lead_max, std::abs(lx));
-        check(std::isfinite(lx) && std::isfinite(ly), "提前量必须有限");
-    }
-    // ★ 硬上限是【安全性质】, 不是调参: 没有它, 提前量随速度线性增长(§4.2 禁止)。
-    check(lead_max <= 12.0 + 1e-9, "提前量绝不允许超过硬上限 12px");
-    check(lead_max > 0.5, "高速移动目标必须真的产生提前量(否则上限断言是空转)");
-
-    // ② 噪声门: 静止目标(只有 ±0.5px 抖动)的提前量必须恒为 0。
-    boss::AimTracker quiet;
-    quiet.configure(p);
-    double qx = 400.0;
-    feed(quiet, qx, 300.0, dt);
-    bool any_lead = false;
-    for (int i = 0; i < 120; ++i)
-    {
-        qx += (i % 2 == 0) ? 0.5 : -0.5;
-        double lx = 0.0, ly = 0.0;
-        feed(quiet, qx, 300.0, dt, &lx, &ly);
-        if (std::abs(lx) > 1e-9 || std::abs(ly) > 1e-9) any_lead = true;
-    }
-    check(!any_lead, "静止目标(量化抖动)的提前量必须恒为 0(噪声门)");
+    check_near(tr.sizeWeight(50.0), (80.0 - 50.0) / (80.0 - 20.0), 1e-12,
+               "区间内: (max-h)/(max-min)");
+    check_near(tr.sizeWeight(20.0), 1.0, 1e-12,
+               "★ h == min: 保持 1.0(AM L109 的条件是严格 min < h)");
+    check_near(tr.sizeWeight(10.0), 1.0, 1e-12,
+               "★ h < min: 也保持 1.0(不是 0 —— 这是 AM 原文的形状)");
+    check_near(tr.sizeWeight(80.0), 0.0, 1e-12, "h == max: 0(AM 的 else 支)");
+    check_near(tr.sizeWeight(200.0), 0.0, 1e-12, "h > max: 0");
+    check_near(tr.sizeWeight(79.0), (80.0 - 79.0) / (80.0 - 20.0), 1e-12,
+               "接近 max 时权重趋 0");
+    // ★ 边界语义对提前量的后果: 框高恰好 = max 时提前量恒 0。
+    check_near(tr.sizeWeight(80.0) * 1000.0, 0.0, 1e-12,
+               "★ 框高触及 max ⇒ 提前量被权重归零(尺寸门是真在起作用)");
 }
 
-// ── [5b] AM 的双条件门: "目标在动" 且 "自己在动" 才涨系数 ────────────────────
-//
-// ★ 这是 FUN_14006e470 行 133-146 的原文语义, 之前被我漏掉了第二条:
-//     if (门限 <= 目标位移 || |自身速度| <= 3.5px/帧) { 系数 -= 0.2 } else { += 0.1 }
-//   即: 自己没在动 → 系数只落不涨。漏掉这条会让"预测永远不启动"变成
-//   "预测在不该启动的时候启动"。
-void test_two_clause_gate()
+// ═══ [6] 系数 FSM ═══════════════════════════════════════════════════════════
+void test_factor_fsm()
 {
-    std::printf("[5b] 双条件门 (目标在动 且 自己在动)\n");
-    auto p = baseParams();
-    p.pred_factor_x = 0.2;
-    p.pred_vel_floor = 0.0;
-    // ★ 这些用例用 200px/帧 的目标 —— 同 §[4]/§[5], 关联门限必须放宽, 否则每帧
-    //   新建轨迹、速度窗攒不满, 测到的就是"跟丢了"而不是"门限不成立"。
-    p.assoc_radius_px = 400.0;
-    const double dt = 1.0 / 120.0;
+    section("[6] 系数 FSM (涨 0.1 / 落 0.2 / 夹 [0,1])");
 
-    // ① 目标极快但【自己不动】 → 系数必须保持 0(不许涨)。
-    {
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
-        tr.setAimVelocity(0.0, 0.0);   // ★ 自己完全不动
-        feed(tr, x, 300.0, dt);
-        double kmax = 0.0;
-        for (int i = 0; i < 90; ++i)
+    // ★★ 注意: FSM 的推进发生在 predictionLead() 里 —— 它**既是查询也是步进**。
+    //    所以夹具必须每帧调它一次, 否则系数永远停在 0, 断言会变成空转。
+    //    (这正是 AM 的形状: FUN_14006e470 每帧被调一次, 顺带推进 track+0x18/0x1C。)
+    auto run = [](double platform_vx, double target_v, int frames) {
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.max_age = 5000;
+        p.vel_sample_ms = 1.0;
+        p.pred_factor_x = 1.0;
+        p.pred_factor_y = 1.0;
+        Feeder f;
+        f.tr.configure(p);
+        double cx = 400.0;
+        const double per = target_v * kDt;
+        for (int i = 0; i < frames; ++i)
         {
-            x += 200.0;
-            tr.setAimVelocity(0.0, 0.0);   // 每拍都要喂(AM 是每拍读的)
+            f.tr.setPlatformVelocity(platform_vx, platform_vx);
+            f.step(box(cx, 300.0, kBoxW, kBoxH));
+            cx += per;
             double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-            if (tr.locked()) kmax = std::max(kmax, tr.locked()->pred_k_x);
+            f.tr.predictionLead(lx, ly);   // ★ 推进 FSM
         }
-        check_near(kmax, 0.0, 1e-9,
-                   "★ 自己不动时系数必须恒为 0(AM 的第二个条件, 只落不涨)");
+        return f.tr.locked() ? f.tr.locked()->pred_k_x : -1.0;
+    };
+
+    // ★ 涨的条件 = "目标位移够大 且 平台位移够大"(AM L133-135 是一条复合 if)。
+    //   平台速度 0 ⇒ 永远算"自己没动" ⇒ 系数只落不涨 = 停在 0。
+    const double k_no_platform = run(0.0, kTargetV, 300);
+    check_near(k_no_platform, 0.0, 1e-9,
+               "★ 平台速度为 0 时系数恒 0(AM: 自己没在动 ⇒ 只落不涨)");
+
+    const double k_rising = run(kSelfV, kTargetV, 300);
+    check(k_rising > 0.5, "★ 平台与目标都在动 ⇒ 系数爬升");
+
+    const double k_10 = run(kSelfV, kTargetV, 10);
+    check(k_10 > 0.3, "★ 爬升确实发生(10 帧已明显大于 0)");
+
+    {
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.max_age = 5000;
+        p.vel_sample_ms = 1.0;
+        p.pred_factor_x = 1.0;
+        Feeder f;
+        f.tr.configure(p);
+        double cx = 400.0;
+        for (int i = 0; i < 300; ++i)   // 先爬满
+        {
+            f.tr.setPlatformVelocity(kSelfV, 0.0);
+            f.step(box(cx, 300.0, kBoxW, kBoxH));
+            cx += kTargetV * kDt;
+            double lx = 0.0, ly = 0.0;
+            f.tr.predictionLead(lx, ly);
+        }
+        const double k_max = f.tr.locked() ? f.tr.locked()->pred_k_x : -1.0;
+        check(k_max > 0.9, "先爬到接近 1.0");
+
+        for (int i = 0; i < 3; ++i)     // 目标定住 ⇒ 位移为 0 ⇒ 回落
+        {
+            f.tr.setPlatformVelocity(kSelfV, 0.0);
+            f.step(box(cx, 300.0, kBoxW, kBoxH));
+            double lx = 0.0, ly = 0.0;
+            f.tr.predictionLead(lx, ly);
+        }
+        const double k_after3 = f.tr.locked() ? f.tr.locked()->pred_k_x : -1.0;
+        check_near(k_max - k_after3, 0.6, 0.25, "★ 回落约 0.2/帧(3 帧约 -0.6)");
     }
+    check(run(kSelfV, kTargetV, 100000) <= 1.0 + 1e-12, "系数不超过 1.0");
+    check(run(0.0, 0.0, 100) >= -1e-12, "系数不低于 0.0");
+}
 
-    // ② 自己动得【不够快】 → 同样不许涨(门限是 3.5057px/帧 ≈ 421px/s @120fps)。
-    {
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
-        feed(tr, x, 300.0, dt);
-        double kmax = 0.0;
-        for (int i = 0; i < 90; ++i)
+// ═══ [7] 提前量 = 平台位移 * 系数(不是目标速度!) ═══════════════════════════
+void test_lead_uses_platform_velocity()
+{
+    section("[7] 提前量用【平台位移】而不是目标速度");
+
+    auto lead_for = [](double target_v, double platform_v) {
+        boss::AimTrackerParams p;
+        p.min_hits = 1;
+        p.max_age = 5000;
+        p.vel_sample_ms = 1.0;
+        p.pred_factor_x = 1.0;
+        Feeder f;
+        f.tr.configure(p);
+        double cx = 400.0;
+        double last = 0.0;
+        for (int i = 0; i < 400; ++i)
         {
-            x += 200.0;
-            tr.setAimVelocity(300.0, 0.0);   // 300 px/s < 421 px/s 的门
+            f.tr.setPlatformVelocity(platform_v, 0.0);
+            f.step(box(cx, 300.0, kBoxW, kBoxH));
+            cx += target_v * kDt;
             double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-            if (tr.locked()) kmax = std::max(kmax, tr.locked()->pred_k_x);
+            f.tr.predictionLead(lx, ly);
+            last = lx;
         }
-        check_near(kmax, 0.0, 1e-9, "自身速度低于 3.5px/帧 的门时系数不许涨");
+        return last;
+    };
+
+    const double lead_fast_platform = lead_for(kTargetV, kSelfV);
+    const double lead_slow_platform = lead_for(kTargetV, kSelfV * 0.5);
+
+    check(std::abs(lead_fast_platform) > std::abs(lead_slow_platform) + 1.0,
+          "★ 目标速度相同、平台速度更大 ⇒ 提前量更大(证明吃的是平台位移)");
+
+    // ★★ 目标静止 + 平台在甩 ⇒ 提前量仍然是 0。这条断言一开始我写反了,
+    //    以为"预测的是自己的滞后 ⇒ 目标不动也该有提前量"。逐行核对 AM L133-135
+    //    后确认**不是**:
+    //      uVar5 = 0x7FFFFFFF(符号位掩码, 即 |x|)
+    //      if ( gate*(1+1.5k) <= |框位移|  ||  |自身位移| <= 10 )  →  落
+    //      else                                                    →  涨
+    //    ⇒ 涨 ⟺ |框位移| > gate*(1+1.5k)  **且**  |自身位移| > 10
+    //    **框位移本身就在涨的条件里**, 所以目标静止时系数恒 0, 与平台无关。
+    //    换句话说 AM 的语义是"目标自己动得快 **且** 我也在动"才预测 ——
+    //    两个条件都是必要条件, 缺一不可。
+    const double lead_target_still = lead_for(0.0, kSelfV);
+    check_near(lead_target_still, 0.0, 1e-9,
+               "★★ 目标静止时无论平台多快, 系数都涨不起来(框位移是涨的必要条件)");
+
+    // ★ 平台不动、目标在动 ⇒ 提前量恒 0(自身位移是另一半必要条件)
+    const double lead_platform_still = lead_for(20000.0, 0.0);
+    check_near(lead_platform_still, 0.0, 1e-9,
+               "★★ 目标猛动但平台不动 ⇒ 提前量恒 0(两个必要条件缺一不可)");
+}
+
+// ═══ [8] 就地改写框心 ═══════════════════════════════════════════════════════
+void test_inplace_box_rewrite()
+{
+    section("[8] 落点 = 就地改写框心 (AM L177-178)");
+
+    boss::AimTrackerParams p;
+    p.min_hits = 1;
+    p.max_age = 5000;
+    p.vel_sample_ms = 1.0;
+    p.pred_factor_x = 1.0;
+    Feeder f;
+    f.tr.configure(p);
+    double cx = 400.0;
+    for (int i = 0; i < 400; ++i)
+    {
+        f.tr.setPlatformVelocity(kSelfV, 0.0);
+        f.step(box(cx, 300.0, kBoxW, kBoxH));
+        cx += kTargetV * kDt;
     }
-
-    // ③ 两个条件都满足 → 必须涨(否则 ①② 是空转)。
+    double lx = 0.0, ly = 0.0;
+    f.tr.predictionLead(lx, ly);
+    const auto* t = f.tr.locked();
+    check(t != nullptr, "轨迹存在");
+    if (t)
     {
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
-        feed(tr, x, 300.0, dt);
-        for (int i = 0; i < 90; ++i)
-        {
-            x += 200.0;
-            tr.setAimVelocity(6000.0, 0.0);   // 远超门
-            double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-        }
-        check(tr.locked() && tr.locked()->pred_k_x > 0.5,
-              "★ 两个条件都满足时系数必须涨起来(证明 ①② 不是空转)");
-    }
-
-    // ④ 目标【停下】但自己继续甩 → 系数必须回落(证明回落归因于目标, 不是自身)。
-    {
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
-        feed(tr, x, 300.0, dt);
-        for (int i = 0; i < 90; ++i)   // 先涨起来
-        {
-            x += 200.0;
-            tr.setAimVelocity(6000.0, 0.0);
-            double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-        }
-        const double before = tr.locked() ? tr.locked()->pred_k_x : -1.0;
-        check(before > 0.5, "前置: 系数已经涨起来了");
-        for (int i = 0; i < 40; ++i)   // 目标停住, 自己继续甩
-        {
-            tr.setAimVelocity(6000.0, 0.0);
-            double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-        }
-        check(tr.locked() && std::abs(tr.locked()->pred_k_x) < 1e-9,
-              "目标停住后系数必须回落到 0(即使自己还在甩)");
+        const double base_cx = t->box.x + t->box.w * 0.5;
+        check_near(t->out_cx, base_cx + lx, 1e-6,
+                   "★ out_cx = 框心 + 提前量(就地改写)");
+        check(std::abs(lx) > 1.0, "提前量确实非零(否则上一条断言是空转)");
     }
 }
 
-// ── [6] 关预测时必须逐位恒等 ─────────────────────────────────────────────────
-void test_prediction_identity()
+// ═══ [9] 两道自加阀默认关闭 ⇒ 默认与 AM 逐位一致 ═══════════════════════════
+void test_self_added_valves_default_off()
 {
-    std::printf("[6] 系数 0 = 恒等变换\n");
-    auto p = baseParams();
-    p.pred_factor_x = 0.0;   // 默认: 不预测
-    p.pred_factor_y = 0.0;
-    boss::AimTracker tr;
-    tr.configure(p);
+    section("[9] 自加安全阀默认关闭");
 
-    const double dt = 1.0 / 120.0;
-    double x = 400.0;
-    feed(tr, x, 300.0, dt);
-    bool zero = true;
-    for (int i = 0; i < 100; ++i)
-    {
-        x += 20.0;
-        double lx = 1.0, ly = 1.0;
-        feed(tr, x, 300.0, dt, &lx, &ly);
-        const bool active = (lx != 0.0 || ly != 0.0);
-        if (active || lx != 0.0 || ly != 0.0) zero = false;
-    }
-    check(zero, "系数为 0 时提前量必须恒为 (0,0) 且报告 inactive");
+    boss::AimTrackerParams p;
+    check_near(p.pred_max_lead_px, 0.0, 1e-12,
+               "★ 硬像素上限默认 0 = 无上限 = AM 原样");
+    check_near(p.pred_vel_floor, 0.0, 1e-12,
+               "★ 速度噪声门默认 0 = 无门 = AM 原样");
+    check(p.enable_tracking, "跟踪默认开启");
 
-    // 尺寸区间之外(框太小)也必须不补 —— AM 的 sizeWeight 在区间外为 0。
-    auto p2 = baseParams();
-    p2.pred_factor_x = 0.2;
-    p2.pred_factor_y = 0.2;
-    p2.pred_min_w = 100.0;
-    p2.pred_max_w = 200.0;
-    boss::AimTracker small;
-    small.configure(p2);
-    double sx = 400.0;
-    small.beginFrame(dt);
-    small.offer(box(sx, 300.0, 40.0, 80.0), sx, 300.0);   // 框宽 40 < min_w
-    small.endFrame();
-    bool tiny_zero = true;
-    for (int i = 0; i < 50; ++i)
-    {
-        sx += 20.0;
-        small.beginFrame(dt);
-        small.offer(box(sx, 300.0, 40.0, 80.0), sx, 300.0);
-        small.endFrame();
-        double lx = 0.0, ly = 0.0;
-        small.predictionLead(lx, ly);
-        if (lx != 0.0 || ly != 0.0) tiny_zero = false;
-    }
-    check(tiny_zero, "框宽在尺寸区间之外时必须不补(AM 的 sizeWeight=0)");
-}
-
-// ── [7] 确定性 + 异常输入不产生 NaN ──────────────────────────────────────────
-void test_robustness()
-{
-    std::printf("[7] 确定性 / 异常输入\n");
-    const auto run = []() {
-        auto p = baseParams();
-        p.pred_factor_x = 0.2;
-        p.pred_factor_y = 0.2;
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
+    auto run = [](double cap, double floorv) {
+        boss::AimTrackerParams q;
+        q.min_hits = 1;
+        q.max_age = 5000;
+        q.vel_sample_ms = 1.0;
+        q.pred_factor_x = 1.0;
+        q.pred_max_lead_px = cap;
+        q.pred_vel_floor = floorv;
+        Feeder f;
+        f.tr.configure(q);
+        double cx = 400.0;
         double acc = 0.0;
-        for (int i = 0; i < 100; ++i)
+        for (int i = 0; i < 400; ++i)
         {
-            x += 3.0;
-            feed(tr, x, 300.0 + i * 0.25, 1.0 / 120.0);
+            f.tr.setPlatformVelocity(kSelfV, 0.0);
+            f.step(box(cx, 300.0, kBoxW, kBoxH));
+            cx += kTargetV * kDt;
             double lx = 0.0, ly = 0.0;
-            tr.predictionLead(lx, ly);
-            acc += lx + ly;
+            f.tr.predictionLead(lx, ly);
+            acc += lx;
         }
         return acc;
     };
-    check_near(run(), run(), 0.0, "同样的输入必须给出逐位相同的结果(可复现)");
+    check_near(run(0.0, 0.0), run(0.0, 0.0), 1e-12, "确定性(同输入同输出)");
 
-    // dt = 0 / 负 / NaN: 不许产生 NaN, 也不许把速度算成 inf。
-    boss::AimTracker tr;
-    tr.configure(baseParams());
-    tr.beginFrame(0.0);
-    tr.offer(box(400.0, 300.0), 400.0, 300.0);
-    tr.endFrame();
-    check(tr.locked() != nullptr && std::isfinite(tr.locked()->vel_x),
-          "dt=0 不许产生 NaN/inf 速度");
-    tr.beginFrame(-1.0);
-    tr.offer(box(401.0, 300.0), 401.0, 300.0);
-    tr.endFrame();
-    check(tr.locked() != nullptr && std::isfinite(tr.locked()->vel_x),
-          "dt<0 不许产生 NaN/inf 速度");
-
-    // 空观测连续 1000 帧: 轨迹清空且不崩。
-    for (int i = 0; i < 1000; ++i)
-    {
-        tr.beginFrame(1.0 / 120.0);
-        tr.endFrame();
-    }
-    check(tr.locked() == nullptr && tr.tracks().empty(), "长期空观测必须彻底清空");
-
-    // reset() 之后必须回到干净状态。
-    feed(tr, 400.0, 300.0, 1.0 / 120.0);
-    tr.reset();
-    check(tr.locked() == nullptr && tr.tracks().empty(), "reset 必须清空轨迹与身份");
+    // ★ 反向验证: 把上限打开必须【改变】结果, 否则这条阀是空转的。
+    check(std::abs(run(2.0, 0.0)) < std::abs(run(0.0, 0.0)) - 1e-6,
+          "★ 打开硬上限后累计提前量必须变小(阀真的在起作用)");
 }
 
-// ── [8] 参数入口的夹取(坏配置不许把跟踪器搞坏) ───────────────────────────────
-void test_param_clamps()
+// ═══ [9.5] 滑行外推必须【被消费】—— 否则它就是死代码 ═══════════════════════
+//
+// ★ 这一节的存在理由: `out_cx/out_cy` 是 AM 滑行外推的落点, 但"算出来"不等于
+//   "用上了"。boss_aim.cpp 里必须把它真的加到瞄点上, 否则外推是空转。
+//   本层测不了 boss_aim(它依赖 OpenCV), 所以这里至少钉住【外推量本身是有效的、
+//   可区分的】: 滑行期的 out_cx 必须显著偏离最后一次观测的框心。
+void test_coast_offset_is_meaningful()
 {
-    std::printf("[8] 参数夹取\n");
-    boss::AimTracker tr;
+    section("[9.5] 滑行外推的偏移量确实可区分(供 boss_aim 消费)");
+
     boss::AimTrackerParams p;
-    p.min_hits = 0;            // 非法
-    p.max_age = -5;            // 非法
-    p.pred_max_lead_px = 1e9;  // 超过绝对天花板
-    p.pred_factor_x = 99.0;    // 远超 ±0.2
-    p.pred_min_w = 100.0;
-    p.pred_max_w = 50.0;       // max < min
-    tr.configure(p);
+    p.min_hits = 1;
+    p.max_age = 30;
+    p.vel_sample_ms = 1.0;
+    Feeder f;
+    f.tr.configure(p);
 
-    feed(tr, 400.0, 300.0, 1.0 / 120.0);
-    check(tr.locked() != nullptr, "坏参数下仍然要能锁定");
-    check(tr.locked() != nullptr && tr.locked()->confirmed,
-          "min_hits 被夹到 1 之后首帧就该 confirmed");
-
-    double lx = 0.0, ly = 0.0;
-    tr.predictionLead(lx, ly);
-    check(std::isfinite(lx) && std::isfinite(ly), "坏参数下提前量必须有限");
-    check(std::abs(lx) <= boss::AimTracker::kAbsMaxLeadPx + 1e-9,
-          "提前量上限必须被夹到绝对天花板(64px)以内");
-    // 系数被夹到 0.2, 所以提前量不可能超过 0.2 × v × sizeWeight。
-    check(std::abs(lx) < 50.0, "系数夹取之后提前量必须在物理量级");
-}
-
-// ── [9] ⑤ 在途自身位移补偿 (AM 的发送环窗口 ÷ k̂) ────────────────────────────
-//
-// AM: FUN_140067000 行 1172-1209 —— 把窗口内发出去的计数求和, ÷ counts_per_pixel
-// 换回像素。本实现用定长环形缓冲(不用时间戳), 除以窗口拍数, 与 aim_pid.h 的
-// 计数域补偿同构。
-void test_inflight_chain()
-{
-    std::printf("[9] 在途补偿链 (发送环窗口 ÷ k̂)\n");
-    auto p = baseParams();
-    p.inflight_window_s = 0.010;   // 10ms
-    p.inflight_beta = 1.0;
-    boss::AimTracker tr;
-    tr.configure(p);
-    const double dt = 1.0 / 120.0;
-    tr.beginFrame(dt);
-
-    // ★ k̂ = 1.0(默认)时, 像素量 = 计数/拍数 —— 也就是"计数当像素", 不做换算。
-    const std::size_t ticks = tr.inflightWindowTicks();
-    check(ticks >= 1, "窗口拍数至少 1");
-    check_near(static_cast<double>(ticks), p.inflight_window_s / dt, 1.0,
-               "窗口拍数 = 窗口秒数 ÷ dt");
-
-    // ★ 窗口 = 0 的语义是【整条链关闭】(在途量恒 0), 而不是"至少 1 拍"。
-    //   两者必须分得开, 否则"三件全关时逐位一致"那条回归不成立。
+    // 建立一条向东匀速的轨迹。
+    double cx = 400.0;
+    const double per = 900.0 * kDt;      // 900 px/s ⇒ 7.5px/帧
+    for (int i = 0; i < 60; ++i)
     {
-        auto pz = p;
-        pz.inflight_window_s = 0.0;
-        boss::AimTracker tz;
-        tz.configure(pz);
-        tz.beginFrame(dt);
-        check(tz.inflightWindowTicks() == 0, "★ 窗口 0 必须表示关闭(拍数 0)");
-        tz.noteSend(50, 50);
-        double zx = 0.0, zy = 0.0;
-        tz.inflightPixels(zx, zy);
-        check_near(zx, 0.0, 1e-9, "★ 关闭时在途量必须恒为 0(即使登了账)");
-        check_near(zy, 0.0, 1e-9, "同上");
+        f.step(box(cx, 300.0, 200.0, 60.0));
+        cx += per;
+    }
+    const auto* t = f.tr.locked();
+    check(t && t->vel_valid, "滑行前速度有效");
+
+    // 漏一帧: 位置必须外推出去, 并且偏移量足够大(能被下游看见)。
+    f.miss();
+    const auto* c = f.tr.locked();
+    check(c != nullptr, "漏 1 帧后轨迹仍在");
+    if (c)
+    {
+        const double obs_cx_now = c->box.x + c->box.w * 0.5;
+        const double coast_dx = c->out_cx - obs_cx_now;
+        const double expect = std::abs(c->vel_x) * kDt;
+        check(std::abs(coast_dx) > 1.0,
+              "★ 滑行偏移必须 > 1px(否则下游消费了也看不出来)");
+        check_near(std::abs(coast_dx), expect, expect * 0.2 + 1e-9,
+                   "★ 滑行偏移 = |速度| × dt(与 AM 的 v*clamp(dt) 一致)");
+        check(c->out_cx > obs_cx_now,
+              "向东运动的轨迹, 外推位置必须在观测位置的东侧");
     }
 
-    // 每拍发 12 计数; 填满窗口后, 在途量应当是 12×ticks/(k̂×ticks) = 12 像素。
-    for (std::size_t i = 0; i < ticks; ++i)
-        tr.noteSend(12, 0);
-    double px = 0.0, py = 0.0;
-    tr.inflightPixels(px, py);
-    check_near(px, 12.0, 1e-9, "k̂=1 时在途像素 = 每拍计数(不随窗口长度变)");
-    check_near(py, 0.0, 1e-9, "y 轴没发过就是 0");
-
-    // ★ k̂ = 2(2 计数 = 1 像素)⇒ 同一批计数换算出的像素减半。
-    auto p2 = p;
-    p2.counts_per_pixel_x = 2.0;
-    boss::AimTracker tr2;
-    tr2.configure(p2);
-    tr2.beginFrame(dt);
-    for (std::size_t i = 0; i < tr2.inflightWindowTicks(); ++i)
-        tr2.noteSend(12, 0);
-    double px2 = 0.0, py2 = 0.0;
-    tr2.inflightPixels(px2, py2);
-    check_near(px2, 6.0, 1e-9, "★ k̂ 加倍 ⇒ 在途像素减半(k̂ 真的参与了换算)");
-
-    // ★ k̂ = 0.5(1 计数 = 2 像素)⇒ 像素加倍。
-    auto p3 = p;
-    p3.counts_per_pixel_x = 0.5;
-    boss::AimTracker tr3;
-    tr3.configure(p3);
-    tr3.beginFrame(dt);
-    for (std::size_t i = 0; i < tr3.inflightWindowTicks(); ++i)
-        tr3.noteSend(12, 0);
-    double px3 = 0.0, py3 = 0.0;
-    tr3.inflightPixels(px3, py3);
-    check_near(px3, 24.0, 1e-9, "k̂ 减半 ⇒ 在途像素加倍");
-
-    // ★ 非法 k̂ 必须回落到 1.0(不换算), 不许除零/放大。
-    auto p4 = p;
-    p4.counts_per_pixel_x = 0.0;    // 0 → 回落
-    boss::AimTracker tr4;
-    tr4.configure(p4);
-    tr4.beginFrame(dt);
-    for (std::size_t i = 0; i < tr4.inflightWindowTicks(); ++i)
-        tr4.noteSend(12, 0);
-    double px4 = 0.0, py4 = 0.0;
-    tr4.inflightPixels(px4, py4);
-    check(std::isfinite(px4) && px4 == 12.0, "k̂=0 必须回落到 1.0(与默认一致)");
-
-    // ★ 窗口拍数必须被真实死区夹住 —— 超过死区会把早已生效的指令再扣一次。
-    auto p5 = p;
-    p5.inflight_window_s = 10.0;    // 远超 46ms
-    boss::AimTracker tr5;
-    tr5.configure(p5);
-    tr5.beginFrame(dt);
-    check_near(tr5.inflightWindowTicks() * dt, boss::kInflightWindowMaxS, 0.02,
-               "★ 窗口被夹到 46ms 死区(不许超过)");
-
-    // ★ 复位必须清账本: 旧目标的欠账不许算到新目标头上。
-    tr.clearInflight();
-    tr.inflightPixels(px, py);
-    check_near(px, 0.0, 1e-9, "clearInflight 后必须归零");
-    tr.reset();
-    tr.inflightPixels(px, py);
-    check_near(px, 0.0, 1e-9, "reset 后必须归零");
-
-    // ★ 空窗口不许产生 NaN。
-    boss::AimTracker tr6;
-    tr6.configure(p);
-    tr6.beginFrame(dt);
-    tr6.inflightPixels(px, py);
-    check(std::isfinite(px) && std::isfinite(py), "空账本必须返回有限值");
-}
-
-// ── [10.5] 在途补偿「二选一」的判据 ─────────────────────────────────────────
-//
-// ★★ 这条判据 2026-09-16 差点写错: 当时把"经典档/EventSync 档"的档位判断顺手改成
-//   "恒为真", 那会【无条件】把计数域的 inflight_beta 清 0 —— 而窗口默认为 0
-//   (= AM 那条替代链根本没在跑), 于是生产点的主刹车被静默拆掉
-//   (实测 beta=0 时 60fps 尾段 299.6px 且发散, beta=1.6 时 0.294px)。
-//   ★ 判据必须问"那条替代链到底有没有在跑", 不能问"现在是哪一档"。
-// ★ 这个谓词放在 aim_tracker.h 里, 就是为了让这一节能真的测到它: boss_aim.cpp
-//   依赖 OpenCV, 在本机编不进逻辑回归, "直接比大小"的写法在自动化测试里永远测不到。
-void test_inflight_arbitration()
-{
-    std::printf("[10.5] 在途补偿二选一判据 (窗口是否为 0)\n");
-    const double dt = 1.0 / 120.0;
-
-    // ① 默认(结构体默认值)必须是"不接管" ⇒ 计数域那项继续当家。
+    // ★ 静止目标: 滑行偏移必须是 0(不能凭空造出位移)。
     {
-        auto p = baseParams();
-        p.inflight_window_s = 0.0;
-        check(!boss::AimTracker::amTakesOverInflight(p),
-              "★ 窗口 = 0(默认) 必须【不】接管 —— 此时计数域 beta 是唯一的在途补偿");
-        boss::AimTracker t;
-        t.configure(p);
-        t.beginFrame(dt);
-        check(t.inflightWindowTicks() == 0, "窗口 0 ⇒ 拍数 0(账本整条关闭)");
-    }
-
-    // ② 窗口打开 ⇒ 接管, 引擎据此把计数域 beta 清 0(避免同一批指令被扣两次)。
-    {
-        auto p = baseParams();
-        p.inflight_window_s = boss::kInflightWindowMaxS;
-        check(boss::AimTracker::amTakesOverInflight(p), "窗口 > 0 ⇒ 接管");
-    }
-
-    // ③ 窗口极小但非 0 也算"跑起来了" —— 判据是"有没有在跑", 不是"够不够大"。
-    {
-        auto p = baseParams();
-        p.inflight_window_s = 1e-6;
-        check(boss::AimTracker::amTakesOverInflight(p), "窗口极小但非 0 也算接管");
-        boss::AimTracker t;
-        t.configure(p);
-        t.beginFrame(dt);
-        check(t.inflightWindowTicks() >= 1, "接管时拍数至少 1(不会出现 0 拍的空转)");
-    }
-
-    // ④ 非法输入(负窗口 / NaN)必须当成"关闭": 否则计数域 beta 被清 0 = 静默拆刹车。
-    {
-        auto p = baseParams();
-        p.inflight_window_s = -5.0;
-        check(!boss::AimTracker::amTakesOverInflight(p), "负窗口 = 关闭, 不许接管");
-        p.inflight_window_s = std::numeric_limits<double>::quiet_NaN();
-        check(!boss::AimTracker::amTakesOverInflight(p), "★ NaN 窗口不许接管");
-    }
-
-    // ⑤ 谓词必须与"拍数 > 0"完全一致(两处共用一个谓词, 这里把一致性钉住)。
-    {
-        auto p = baseParams();
-        for (double w : {0.0, 1e-6, 0.01, boss::kInflightWindowMaxS, 10.0, -1.0})
-        {
-            p.inflight_window_s = w;
-            boss::AimTracker t;
-            t.configure(p);
-            t.beginFrame(dt);
-            check(boss::AimTracker::amTakesOverInflight(p) == (t.inflightWindowTicks() > 0),
-                  "谓词必须与 inflightWindowTicks()>0 一致(窗口=" + std::to_string(w) + ")");
-        }
-    }
-}
-// ── [10] ⑥ 自运动补偿 (AM 的自身瞄准速度项) ─────────────────────────────────
-//
-// ★ 这一项在本项目被删过一次(predictive_controller, 1a5a792): 输出侧标定增益
-//   进反馈回路, 标定不准就每拍反向极限环。所以默认 0, 且必须走同一个硬上限。
-void test_self_motion()
-{
-    std::printf("[10] 自运动补偿 (默认关 / 有界)\n");
-    auto p = baseParams();
-    p.pred_factor_x = 0.0;     // 关掉目标速度那一项, 单独看自运动
-    p.pred_max_lead_px = 12.0;
-    const double dt = 1.0 / 120.0;
-
-    // ① 默认 gain = 0 → 恒等(不管自己甩多快)。
-    {
-        boss::AimTracker tr;
-        tr.configure(p);
-        double x = 400.0;
-        feed(tr, x, 300.0, dt);
-        bool any = false;
+        boss::AimTrackerParams q;
+        q.min_hits = 1;
+        q.max_age = 30;
+        Feeder g;
+        g.tr.configure(q);
         for (int i = 0; i < 60; ++i)
+            g.step(box(400.0, 300.0, 200.0, 60.0));
+        g.miss();
+        const auto* s = g.tr.locked();
+        check(s != nullptr, "静止目标漏帧后轨迹仍在");
+        if (s)
         {
-            tr.setAimVelocity(9000.0, -9000.0);   // 疯狂甩
-            double lx = 0.0, ly = 0.0;
-            feed(tr, x, 300.0, dt, &lx, &ly);
-            if (lx != 0.0 || ly != 0.0) any = true;
+            const double obs_cx = s->box.x + s->box.w * 0.5;
+            check_near(s->out_cx - obs_cx, 0.0, 1e-9,
+                       "★ 静止目标的滑行偏移恒为 0(不凭空造位移)");
         }
-        check(!any, "★ 自运动项默认关闭时提前量必须恒为 0");
-    }
-
-    // ② 开了之后: 偏移与自身速度成正比, 且被硬上限夹住。
-    {
-        auto q = p;
-        q.self_motion_gain = 0.2;
-        boss::AimTracker tr;
-        tr.configure(q);
-        double x = 400.0;
-        feed(tr, x, 300.0, dt);
-        tr.setAimVelocity(10.0, 0.0);   // 0.2 × 10 = 2px
-        double lx = 0.0, ly = 0.0;
-        double dummy_x = 0.0, dummy_y = 0.0;
-        (void)dummy_x; (void)dummy_y;
-        tr.setAimVelocity(10.0, 0.0);
-        const_cast<boss::AimTracker&>(tr).predictionLead(lx, ly);
-        check_near(lx, 2.0, 1e-9, "gain × 自身速度 = 2px");
-
-        // 大幅自身速度: 必须被硬上限夹住(任务书 §4.2 ②)。
-        tr.setAimVelocity(1e6, -1e6);
-        tr.predictionLead(lx, ly);
-        check_near(lx, 12.0, 1e-9, "★ 自运动项也必须被硬上限 12px 夹住");
-        check_near(ly, -12.0, 1e-9, "反方向同理");
-    }
-
-    // ③ 非法自身速度不许产生 NaN。
-    {
-        auto q = p;
-        q.self_motion_gain = 0.5;
-        boss::AimTracker tr;
-        tr.configure(q);
-        tr.beginFrame(dt);
-        double lx = 0.0, ly = 0.0;
-        tr.setAimVelocity(std::nan(""), std::numeric_limits<double>::infinity());
-        // setAimVelocity 内部会把非有限值归零, 所以这里读到的是 0 → 偏移 0。
-        // ★ 用变量喂 inf 而不是写 inf 字面量: 编译器会对 1.0/0.0 这种常量表达式
-        //   直接报 C2124(被零除)。
-        const double inf_v = std::numeric_limits<double>::infinity();
-        tr.selfMotionLead(inf_v, -inf_v, lx, ly);
-        check(std::isfinite(lx) && std::isfinite(ly), "非法自身速度不许产生 NaN");
     }
 }
 
-// ── [11] k̂ 与 aim_pid.h 的死区常数必须一致(两处重复写, 会被改歪) ────────────
-void test_khat_consistency()
+// ═══ [10] 常量真值表 ════════════════════════════════════════════════════════
+void test_constants()
 {
-    std::printf("[11] k̂/死区常数一致性\n");
-    // 在途窗口上限在本文件里是 kInflightWindowMaxS, 在 aim_pid.h 里是 kAimDeadTimeS。
-    // 两者必须相等 —— 否则窗口会超过真实死区, 导致过补偿发散。
-    check_near(boss::kInflightWindowMaxS, boss::kAimDeadTimeS, 1e-12,
-               "★ 在途窗口上限必须等于链路死区(两处常数不许改歪)");
-    check_near(boss::kCountsPerPixelDefault, 1.0, 1e-12,
-               "k̂ 默认值必须是 1.0(AM 的 kalman_counts_per_pixel 默认值)");
+    section("[10] 常量真值 (防再次抄错)");
+
+    // ★ 这三条是本轮复核抓出来的真错误, 必须钉死。
+    check_near(boss::kPredGateSizeRatioAlt, 0.8, 1e-12,
+               "★★ 尺寸系数真值 0.8(此前本项目写 0.75 —— 错)");
+    check_near(boss::kPredSelfMoveGatePx, 10.0, 1e-12,
+               "★★ 平台位移门真值 10.0(此前本项目写 3.5057 —— 错)");
+    check_near(boss::kPredNormalBlend, 0.05, 1e-12,
+               "★★ 正常低通混合 0.05(此前写成 1.0 直通 —— 反了)");
+
+    check_near(boss::kPredFactorRiseStep, 0.1, 1e-12, "爬升 0.1");
+    check_near(boss::kPredFactorFallStep, 0.2, 1e-12, "回落 0.2");
+    check_near(boss::kPredFactorMax, 1.0, 1e-12, "上限 1.0");
+    check_near(boss::kPredGateSizeRatio, 1.5, 1e-12, "门限系数 1.5");
+    check_near(boss::kPredGateMinPx, 30.0, 1e-12, "门限下限 30px");
+    check_near(boss::kPredFlipBlend, 0.02, 1e-12, "翻转混合 0.02");
+    check_near(boss::kVelBlendNew, 0.25, 1e-12, "速度混合 0.25");
+    check_near(boss::kVelBlendOld, 0.75, 1e-12, "速度混合 0.75");
+    check_near(boss::kVelBlendNew + boss::kVelBlendOld, 1.0, 1e-12,
+               "两个混合系数和为 1.0(不是漏掉归一)");
+    check_near(boss::kCoastDecayX, 0.95, 1e-12, "滑行衰减 X 0.95");
+    check_near(boss::kCoastDecayY, 0.8, 1e-12, "滑行衰减 Y 0.8");
+    check_near(boss::kDefaultAssocIou, 0.3, 1e-12,
+               "默认 IoU 门限 0.3(AM 的 tracking_iou_threshold)");
+    check_near(boss::kDefaultVelSampleMs, 20.0, 1e-12,
+               "默认速度采样窗 20ms(AM 的 tracking_velocity_sample_ms)");
+
+    boss::AimTrackerParams p;
+    check(p.min_hits == 3, "默认 min_hits = 3");
+    check(p.max_age == 5, "默认 max_age = 5");
+    check_near(p.pred_min_w, 20.0, 1e-12, "默认预测尺寸下限 20");
+    check_near(p.pred_max_w, 80.0, 1e-12, "默认预测尺寸上限 80");
+
+    // ★ 两个混合系数都是小量 ⇒ 输出是重低通。这条断言防止有人把 0.05 改成 1.0。
+    check(boss::kPredNormalBlend < 0.2 && boss::kPredFlipBlend < 0.2,
+          "★ 两个低通混合系数都是小量(正常 0.05 / 翻转 0.02)");
 }
 
-} // namespace
+}  // namespace
 
 int main()
 {
-    std::printf("=== aim_tracker_test (PID-EventSync 跟踪器) ===\n");
-    test_identity_sticky();
-    test_lifecycle();
-    test_lock_takeover();
-    test_velocity_window();
-    test_prediction_fsm();
-    test_lead_clamps();
-    test_two_clause_gate();
-    test_prediction_identity();
-    test_robustness();
-    test_param_clamps();
-    test_inflight_chain();
-    test_inflight_arbitration();
-    test_self_motion();
-    test_khat_consistency();
+    std::printf("=== aim_tracker_test (AimMagic 1.0.30 逐字移植回归) ===\n");
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    test_association();
+    test_lifecycle();
+    test_velocity();
+    test_coasting();
+    test_size_weight();
+    test_factor_fsm();
+    test_lead_uses_platform_velocity();
+    test_inplace_box_rewrite();
+    test_self_added_valves_default_off();
+    test_coast_offset_is_meaningful();
+    test_constants();
+
+    std::printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);
+    return g_fail == 0 ? 0 : 1;
 }

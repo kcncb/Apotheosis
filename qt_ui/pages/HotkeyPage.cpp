@@ -947,25 +947,28 @@ void HotkeyPage::buildBossAimCard()
     m_predictVelFloor->setSuffix(QString::fromUtf8(u8" px/s"));
 
     // ── PID-EventSync (本档唯一链路; 档位下拉已于 2026-09-16 删除) ──────────
-    // 原先那个「经典 PID / EventSync」下拉连着已删除的架构 —— 现在只有一条链路,
-    // 所以不再需要"选档"这个动作。
-    // 跟踪器四个参数 (默认值 = AimMagic 的 min_hits=3 / max_age=5)。
+    // ★★ 2026-09-16 二次重写: 跟踪器/预测已按 AimMagic 1.0.30 **逐字移植**
+    //    (docs/aimmagic-ground-truth.md)。键集合因此与 AM 的 Group 作用域一一对应:
+    //      esync_min_hits / esync_max_age / esync_assoc_iou / esync_vel_sample_ms
+    //      esync_pred_factor_x / esync_pred_factor_y / esync_pred_min_w / esync_pred_max_w
+    //    删掉的键(它们在 AM 里不存在或已被整条删除的链占用):
+    //      esync_assoc_radius_px(AM 没有距离半径) / esync_vel_window_ms(语义不同:
+    //      累加窗 vs 持有窗) / esync_counts_per_pixel_x/y / esync_inflight_window_ms /
+    //      esync_inflight_beta(AM 的像素域在途链 —— k̂ 双机下测不出来, 整条删除) /
+    //      esync_self_motion_gain(并入预测本身, AM 的提前量本来就吃自身位移)
     m_esyncMinHits = makeInt(1, 30, 3);
     m_esyncMaxAge = makeInt(1, 60, 5);
-    m_esyncAssocRadius = makeInt(5, 500, 80);
-    m_esyncAssocRadius->setSuffix(QString::fromUtf8(u8" px"));
-    m_esyncIoU = makeDouble(0.0, 1.0, 0.20, 0.05, 2);
-    m_esyncVelWindow = makeInt(0, 1000, 100);
-    m_esyncVelWindow->setSuffix(QString::fromUtf8(u8" ms"));
-    // ⑤ k̂(每计数像素): AM 的 kalman_counts_per_pixel_x/y, 用户手填, 默认 1.0。
-    m_esyncCountsPerPixelX = makeDouble(0.001, 10000.0, 1.0, 0.01, 4);
-    m_esyncCountsPerPixelY = makeDouble(0.001, 10000.0, 1.0, 0.01, 4);
-    // ⑤ 在途换算链: 窗口默认 0(关闭) —— 打开等于把在途补偿从计数域换成像素域。
-    m_esyncInflightWindow = makeInt(0, 46, 0);
-    m_esyncInflightWindow->setSuffix(QString::fromUtf8(u8" ms"));
-    m_esyncInflightBeta = makeDouble(0.0, 4.0, 1.0, 0.1, 2);
-    // ⑥ 自运动补偿: 默认 0(关闭)。
-    m_esyncSelfMotionGain = makeDouble(-1.0, 1.0, 0.0, 0.05, 2);
+    // AM 的 tracking_iou_threshold: 默认 0.30。
+    m_esyncIoU = makeDouble(0.0, 1.0, 0.30, 0.05, 2);
+    // AM 的 tracking_velocity_sample_ms: 默认 20, 域 [1, 1000]。
+    m_esyncVelSample = makeInt(1, 1000, 20);
+    m_esyncVelSample->setSuffix(QString::fromUtf8(u8" ms"));
+    // AM 的 prediction_factor_x/y: 无夹取, 默认 0(关闭)。
+    m_esyncPredFactorX = makeDouble(-1.0, 1.0, 0.0, 0.05, 2);
+    m_esyncPredFactorY = makeDouble(-1.0, 1.0, 0.0, 0.05, 2);
+    // AM 的 prediction_min_width / prediction_max_width: 默认 20 / 80。
+    m_esyncPredMinW = makeInt(1, 4000, 20);
+    m_esyncPredMaxW = makeInt(1, 4000, 80);
 
     const QString aimSpeedTip = QString::fromUtf8(
         u8"Kp：回路速度，单位 计数/(像素*秒)。唯一与游戏灵敏度挂钩的旋钮 —— 换档次/换游戏"
@@ -1008,71 +1011,69 @@ void HotkeyPage::buildBossAimCard()
     m_pidfInflight[0]->setToolTip(inflightTip);
     m_pidfInflight[1]->setToolTip(inflightTip);
 
-    // ── 跟踪器 / PID-EventSync ──────────────────────────────────────────────
+    // ── 跟踪器 / PID-EventSync (逐字移植 AimMagic 1.0.30) ────────────────────
     const QString esyncTrackerTip = QString::fromUtf8(
-        u8"跟踪器参数。默认值取自 AimMagic 的 min_hits=3 / max_age=5。\n"
+        u8"跟踪器参数。默认值【逐字取自 AimMagic 1.0.30 的 Group 作用域】："
+        u8"min_hits=3 / max_age=5 / IoU=0.30 / 速度采样窗=20ms。\n"
         u8"体系：每次推理先做「选靶」，再由跟踪器给这个框一个【跨帧稳定的身份】。"
         u8"身份稳了，提前量才能住在轨迹上、目标闪一下也不用清控制器状态。\n"
-        u8"确认命中帧数：连续命中多少帧才算「确认的轨迹」。注意它【不会】拖慢锁定 —— "
-        u8"目标一旦被选中就能立刻瞄(min_hits 大了会出现「刚露头几帧锁不上」，实测过这个坑)，"
-        u8"这个数只影响「锁定目标死了之后能不能自动转移到另一条轨迹」。\n"
-        u8"滑行帧数上限：漏帧多少帧后删除轨迹。它是【滑行窗口】——调大更能扛遮挡，"
-        u8"但目标真走掉之后会多追几拍残影；调小反应快，但一次普通漏检就可能被当成丢目标。");
+        u8"确认命中帧数(min_hits)：`hits` 累计到多少才算「够格输出」。"
+        u8"★ 判据是 `min_hits <= hits`，所以 hits 恰好等于它就算够格。"
+        u8"★ hits 是【累计】的 —— 漏帧【不清零】，只有轨迹被销毁才归零。\n"
+        u8"滑行帧数上限(max_age)：漏帧多少帧后删除轨迹。"
+        u8"★ 判据是 `max_age < misses`，所以漏【恰好】 max_age 帧时轨迹【仍然存活】，"
+        u8"要到 max_age+1 帧才删 —— 比字面意思多扛一帧。");
     m_esyncMinHits->setToolTip(esyncTrackerTip);
     m_esyncMaxAge->setToolTip(esyncTrackerTip);
 
     const QString esyncAssocTip = QString::fromUtf8(
-        u8"关联门限：判断「这一帧的框还是不是同一个目标」。\n"
-        u8"关联距离门限(px)：框心距离超过它就判为新目标。目标高速横穿时相邻两帧中心会拉得"
-        u8"很远，太小会不停新建轨迹(表现为身份乱跳、积分反复清零)。\n"
-        u8"关联重叠门限(IoU)：0 = 只靠最近邻。设成 0.2 时，与锁定目标重叠超过 20% 的框会被"
-        u8"优先判成「同一个目标」（粘滞），这是身份稳定的主要来源。");
-    m_esyncAssocRadius->setToolTip(esyncAssocTip);
+        u8"关联门限(IoU)：判断「这一帧的框还是不是同一个目标」。\n"
+        u8"★★ 这是逐字移植 AimMagic 的 tracking_iou_threshold，有两条与直觉不同的地方：\n"
+        u8"① AIMagic 【没有距离门限】—— 原版那个「关联距离门限(px)」是本项目自己加的，"
+        u8"已删除。两个框只要重叠不够就判为新目标，哪怕中心只差 1 像素。\n"
+        u8"② 比较用的是【严格大于】：IoU 恰好等于门限时【不算命中】。"
+        u8"所以默认 0.30 意味着「重叠必须真的超过 30%」。\n"
+        u8"调大的后果：目标高速横穿时相邻两帧重叠变少 → 不停新建轨迹 → 身份乱跳、"
+        u8"速度重新开始攒 → 预测永远起不来。调小则容易把两个相邻目标粘成一个。");
     m_esyncIoU->setToolTip(esyncAssocTip);
 
     const QString esyncVelTip = QString::fromUtf8(
-        u8"速度采样窗(ms)：目标速度 = 窗内位移 ÷ 窗时间，而不是逐帧差分。\n"
+        u8"速度采样窗(ms)：AimMagic 的 tracking_velocity_sample_ms，默认 20。\n"
+        u8"★★ 语义是【持有】而不是【累加】：距上次刷新的时间【不到】窗口时，"
+        u8"速度直接沿用旧值(而且**不刷新时间戳**，所以窗口会自然到期)。"
+        u8"超过窗口才重算，重算值是 `(位移/流逝秒)*0.25 + 旧值*0.75` —— 有 0.75 的惯性。\n"
+        u8"★ 这意味着速度是【慢慢逼近】真值的，不是一步到位。而且时间戳只在重算那一支刷新，"
+        u8"所以实际间隔会是窗口的好几倍(120fps + 20ms 窗 ⇒ 每 3 帧重算一次)。\n"
         u8"★ 这个量直接决定预测的输入质量：8.3ms 帧间隔下逐帧差分会把 ±0.5px 的框量化噪声"
-        u8"放大成几百 px/s 的假速度，喂给预测就是「准星嗡嗡抖」。100ms 窗能把噪声压到可用。\n"
-        u8"窗太短 → 速度抖、预测抖；窗太长 → 速度滞后，目标急停/换向时提前量收不回来。");
-    m_esyncVelWindow->setToolTip(esyncVelTip);
+        u8"放大成几百 px/s 的假速度，喂给预测就是「准星嗡嗡抖」。");
+    m_esyncVelSample->setToolTip(esyncVelTip);
 
-    // ⑤ k̂ 与在途换算链
-    const QString esyncKhatTip = QString::fromUtf8(
-        u8"每计数像素(k̂)：一个鼠标计数在游戏画面里等于多少像素。\n"
-        u8"★ 这是【你自己填的常量】，程序不会替你测 —— AimMagic 也是让用户在设置里填的"
-        u8"（它的 kalman_counts_per_pixel_x/y，默认就是 1.0）。\n"
-        u8"填法：在训练场里发 100 个计数，量一下准星在画面上走了多少像素，两者相除。\n"
-        u8"★ 默认 1.0 = 不换算（1 计数当 1 像素）。填错只会让在途补偿的强度不对，"
-        u8"不会让准星飞掉；但 1.0 通常不是你游戏的真实值，想用下面那项就得认真填。");
-    m_esyncCountsPerPixelX->setToolTip(esyncKhatTip);
-    m_esyncCountsPerPixelY->setToolTip(esyncKhatTip);
+    const QString esyncPredTip = QString::fromUtf8(
+        u8"提前量系数(AimMagic 的 prediction_factor_x/y)。默认 0 = 关闭。\n"
+        u8"★★ 逐字移植后有四处与常见直觉【相反】，请务必先读完：\n"
+        u8"① 提前量 = 系数 × 【平台位移】× 尺寸权重 × 状态机系数 ——"
+        u8"吃的是【你自己甩枪的速度】，不是目标速度。目标静止时提前量恒为 0。\n"
+        u8"② 系数涨落的完整条件是「目标每帧位移 > max(30, 0.8×框高)×(1+1.5×系数)"
+        u8"【且】自身每帧位移 > 10px」—— 两个都是【必要条件】，缺一不可。\n"
+        u8"③ 涨 0.1/帧、落 0.2/帧，夹在 [0,1]。落比涨快一倍。\n"
+        u8"④ 输出还要过一道【重低通】：正常混合 0.05、方向翻转时 0.02。"
+        u8"所以提前量是慢慢起来的(时间常数约 20 帧)，不是阶跃。\n"
+        u8"★ 尺寸权重吃的是【框高】：h<=下限时权重保持 1.0(不是 0)，"
+        u8"h>=上限时才归 0。想让预测生效，框高必须小于下面的上限。");
+    m_esyncPredFactorX->setToolTip(esyncPredTip);
+    m_esyncPredFactorY->setToolTip(esyncPredTip);
 
-    const QString esyncInflightTip = QString::fromUtf8(
-        u8"在途自身位移补偿（AimMagic 的「发送环」）：把已经发出去、游戏里已生效、"
-        u8"但画面还没回来的那批位移从误差里扣掉。\n"
-        u8"窗口(ms)：看多远之前发出去的指令。★ 上限被硬夹在 46ms —— 那就是本链路的真实死区，"
-        u8"超过它会把早已生效的指令再扣一遍，变成正反馈发散。默认 0 = 整条链关闭。\n"
-        u8"强度：AimMagic 在这一档是求和后直接除，没有额外增益（= 1.0）。\n"
-        u8"★★ 注意：窗口一开，程序会【自动把上面那个「在途补偿强度」置 0】—— 两者是"
-        u8"同一件事的两种做法（一个在像素域、一个在计数域），同时开会把同一批指令扣两次，"
-        u8"必定发散。所以这是【二选一】：窗口 = 0 时在途补偿走计数域（不需要 k̂，"
-        u8"那是已验证的路子）；窗口 > 0 时整条换成 AimMagic 的像素域做法，必须把上面的 k̂ 填对。\n"
-        u8"用法建议：默认保持 0。只有想完整复刻 AimMagic 形态时才打开这里。");
-    m_esyncInflightWindow->setToolTip(esyncInflightTip);
-    m_esyncInflightBeta->setToolTip(esyncInflightTip);
-
-    // ⑥ 自运动补偿
-    const QString esyncSelfMotionTip = QString::fromUtf8(
-        u8"自运动补偿：提前量正比于【你自己甩枪的速度】（AimMagic 的 runtime+0xC04 那一项）。\n"
-        u8"★★ 默认 0 = 关闭，而且强烈建议先不要开 ★★\n"
-        u8"这类项在本项目被删过一次：它把「像素/计数」这个标定增益放进了反馈回路内部，"
-        u8"标定不准就会在瞄点附近每拍反向，形成自持极限环（不是抖动，是持续来回摆）。\n"
-        u8"本实现加了三道夹取：默认 0、幅度上限 ±1.0、输出仍走提前量硬上限。\n"
-        u8"要开就从小往大试（0.05 起），一旦发现停在目标附近来回摆就立刻退回 0。\n"
-        u8"★ 另外：AimMagic 的预测系数还有第二个条件 —— 【你自己没在动时系数只落不涨】。"
-        u8"所以不开这一项时，即使目标在动，预测系数也涨不起来。");
-    m_esyncSelfMotionGain->setToolTip(esyncSelfMotionTip);
+    const QString esyncPredSizeTip = QString::fromUtf8(
+        u8"尺寸权重区间(AimMagic 的 prediction_min_width / prediction_max_width，"
+        u8"默认 20 / 80)。预测只对「这个尺寸范围内」的目标生效。\n"
+        u8"★★ 边界语义容易搞反，原文的形状是：\n"
+        u8"  框高 <= 下限  → 权重 = 1.0（【保持满权重】，不是 0）\n"
+        u8"  下限 < 框高 < 上限 → 权重 = (上限 − 框高) / (上限 − 下限)\n"
+        u8"  框高 >= 上限 → 权重 = 0（提前量被完全吃掉）\n"
+        u8"★ 注意权重吃的是【框高】。默认上限 80 意味着框高 80 像素以上的目标"
+        u8"完全不预测 —— 想覆盖更大的目标就把上限调大。");
+    m_esyncPredMinW->setToolTip(esyncPredSizeTip);
+    m_esyncPredMaxW->setToolTip(esyncPredSizeTip);
 
     // ── 尺度增益调度 ────────────────────────────────────────────────────────
     const QString scaleTip = QString::fromUtf8(
@@ -1244,24 +1245,18 @@ void HotkeyPage::buildBossAimCard()
     esyncGrid->addWidget(FormKit::fieldRow(
         QString::fromUtf8(u8"滑行帧数上限"), m_esyncMaxAge), 0, 1);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"关联距离门限"), m_esyncAssocRadius), 1, 0);
+        QString::fromUtf8(u8"关联重叠门限"), m_esyncIoU), 1, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"关联重叠门限"), m_esyncIoU), 1, 1);
+        QString::fromUtf8(u8"速度采样窗"), m_esyncVelSample), 1, 1);
+    // 预测(AM 的 prediction_factor_x/y + 尺寸权重区间)。
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"速度采样窗"), m_esyncVelWindow), 2, 0, 1, 2);
-    // ⑤ k̂(每计数像素) —— AM 的 kalman_counts_per_pixel, 用户手填, 默认 1.0。
+        QString::fromUtf8(u8"提前量系数 X"), m_esyncPredFactorX), 2, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"每计数像素 X"), m_esyncCountsPerPixelX), 3, 0);
+        QString::fromUtf8(u8"提前量系数 Y"), m_esyncPredFactorY), 2, 1);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"每计数像素 Y"), m_esyncCountsPerPixelY), 3, 1);
-    // ⑤ 在途换算链(AM 的发送环) —— 默认关闭(窗口 0)。
+        QString::fromUtf8(u8"预测尺寸下限"), m_esyncPredMinW), 3, 0);
     esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"在途换算窗"), m_esyncInflightWindow), 4, 0);
-    esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"在途换算强度"), m_esyncInflightBeta), 4, 1);
-    // ⑥ 自运动补偿 —— 默认 0(关闭)。
-    esyncGrid->addWidget(FormKit::fieldRow(
-        QString::fromUtf8(u8"自运动补偿"), m_esyncSelfMotionGain), 5, 0, 1, 2);
+        QString::fromUtf8(u8"预测尺寸上限"), m_esyncPredMaxW), 3, 1);
     layout->addLayout(esyncGrid);
 
     // ── 尺度调度 (2026-09-14 新增) ──────────────────────────────────────────
@@ -1314,21 +1309,14 @@ void HotkeyPage::buildBossAimCard()
             this, &HotkeyPage::saveUiToCurrentProfile);
     connect(m_scaleMin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &HotkeyPage::saveUiToCurrentProfile);
-    // 跟踪器 / EventSync (2026-09-15)。
-    for (auto* spin : {m_esyncMinHits, m_esyncMaxAge, m_esyncAssocRadius})
+    // 跟踪器 / 预测 (2026-09-16 逐字移植后重写)。
+    for (auto* spin : {m_esyncMinHits, m_esyncMaxAge, m_esyncVelSample,
+                       m_esyncPredMinW, m_esyncPredMaxW})
         connect(spin, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_esyncIoU, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_esyncVelWindow, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &HotkeyPage::saveUiToCurrentProfile);
-    // ⑤ k̂ / 在途换算链 + ⑥ 自运动补偿 (2026-09-15)。
-    for (auto* spin : {m_esyncCountsPerPixelX, m_esyncCountsPerPixelY,
-                       m_esyncInflightBeta, m_esyncSelfMotionGain})
+    for (auto* spin : {m_esyncIoU, m_esyncPredFactorX, m_esyncPredFactorY})
         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &HotkeyPage::saveUiToCurrentProfile);
-    connect(m_esyncInflightWindow, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &HotkeyPage::saveUiToCurrentProfile);
 
     m_rightLayout->addWidget(card);
 }
@@ -1712,17 +1700,15 @@ void HotkeyPage::loadProfileToUi(int runtimeIndex)
     m_predictMaxPx->setValue(hp.pidf_predict_max_px);
     m_predictVelFloor->setValue(hp.pidf_predict_vel_floor);
 
-    // 跟踪器 / PID-EventSync (2026-09-15; 档位下拉已于 2026-09-16 删除)
+    // 跟踪器 / 预测 (2026-09-16; 档位下拉已于 2026-09-16 删除)
     m_esyncMinHits->setValue(hp.esync_min_hits);
     m_esyncMaxAge->setValue(hp.esync_max_age);
-    m_esyncAssocRadius->setValue(hp.esync_assoc_radius_px);
     m_esyncIoU->setValue(static_cast<double>(hp.esync_assoc_iou));
-    m_esyncVelWindow->setValue(hp.esync_vel_window_ms);
-    m_esyncCountsPerPixelX->setValue(static_cast<double>(hp.esync_counts_per_pixel_x));
-    m_esyncCountsPerPixelY->setValue(static_cast<double>(hp.esync_counts_per_pixel_y));
-    m_esyncInflightWindow->setValue(hp.esync_inflight_window_ms);
-    m_esyncInflightBeta->setValue(static_cast<double>(hp.esync_inflight_beta));
-    m_esyncSelfMotionGain->setValue(static_cast<double>(hp.esync_self_motion_gain));
+    m_esyncVelSample->setValue(hp.esync_vel_sample_ms);
+    m_esyncPredFactorX->setValue(static_cast<double>(hp.esync_pred_factor_x));
+    m_esyncPredFactorY->setValue(static_cast<double>(hp.esync_pred_factor_y));
+    m_esyncPredMinW->setValue(hp.esync_pred_min_w);
+    m_esyncPredMaxW->setValue(hp.esync_pred_max_w);
 
     // ── Trigger ──
     m_triggerEnabled->setChecked(hp.trigger_enabled);
@@ -1818,17 +1804,15 @@ void HotkeyPage::saveUiToCurrentProfile()
     hp.pidf_predict_max_w=m_predictMaxW->value();
     hp.pidf_predict_damp=static_cast<float>(m_predictDamp->value());
 
-    // 跟踪器 / PID-EventSync (2026-09-15 新增; 档位下拉已于 2026-09-16 删除)
+    // 跟踪器 / 预测 (2026-09-16 逐字移植后重写)
     hp.esync_min_hits = m_esyncMinHits->value();
     hp.esync_max_age = m_esyncMaxAge->value();
-    hp.esync_assoc_radius_px = m_esyncAssocRadius->value();
     hp.esync_assoc_iou = static_cast<float>(m_esyncIoU->value());
-    hp.esync_vel_window_ms = m_esyncVelWindow->value();
-    hp.esync_counts_per_pixel_x = static_cast<float>(m_esyncCountsPerPixelX->value());
-    hp.esync_counts_per_pixel_y = static_cast<float>(m_esyncCountsPerPixelY->value());
-    hp.esync_inflight_window_ms = m_esyncInflightWindow->value();
-    hp.esync_inflight_beta = static_cast<float>(m_esyncInflightBeta->value());
-    hp.esync_self_motion_gain = static_cast<float>(m_esyncSelfMotionGain->value());
+    hp.esync_vel_sample_ms = m_esyncVelSample->value();
+    hp.esync_pred_factor_x = static_cast<float>(m_esyncPredFactorX->value());
+    hp.esync_pred_factor_y = static_cast<float>(m_esyncPredFactorY->value());
+    hp.esync_pred_min_w = m_esyncPredMinW->value();
+    hp.esync_pred_max_w = m_esyncPredMaxW->value();
 
     // ── Trigger ──
     hp.trigger_enabled       = m_triggerEnabled->isChecked();

@@ -133,25 +133,20 @@ private:
     QDoubleSpinBox* m_predictDamp{};                    // 方向翻转阻尼
     QSpinBox* m_predictMaxPx{};                         // 提前量硬上限 (px, 0=内置12)
     QSpinBox* m_predictVelFloor{};                      // 速度噪声门 (px/s)
-    // ── PID-EventSync 档 (2026-09-15 新增, 移植 AimMagic 1.0.30 全链路) ──────
-    // 跟踪器的四个参数。见 config.h 里 esync_* 的长注释。
+    // ── 跟踪器 / 预测 (2026-09-15 新增, 2026-09-16 按 AM 逐字移植重写) ────────
+    // 键集合与 AimMagic 1.0.30 的 Group 作用域一一对应, 见 config.h 的长注释与
+    // docs/aimmagic-ground-truth.md。★ 删掉的那些控件(关联距离/每计数像素/
+    // 在途换算窗/自运动补偿)在 AM 里【没有对应】或属于已整条删除的像素域链。
     // (档位下拉 m_aimMode 已于 2026-09-16 随「经典 PID」档一起删除。)
-    QSpinBox*       m_esyncMinHits{};       // 连续命中多少帧算确认轨迹
-    QSpinBox*       m_esyncMaxAge{};        // 漏帧多少帧后删除轨迹(滑行窗口)
-    QSpinBox*       m_esyncAssocRadius{};   // 关联最近邻门限 (px)
-    QDoubleSpinBox* m_esyncIoU{};           // 关联 IoU 阈值 (0 = 只靠最近邻)
-    QSpinBox*       m_esyncVelWindow{};     // 速度采样窗 (ms)
-    // ⑤ k̂(每计数像素) —— AM 的 kalman_counts_per_pixel_x/y, 用户手填, 默认 1.0。
-    //   ★ 与下面【已删除】的那一组输入框不是一回事: 那一组是"程序测出来的" k̂
-    //     (甩枪档 pid_calib 那条路, 双机架构下测不准), 这一对是"用户填的" k̂
-    //     (EventSync 档用的量, AM 也是让用户填)。见 config.h 里的长注释。
-    QDoubleSpinBox* m_esyncCountsPerPixelX{};
-    QDoubleSpinBox* m_esyncCountsPerPixelY{};
-    // ⑤ 在途换算链(AM 的发送环): 窗口默认 0 = 关闭; 打开后引擎会自动关掉计数域那项。
-    QSpinBox*       m_esyncInflightWindow{};   // 毫秒, 上限 = 死区 46ms
-    QDoubleSpinBox* m_esyncInflightBeta{};     // 强度, 1.0 = 与 AM 一致
-    // ⑥ 自运动补偿: 默认 0 = 关闭(本项目删过一次的那类项)。
-    QDoubleSpinBox* m_esyncSelfMotionGain{};
+    QSpinBox*       m_esyncMinHits{};       // 累计命中数下限 (AM min_hits = 3)
+    QSpinBox*       m_esyncMaxAge{};        // 滑行帧数上限 (AM max_age = 5)
+    QDoubleSpinBox* m_esyncIoU{};           // 关联 IoU 门限 (AM = 0.30, 严格大于)
+    QSpinBox*       m_esyncVelSample{};     // 速度采样窗 ms (AM = 20, 持有语义)
+    // AM 的 prediction_factor_x/y(无夹取) + prediction_min_width / max_width。
+    QDoubleSpinBox* m_esyncPredFactorX{};
+    QDoubleSpinBox* m_esyncPredFactorY{};
+    QSpinBox*       m_esyncPredMinW{};      // 尺寸权重下限(框高 <= 它时权重保持 1.0)
+    QSpinBox*       m_esyncPredMaxW{};      // 尺寸权重上限(框高 >= 它时权重归 0)
     // 【2026-09-13 删除】「每计数像素」的两个输入框 + 「测量」按钮 + 状态标签 +
     // 刷新定时器 (m_pxPerCount / m_measureBtn / m_measureStatus / m_measureTimer)。
     // 它们服务的 k̂ 只有前馈才需要, 而前馈已整条移除 —— 现在没有东西可填、可量了。

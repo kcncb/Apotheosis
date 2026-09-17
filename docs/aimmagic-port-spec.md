@@ -3,6 +3,27 @@
 > 来源语料：`C:\Users\Administrator\Desktop\AimMagic_RE\`（只读）
 > 对照基线：`docs/aimmagic-comparison.md` §10（秒锁）、§11（死区震荡）、§2（压枪）
 > 目标代码：`Apotheosis/mouse/aim_pid.cpp|h`、`Apotheosis/mouse/aim_motion.h`、`Apotheosis/runtime/mouse_thread_loop.cpp`
+>
+> ⚠️ **本文写于逐字移植之前，编号/行号是那一版的；真值一律以
+> `docs/aimmagic-ground-truth.md` 为准**（本文只修与它冲突的事实句，不重写结构）：
+> ①**档位枚举不是"列表下标"**，来自 `FUN_140056f10`/`FUN_1400579f0` 的内联立即数
+> —— `PID-Free = 0x8`、`PID-Kalman = 0xA`、`PID-Adaptive = 0xC`、
+> `PID-FrameSync == PID-EventSync = 0xD`（同值，只靠字符串区分，PID 算术完全相同），
+> 见 ground-truth §0.3 / §7.2（**枚举槽位的比较一律回反汇编读 `CMP <imm>`**）。
+> ②**D 项混合系数是 `1 − exp(−40π·dt)`（≈0.6476 @8.3ms），不是线性式**
+> —— 常数 `0x1401f8030 = −125.66370614359172 = −40π` 带负号，线性式在 8.3ms 下是
+> **−0.043**，且两者 `dt→0` 的极限不同（0 vs 1）⇒ 定性错误，见 ground-truth §0.11 / §8.3。
+> ③`FUN_1400579f0`（双轴外层）**不缺失**，完整 C 伪代码在 `ghidra_out\pid_core.txt` L752-921
+> （ground-truth §0.3）；已在 `mouse/aim_pid_am.h` 逐行移植（`boss::amPidAxisStep`，
+> 回归 `tests/aim_pid_am_test.cpp` **47 项**），但 **尚未接线进生产回路**
+> —— 生产仍走 `mouse/aim_pid.h`，见 ground-truth §7.4 / §8.3–§8.4。
+> ④`FUN_140089660`/`FUN_140089800`/`FUN_140089290`/`FUN_1400552e0` **不是选靶逻辑**，
+> 是 C++ 标准库容器辅助（`std::vector<Track>::insert` 步长 0x50、`std::vector<bool>`
+> 构造等；判据是开头的魔数倒数 `0x6666666666666667` + 除以 `0x50`）；
+> **真正的选靶打分器是 `FUN_140088ab0`**（外壳 `FUN_140088a30`，调用点 `FUN_1400824e0`），
+> 它读 `size_scoring_weight` / `distance_scoring_weight`
+> —— 但**打分公式仍未破解**，`center_scoring_weight` 是 0 引用的死键，
+> **在溯源清楚之前不许照抄那一行**，见 ground-truth §0.12 / §0.15 / §9.10–§9.11。
 
 ---
 
@@ -112,14 +133,21 @@ if (p_sched_e_hi > 0.0) {
 
 ## 2. 移植②：靶位记忆与"不重锁"（治"跳起来/露头秒锁"）
 
-### 2.1 目标形态（照抄它的三级选靶 + 生命周期）
+### 2.1 目标形态（照抄它的选靶 + 生命周期）
+> ⚠️ **2026-09-16 更正**：下面这段"三级选靶"是**移植前的旧描述**，其中
+> **②"最近邻（判据是平方距离）"是错的**。逐字移植时已确认：
+> AM 的关联判据是 **类别相等 + IoU 严格大于门限**，**没有距离半径**
+> （见 `docs/aimmagic-ground-truth.md` §4.2）。
+> 当前实现与回归见 `mouse/aim_tracker.h` + `tests/aim_tracker_test.cpp`。
+> ★ 另：AM **确有**一个独立的选靶打分器 `FUN_140088ab0`（外壳 `FUN_140088a30`，
+> 被 `FUN_1400824e0` 调用），**但它的公式至今未破解** —— 见 §0.15，
+> **不许照抄**。
 
 它的选靶（`FUN_1400824e0` 行 680-720）：
-
 ```
 ① 首选 trackId 一致的框（线性查找，粘滞）
-② 找不到 → 最近邻（判据是平方距离，不含置信度）
-③ 连最近邻都没有 → 沿用上一拍瞄点（§10 的核心）
+② 找不到 → 按 IoU 关联（★★ 原文如此修正：不是"最近邻平方距离"）
+③ 连 IoU 都不满足 → 沿用上一拍瞄点（§10 的核心）
 ```
 
 跟踪器生命周期：`min_hits = 3`、`max_age = 5`（`FUN_140089ac0` 行 448-450，命中计数 `track+0x2C`）。

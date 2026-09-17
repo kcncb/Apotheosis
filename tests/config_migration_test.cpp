@@ -223,7 +223,7 @@ int main()
     //   地变 —— 这条断言就是为了拦住那种改动。
     // ★ 2026-09-16: 原先的 aim_mode 键已删除(「经典 PID」档整档删除)。老配置里
     //   若还写着 aim_mode = 0, 必须被【忽略而不是报错】—— 见下面的专门一节。
-    std::printf("\n[7] EventSync 新增键: 不推进版本, 老配置取默认\n");
+    std::printf("\n[7] EventSync 键: 不推进版本, 老配置取 AM 默认\n");
     {
         // 老配置(v7, 完全没有 esync 键)
         const std::string p = write_config("esync_old.ini",
@@ -235,35 +235,28 @@ int main()
             const auto& hp = c.hotkeys[0];
             check(hp.pidf_mapping_version == 7,
                   "★ 新增键【不许】推进版本号(改的是版本号, 不是键)");
-            check(hp.esync_min_hits == 3, "缺键 -> min_hits 取 AM 默认 3");
-            check(hp.esync_max_age == 5, "缺键 -> max_age 取 AM 默认 5");
-            check(hp.esync_vel_window_ms == 100, "缺键 -> 速度采样窗 100ms");
-            check(hp.esync_assoc_radius_px == 80, "缺键 -> 关联门限 80px");
-            check(hp.esync_assoc_iou > 0.19f && hp.esync_assoc_iou < 0.21f,
-                  "缺键 -> IoU 门限 0.20");
-            // ⑤ k̂: 缺键必须取 1.0(不做换算 = 不生效), 【不是】0 ——
-            //   0 会被"防除零"的夹取改成 1.0, 语义上绕一圈还是 1.0; 但直接给
-            //   1.0 更明确: "用户没填 = 不换算"。
-            check(hp.esync_counts_per_pixel_x > 0.99f && hp.esync_counts_per_pixel_x < 1.01f,
-                  "缺键 -> k̂_x = 1.0(不做换算)");
-            check(hp.esync_counts_per_pixel_y > 0.99f && hp.esync_counts_per_pixel_y < 1.01f,
-                  "缺键 -> k̂_y = 1.0");
-            // ⑤ 在途换算链: 缺键必须【关闭】(窗口 0) —— 默认打开会改变老用户行为。
-            check(hp.esync_inflight_window_ms == 0,
-                  "★ 缺键 -> 在途换算窗 = 0(整条链关闭)");
-            check(hp.esync_inflight_beta > 0.99f && hp.esync_inflight_beta < 1.01f,
-                  "缺键 -> 在途换算强度 = 1.0(与 AM 一致)");
-            // ⑥ 自运动补偿: 缺键必须【关闭】(0) —— 它属于本项目删过一次的那类项。
-            check(hp.esync_self_motion_gain == 0.0f,
-                  "★ 缺键 -> 自运动补偿 = 0(关闭)");
+            // ★★ 2026-09-16 逐字移植: 这些默认值现在全部来自 AimMagic 1.0.30 的
+            //    Group 作用域(docs/aimmagic-ground-truth.md §2), 不再是本项目自选。
+            check(hp.esync_min_hits == 3, "缺键 -> min_hits = 3(AM 默认)");
+            check(hp.esync_max_age == 5, "缺键 -> max_age = 5(AM 默认)");
+            check(hp.esync_assoc_iou > 0.29f && hp.esync_assoc_iou < 0.31f,
+                  "★ 缺键 -> IoU 门限 = 0.30(AM tracking_iou_threshold)");
+            check(hp.esync_vel_sample_ms == 20,
+                  "★ 缺键 -> 速度采样窗 = 20ms(AM tracking_velocity_sample_ms)");
+            // ★ 预测: 默认必须【关闭】。factor 默认 0 是 AM 的 prediction_factor 默认。
+            check(hp.esync_pred_factor_x == 0.0f && hp.esync_pred_factor_y == 0.0f,
+                  "★ 缺键 -> 提前量系数 = 0(关闭, AM 默认)");
+            check(hp.esync_pred_min_w == 20, "缺键 -> 预测尺寸下限 = 20(AM 默认)");
+            check(hp.esync_pred_max_w == 80, "缺键 -> 预测尺寸上限 = 80(AM 默认)");
         }
     }
 
-    // ── [8] EventSync 参数的值域夹取 + 已删除的 aim_mode 键被忽略 ──────────
-    // ★ 2026-09-16: 档位键已删除。老配置里残留的 aim_mode(不管写 0 还是 1)必须被
-    //   安全地忽略: 既不报错, 也不影响任何参数 —— 因为那个档位已经不存在了,
-    //   "回到经典档"这件事在代码里已无对应物。
-    std::printf("\n[8] EventSync 参数夹取 + 已删除的 aim_mode 键被忽略\n");
+    // ── [8] EventSync 参数的值域夹取 + 已删除的键被忽略 ─────────────────────
+    // ★ 2026-09-16: 档位键 aim_mode 已删除。老配置里残留的 aim_mode(不管写 0 还是 1)
+    //   必须被安全地忽略: 既不报错, 也不影响任何参数。
+    // ★★ 同一次移植还删掉了 7 个键(见 config.cpp 的读取块), 它们也必须被安全忽略,
+    //   否则老用户升级后会看到一个致命的加载错误。
+    std::printf("\n[8] EventSync 参数夹取 + 已删除的键被忽略\n");
     {
         for (const char* mode : {"0", "1", "7", "-3"})
         {
@@ -280,12 +273,40 @@ int main()
                       + " 不影响其它键的读取");
         }
 
+        // ★★ 逐字移植删掉的 7 个键: 老配置里全写着也必须能加载, 且【不污染】任何键。
+        {
+            const std::string p = write_config("esync_removed.ini",
+                "pidf_mapping_version = 7",
+                "esync_min_hits = 7\n"
+                "esync_assoc_radius_px = 123\n"
+                "esync_vel_window_ms = 456\n"
+                "esync_counts_per_pixel_x = 0.5\n"
+                "esync_counts_per_pixel_y = 0.6\n"
+                "esync_inflight_window_ms = 30\n"
+                "esync_inflight_beta = 2.5\n"
+                "esync_self_motion_gain = 0.8\n");
+            Config c;
+            check(c.loadConfig(p),
+                  "★★ 残留 7 个已删除的键不报错(读后丢弃)");
+            if (!c.hotkeys.empty())
+            {
+                const auto& hp = c.hotkeys[0];
+                check(hp.esync_min_hits == 7,
+                      "已删除的键不影响相邻键的读取");
+                // ★ 关键: esync_vel_window_ms 的旧值(456)【绝不许】迁移到
+                //   esync_vel_sample_ms —— 两者语义完全不同(累加窗 vs 持有窗)。
+                check(hp.esync_vel_sample_ms == 20,
+                      "★★ 已删除的 vel_window_ms 不迁移到 vel_sample_ms(语义不同)");
+                check(hp.esync_pred_factor_x == 0.0f,
+                      "已删除的键不影响预测系数的默认值");
+            }
+        }
+
         // 参数越界 -> 夹到域内
         const std::string p2 = write_config("esync_range.ini",
             "pidf_mapping_version = 7",
             "esync_min_hits = 999\nesync_max_age = 0\n"
-            "esync_assoc_radius_px = 99999\nesync_assoc_iou = 5.0\n"
-            "esync_vel_window_ms = 99999\n");
+            "esync_assoc_iou = 5.0\nesync_vel_sample_ms = 99999\n");
         Config c2;
         c2.loadConfig(p2);
         if (!c2.hotkeys.empty())
@@ -295,46 +316,38 @@ int main()
                   "min_hits 被夹到 [1,30]");
             check(hp.esync_max_age >= 1 && hp.esync_max_age <= 60,
                   "max_age 被夹到 [1,60]");
-            check(hp.esync_assoc_radius_px <= 500 && hp.esync_assoc_radius_px >= 5,
-                  "关联门限被夹到 [5,500]");
             check(hp.esync_assoc_iou >= 0.0f && hp.esync_assoc_iou <= 1.0f,
                   "IoU 被夹到 [0,1]");
-            check(hp.esync_vel_window_ms >= 0 && hp.esync_vel_window_ms <= 1000,
-                  "速度采样窗被夹到 [0,1000]");
+            // ★ AM 的 tracking_velocity_sample_ms 域是 [1, 1000]。
+            check(hp.esync_vel_sample_ms >= 1 && hp.esync_vel_sample_ms <= 1000,
+                  "★ 速度采样窗被夹到 [1,1000](AM 的值域)");
         }
 
-        // ⑤⑥ 新键的值域夹取。
+        // 预测键的值域夹取。
         const std::string p3 = write_config("esync_range2.ini",
             "pidf_mapping_version = 7",
-            "esync_counts_per_pixel_x = 0\n"
-            "esync_counts_per_pixel_y = -5.0\nesync_inflight_window_ms = 9999\n"
-            "esync_inflight_beta = -1.0\nesync_self_motion_gain = 42.0\n");
+            "esync_pred_factor_x = 99.0\nesync_pred_factor_y = -99.0\n"
+            "esync_pred_min_w = 0\nesync_pred_max_w = 999999\n");
         Config c3;
         c3.loadConfig(p3);
         if (!c3.hotkeys.empty())
         {
             const auto& hp = c3.hotkeys[0];
-            check(hp.esync_counts_per_pixel_x > 0.99f && hp.esync_counts_per_pixel_x < 1.01f,
-                  "★ k̂_x = 0 必须回落到 1.0(不许除零)");
-            check(hp.esync_counts_per_pixel_y > 0.99f && hp.esync_counts_per_pixel_y < 1.01f,
-                  "★ k̂_y 为负必须回落到 1.0");
-            check(hp.esync_inflight_window_ms <= 46,
-                  "★★ 在途换算窗被夹到 46ms 死区(超过会把已生效指令再扣一次 -> 发散)");
-            check(hp.esync_inflight_beta >= 0.0f && hp.esync_inflight_beta <= 4.0f,
-                  "在途换算强度被夹到 [0,4]");
-            check(hp.esync_self_motion_gain >= -1.0f && hp.esync_self_motion_gain <= 1.0f,
-                  "★ 自运动补偿被夹到 [-1,1](硬上限, 与 aim_tracker.h 一致)");
+            // ★ AM 的 prediction_factor_x/y **没有夹取**(ground-truth §2.2)。
+            //   本项目为了不让准星飞出画面, 夹在 [-1, 1] —— 这是**有意偏差**,
+            //   且默认 0(关闭)时与 AM 逐位一致。
+            check(hp.esync_pred_factor_x >= -1.0f && hp.esync_pred_factor_x <= 1.0f,
+                  "★ 提前量系数被夹到 [-1,1](本项目有意偏差; AM 原文无夹取)");
+            check(hp.esync_pred_factor_y >= -1.0f && hp.esync_pred_factor_y <= 1.0f,
+                  "提前量系数 Y 同样被夹到 [-1,1]");
+            check(hp.esync_pred_min_w >= 1,
+                  "预测尺寸下限被夹到 >= 1(不许为 0, 否则权重公式除零)");
+            check(hp.esync_pred_max_w <= 4000,
+                  "预测尺寸上限被夹到上限");
+            // ★★ 关键不变式: 上限必须【严格大于】下限, 否则权重公式会除零/反号。
+            check(hp.esync_pred_max_w > hp.esync_pred_min_w,
+                  "★★ 预测尺寸上限必须严格大于下限(权重公式的分母)");
         }
-
-        // ★ k̂ 越界(过小)也必须被夹到域内(不是"回落到默认")。
-        const std::string p4 = write_config("esync_khat_small.ini",
-            "pidf_mapping_version = 7",
-            "esync_counts_per_pixel_x = 0.0000001\n");
-        Config c4;
-        c4.loadConfig(p4);
-        if (!c4.hotkeys.empty())
-            check(c4.hotkeys[0].esync_counts_per_pixel_x >= 0.0009f,
-                  "k̂ 过小被夹到下限 0.001(AM 的范围下界)");
     }
 
     std::printf("\n=== %d 项失败 ===\n", g_failures);

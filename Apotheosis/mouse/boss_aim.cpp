@@ -21,14 +21,14 @@ bool sameSlot(const TargetSlot& a, const TargetSlot& b) noexcept
 // 见 boss_aim.h 顶部的架构说明。
 
 // EventSync 档: 跟踪器参数是否与上一拍相同(相同就不重新 configure,
-// 免得每拍重建轨迹表、把速度采样窗清空)。
+// 免得每拍重建轨迹表、把速度状态清空)。
 bool sameTrackerParams(const AimTrackerParams& a, const AimTrackerParams& b) noexcept
 {
-    return a.min_hits == b.min_hits
+    return a.enable_tracking == b.enable_tracking
+        && a.min_hits == b.min_hits
         && a.max_age == b.max_age
-        && a.assoc_radius_px == b.assoc_radius_px
         && a.assoc_iou == b.assoc_iou
-        && a.vel_window_s == b.vel_window_s
+        && a.vel_sample_ms == b.vel_sample_ms
         && a.pred_factor_x == b.pred_factor_x
         && a.pred_factor_y == b.pred_factor_y
         && a.pred_min_w == b.pred_min_w
@@ -71,14 +71,12 @@ void AimEngine::reset()
     esync_configured_ = false;
 }
 
-// ── ⑤ 在途账本登记 (AM 的发送环) ─────────────────────────────────────────────
-//
-// 由 mouse_thread_loop.cpp 在 sendRawMove 【之后】调用 —— 登的必须是真正发出去的
-// 整数计数(不是 PID 输出里的零头, 那部分没发出去, 由 carry 攒到下一拍)。
-void AimEngine::noteAimSend(int dx, int dy)
-{
-    esync_tracker_.noteSend(dx, dy);
-}
+// ── 【2026-09-16 删除】noteAimSend (AM 的发送环账本) ─────────────────────────
+// 它登记"每拍发出去的计数", 供像素域在途补偿(inflightPixels)求和后 ÷ k̂。
+// 复核 AM 语料后确认: 那条链是 FrameSync/EventSync 档才消费的, 且需要 k̂ ——
+// 而 k̂ 在双机架构下无法测量。整条像素域在途补偿已随 k̂ 一起删除,
+// 在途补偿现在只有计数域一种落点(AimPidParams::inflight_beta)。
+// 详见 docs/aimmagic-ground-truth.md §6 与 §8。
 
 bool AimEngine::selectorConfigChanged(const EngineInput& in) const{
     if (!selector_ || selector_slots_.size() != in.target_slots.size()
@@ -191,7 +189,7 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         //   所以不存在"拿着旧状态追新目标"的风险。
         //
         // 跟踪器仍然要推进一帧(空观测), 让漏帧计数增长、超龄轨迹被淘汰。
-        esync_tracker_.beginFrame(dt);
+        esync_tracker_.beginFrame(dt, in.now_s);
         esync_tracker_.endFrame();
         out.esync_active = true;
         out.esync_track_id = esync_tracker_.lockedId();
@@ -200,8 +198,10 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         if (lt)
         {
             out.esync_track_hits = lt->hits;
-            out.esync_track_age = lt->age;
-            out.esync_track_confirmed = lt->confirmed;
+            out.esync_track_age = lt->misses;
+            // ★ AM 的"够格输出"判据(ground-truth §4.3)。滑行中的轨迹 misses > 0,
+            //   仍算 active 但不再 confirmed。
+            out.esync_track_confirmed = esync_tracker_.emits(*lt);
             out.esync_vel_x = lt->vel_x;
             out.esync_vel_y = lt->vel_y;
             out.esync_vel_valid = lt->vel_valid;
@@ -293,9 +293,9 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
             esync_params_ = in.esync;
             esync_configured_ = true;
         }
-        esync_tracker_.beginFrame(dt);
+        esync_tracker_.beginFrame(dt, in.now_s);
         // 只看【本帧真的有观测】的框: coasting(selector 自己在滑行)的框不喂跟踪器,
-        // 否则会把预测出来的假位移当成观测喂进速度采样窗 —— 那是正反馈。
+        // 否则会把预测出来的假位移当成观测喂进速度估计 —— 那是正反馈。
         if (!out.coasting)
         {
             TrackBox tbl{};
@@ -303,8 +303,9 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
             tbl.y = out.observed_bbox.y;
             tbl.w = out.observed_bbox.width;
             tbl.h = out.observed_bbox.height;
-            esync_tracker_.offer(tbl, out.observed_bbox.x + out.observed_bbox.width * 0.5,
-                                 out.observed_bbox.y + out.observed_bbox.height * 0.5);
+            // ★ class_id 是 AM 关联的【必要条件】(类别不等的轨迹不参与匹配)。
+            //   本项目 selector 已经按类别选过, 所以传选中框的类别即可。
+            esync_tracker_.offer(tbl, out.class_id);
         }
         esync_tracker_.endFrame();
 
@@ -315,19 +316,18 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         {
             out.esync_track_id = lt->id;
             out.esync_track_hits = lt->hits;
-            out.esync_track_age = lt->age;
-            out.esync_track_confirmed = lt->confirmed;
+            out.esync_track_age = lt->misses;
+            out.esync_track_confirmed = esync_tracker_.emits(*lt);
             out.esync_vel_x = lt->vel_x;
             out.esync_vel_y = lt->vel_y;
             out.esync_vel_valid = lt->vel_valid;
             out.esync_pred_k_x = lt->pred_k_x;
             out.esync_pred_k_y = lt->pred_k_y;
             // 身份切换判据: 跟踪器身份变化【就是】换目标。跟踪器的 id 有粘滞性,
-            // 它换号只发生在真换了目标(旧轨迹死了)。★ 不需要旧的"瞄点跳 >=25px"闸,
-            // 而且少了它, "小跳变真换目标"就不再漏判(实测 2282 次里 1256 次跳 <25px)。
+            // 它换号只发生在真换了目标(旧轨迹死了)。
             out.motion_suppressed = (esync_locked_track_ != -1 && lt->id != esync_locked_track_);
             out.current_track_id = lt->id;
-            out.coasting = (lt->age > 0);
+            out.coasting = (lt->misses > 0);
         }
         else
         {
@@ -401,12 +401,57 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
         const double self_vy = anchor_filter_y_.velocity();
         const bool ok = anchor_filter_x_.velocityValid()
                      && anchor_filter_y_.velocityValid();
-        esync_tracker_.setAimVelocity(ok ? self_vx : 0.0, ok ? self_vy : 0.0);
+        // ★★ 这是 AM 的 `runtime+0xC04/+0xC08`(平台/自身瞄准速度)的等价输入。
+        //    AM 的提前量 = 用户系数 × 【这个量】× 尺寸权重 × 每轨系数 —— 它预测的是
+        //    "自己在甩、画面还没回来"那一部分, **不是"目标会往哪走"**。
+        esync_tracker_.setPlatformVelocity(ok ? self_vx : 0.0, ok ? self_vy : 0.0);
     }
 
     double lead_x = 0.0;
     double lead_y = 0.0;
     const bool active = esync_tracker_.predictionLead(lead_x, lead_y);
+
+    // ── 滑行外推的消费 (AM FUN_14006e470 的第二步) ───────────────────────────
+    //
+    // AM 的轨迹在漏检期间**继续按速度外推位置**, 并且带两轴不对称衰减
+    // (X ×0.95 / Y ×0.8)。这个外推出来的位置就是它喂给下游的框心 ——
+    // 也就是说: 目标被遮挡的那几帧, AM 的准星**继续跟着预测的轨迹走**,
+    // 而不是停在最后一次观测上。
+    //
+    // ★ 消费点是这里, 而不是 `predictionLead()` 的返回值: 那个返回值是
+    //   【提前量】(平台位移链), 与滑行外推是两条独立的量。两者都加到瞄点上,
+    //   顺序无所谓(都是加法), 但必须**都加**。
+    //
+    // ★ 只在 `coasting`(misses > 0)时取外推值:
+    //   有观测的那一帧, `out_cx/out_cy` 就等于观测到的框心, 取它也是等价的,
+    //   但显式限定在滑行期能让"本拍到底用了观测还是外推"一眼可查。
+    bool consumed_coast = false;
+    if (const auto* lt = esync_tracker_.locked())
+    {
+        if (lt->misses > 0)
+        {
+            // 观测框心(当前瞄点的基础)与外推框心的差, 就是这一拍要补的滑行位移。
+            const double obs_cx =
+                static_cast<double>(out.observed_bbox.x)
+                + static_cast<double>(out.observed_bbox.width) * 0.5;
+            const double obs_cy =
+                static_cast<double>(out.observed_bbox.y)
+                + static_cast<double>(out.observed_bbox.height) * 0.5;
+            const double coast_dx = lt->out_cx - obs_cx;
+            const double coast_dy = lt->out_cy - obs_cy;
+            if (std::isfinite(coast_dx) && std::isfinite(coast_dy))
+            {
+                out.anchor.x = static_cast<float>(
+                    static_cast<double>(out.anchor.x) + coast_dx);
+                out.anchor.y = static_cast<float>(
+                    static_cast<double>(out.anchor.y) + coast_dy);
+                consumed_coast = true;
+                out.coast_offset_x = static_cast<float>(coast_dx);
+                out.coast_offset_y = static_cast<float>(coast_dy);
+            }
+        }
+    }
+    out.coast_consumed = consumed_coast;
 
     // 预测关(系数 0)时 predictionLead 恒返回 (0,0) —— 与"不做预测"逐位相同。
     last_predict_width_ = static_cast<float>(out.bbox.width);
@@ -415,8 +460,10 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
 
     out.predict_lead_x = last_predict_lead_x_;
     out.predict_lead_y = last_predict_lead_y_;
+    // ★ 尺寸权重吃【框高】(AM FUN_14006e470 L107 用 pfVar14[2] = 高)。
+    //   此处此前传的是 bbox.width —— 与 AM 不符, 已修。
     out.predict_size_weight =
-        static_cast<float>(esync_tracker_.sizeWeight(static_cast<double>(out.bbox.width)));
+        static_cast<float>(esync_tracker_.sizeWeight(static_cast<double>(out.bbox.height)));
     out.predict_active = active;
 
     out.anchor.x = static_cast<float>(static_cast<double>(out.anchor.x) + lead_x);
@@ -432,44 +479,20 @@ EngineOutput AimEngine::tick(const EngineInput& in, double dt)
     double err_px_x = static_cast<double>(out.anchor.x) - in.crosshair_x;
     double err_px_y = static_cast<double>(out.anchor.y) - in.crosshair_y;
 
-    // ─ ⑤ 在途自身位移补偿 (AM 的发送环 ÷ k̂) ────────────────────────────────
+    // ── 在途补偿: 只有【计数域】这一种 (2026-09-16 定稿) ─────────────────────
     //
-    // AM: FUN_140067000 行 1172-1209 —— 把"已经发出去、还没生效"的计数求和, 再
-    // ÷ counts_per_pixel 换回【像素】, 从误差里扣掉。
-    //
-    // ★★ 与 aim_pid.h 的【计数域】在途补偿(u -= beta*N/W)的关系: 两者是同一条 Smith
-    //    预测器的两种做法, 严格【二选一】—— 同开会把同一批在途指令扣两次 =
-    //    过补偿 = 正反馈发散(见 aim_pid.h 的 inflight_beta 要点①)。
-    //    怎么选(见下面的 am_inflight): 换算窗 > 0 时用 AM 这一种, 否则用计数域那种。
-    //   ★ 窗口 0(默认)时 inflightPixels() 恒返回 0 —— 这里就是恒等变换。
-    {
-        double if_x = 0.0;
-        double if_y = 0.0;
-        esync_tracker_.inflightPixels(if_x, if_y);
-        out.esync_inflight_x = static_cast<float>(if_x);
-        out.esync_inflight_y = static_cast<float>(if_y);
-        err_px_x -= if_x;
-        err_px_y -= if_y;
-    }
-
-    // 控制器参数直接来自配置, 只有【在途补偿落在哪一域】这一件事要在这里裁决。
-    //
-    // ★★ 为什么判据是"换算窗 > 0"而不是"档位" ★★
-    //   用户把「在途换算窗」打开 = 他要用 AM 的像素域做法, 此时必须把计数域那项
-    //   置 0, 否则同一批在途指令被扣两次, 必定发散。
-    //   而窗口是 0(默认)时 AM 那条链根本没有在跑(inflightPixels() 恒 0), 这时
-    //   计数域那项就是【唯一的在途补偿】, 绝不能顺手把它关掉 —— 实测证据:
-    //   beta = 0 不是"关掉一个可选优化", 而是【拆掉主刹车】(400px 甩枪后尾段
-    //   几百像素的自持极限环, 60fps 直接发散; 生产点 1.6 在 60/120/240/1000fps
-    //   尾段都是 0.295px)。见 CLAUDE.md 的"在途自身位移补偿"要点。
-    const bool am_inflight = AimTracker::amTakesOverInflight(in.esync);
+    // ★★ 历史: 本项目曾同时存在两种在途补偿 —— ① 计数域(`AimPidParams::inflight_beta`,
+    //    `u -= beta*N/W`) 与 ② 像素域(AM 的发送环 ÷ k̂)。当时用
+    //    `AimTracker::amTakesOverInflight()` 裁决"二选一"。
+    //    2026-09-16 复核 AM 语料后确认: AM 的那条像素域链其实是
+    //    **FrameSync / EventSync 档**才消费的(kalman_counts_per_pixel 的名字是误导),
+    //    而本项目是单档移植, 且 k̂ 在双机架构下无法测量 —— 所以**整条 ② 已删除**,
+    //    连同 `counts_per_pixel_*` / `inflight_window_s` / `inflight_beta` /
+    //    `self_motion_gain` 四个参数一起(AM 里没有对应键, ground-truth §2.5)。
+    //    现在在途补偿只有一个落点: 计数域, 由下面的 pid 参数承担。
+    //    ★ 这【不是】把 beta 清零 —— beta 仍是生产点的 1.6(唯一的主刹车)。
     AimPidParams pid_x_cfg = in.pid_x;
     AimPidParams pid_y_cfg = in.pid_y;
-    if (am_inflight)
-    {
-        pid_x_cfg.inflight_beta = 0.0;
-        pid_y_cfg.inflight_beta = 0.0;
-    }
     pid_x_.configure(pid_x_cfg);
     pid_y_.configure(pid_y_cfg);
 

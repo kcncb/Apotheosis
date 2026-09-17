@@ -114,6 +114,13 @@ struct EngineInput
 
     // ── 跟踪器与预测参数 (移植 AimMagic 1.0.30 全链路) ─────────────────────
     AimTrackerParams esync{};
+
+    // 本拍的单调时钟读数(秒)。跟踪器的速度采样窗按 **AM 的做法用时间戳比较**
+    // (AM 的 tracking_velocity_sample_ms 是毫秒墙钟量), 所以必须给它一个
+    // 单调时钟 —— 用"拍数 × dt"累加也可以, 但那样窗的边界会随 dt 抖动,
+    // 而 AM 的语义是"两次观测的真实间隔超过 20ms 就重算"。
+    // 调用方(mouse_thread_loop.cpp)填 std::chrono::steady_clock 的读数。
+    double now_s = 0.0;
 };
 
 struct EngineOutput
@@ -134,6 +141,13 @@ struct EngineOutput
     float predict_lead_y = 0.0f;      // 同上, Y
     float predict_size_weight = 0.0f; // 尺寸权重 (maxW-w)/(maxW-minW), 0..1
     bool predict_active = false;
+
+    // ── 滑行外推遥测 (2026-09-16, 逐字移植 AM 的 coasting) ───────────────────
+    // AM 的轨迹在漏检期间按速度外推位置(X ×0.95 / Y ×0.8 衰减), 并把外推结果
+    // 直接加在框心上喂给下游。coast_consumed = 本拍真的用了外推值(即 misses > 0)。
+    bool  coast_consumed = false;
+    float coast_offset_x = 0.0f;      // 本拍滑行外推补上的 X 位移(像素)
+    float coast_offset_y = 0.0f;      // 同上, Y
 
     // ── 新PID 的接入点 ─────────────────────────────────────────────────────
     // 误差 = 瞄点 - 准星(单位: 检测图像素, 浮点), 输出 = 整数鼠标计数。
@@ -196,10 +210,10 @@ struct EngineOutput
     double esync_pred_k_y = 0.0;
     int    esync_track_id = -1;        // 跟踪器身份(与 current_track_id 不同源)
     int    esync_track_count = 0;      // 本拍存活轨迹数
-    // ⑤ 在途自身位移补偿(AM 的发送环 ÷ k̂), 单位【像素】, 已从误差里扣掉。
-    //   ★ k̂ = 1.0(默认)时它 = "计数当像素"; 窗口 0(默认)时恒为 0 = 不参与。
-    double esync_inflight_x = 0.0;
-    double esync_inflight_y = 0.0;
+    // ── 【2026-09-16 删除】esync_inflight_x/y ────────────────────────────────
+    // 它们记录像素域在途补偿(AM 发送环 ÷ k̂)扣掉的量。整条链已随 k̂ 一起删除
+    // (AM 里那条链由 FrameSync/EventSync 档消费, 且 k̂ 在双机架构下无法测量),
+    // 在途补偿现在只有计数域一种落点。见 docs/aimmagic-ground-truth.md §6。
 };
 
 class AimEngine
@@ -211,11 +225,8 @@ public:
     void reset();
     EngineOutput tick(const EngineInput& in, double dt);
 
-    // ★ ⑤ 把本拍【实际发出去】的整数计数登进在途账本(AM 的发送环), 下一拍的误差
-    //   合成会按 k̂ 换成像素扣掉。
-    //   调用点在 mouse_thread_loop.cpp 的 sendRawMove 之后(登的必须是真发出去的值)。
-    //   窗口配置为 0(默认)时它是空操作 —— 账本记了但没人读。
-    void noteAimSend(int dx, int dy);
+    // ── 【2026-09-16 删除】noteAimSend(int, int) ─────────────────────────────
+    // 它是 AM 发送环的登记入口, 供像素域在途补偿使用。整条链已删除。
     int lockedTrackId() const { return current_id_; }
     const std::vector<Track>& tracks() const { return tracks_; }
 

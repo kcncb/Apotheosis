@@ -562,22 +562,38 @@ bool Config::loadConfig(const std::string& filename)
                 sec, "esync_min_hits", hk.esync_min_hits));
             hk.esync_max_age = static_cast<int>(get_long(
                 sec, "esync_max_age", hk.esync_max_age));
-            hk.esync_assoc_radius_px = static_cast<int>(get_long(
-                sec, "esync_assoc_radius_px", hk.esync_assoc_radius_px));
             hk.esync_assoc_iou = static_cast<float>(get_double(
                 sec, "esync_assoc_iou", hk.esync_assoc_iou));
-            hk.esync_vel_window_ms = static_cast<int>(get_long(
-                sec, "esync_vel_window_ms", hk.esync_vel_window_ms));
-            hk.esync_counts_per_pixel_x = static_cast<float>(get_double(
-                sec, "esync_counts_per_pixel_x", hk.esync_counts_per_pixel_x));
-            hk.esync_counts_per_pixel_y = static_cast<float>(get_double(
-                sec, "esync_counts_per_pixel_y", hk.esync_counts_per_pixel_y));
-            hk.esync_inflight_window_ms = static_cast<int>(get_long(
-                sec, "esync_inflight_window_ms", hk.esync_inflight_window_ms));
-            hk.esync_inflight_beta = static_cast<float>(get_double(
-                sec, "esync_inflight_beta", hk.esync_inflight_beta));
-            hk.esync_self_motion_gain = static_cast<float>(get_double(
-                sec, "esync_self_motion_gain", hk.esync_self_motion_gain));
+            hk.esync_vel_sample_ms = static_cast<int>(get_long(
+                sec, "esync_vel_sample_ms", hk.esync_vel_sample_ms));
+            // 预测补偿 (AM 的 AimKey 作用域)。
+            hk.esync_pred_factor_x = static_cast<float>(get_double(
+                sec, "esync_pred_factor_x", hk.esync_pred_factor_x));
+            hk.esync_pred_factor_y = static_cast<float>(get_double(
+                sec, "esync_pred_factor_y", hk.esync_pred_factor_y));
+            hk.esync_pred_min_w = static_cast<int>(get_long(
+                sec, "esync_pred_min_w", hk.esync_pred_min_w));
+            hk.esync_pred_max_w = static_cast<int>(get_long(
+                sec, "esync_pred_max_w", hk.esync_pred_max_w));
+            // ★★ 迁移 (2026-09-16): 下面这些键在 AM 里【没有对应】, 是此前"按思路
+            //    适配"进来的, 已整条删除。老配置里若还写着它们, 读入时【忽略】
+            //    (不报错) —— 它们已经没有任何消费者, 无法"回到"那个行为:
+            //      esync_assoc_radius_px   (AM 的关联没有距离半径)
+            //      esync_vel_window_ms     (AM 键名是 tracking_velocity_sample_ms)
+            //      esync_counts_per_pixel_x/y (AM 的 k̂ 只被 FrameSync/EventSync 档消费,
+            //                                  且本项目这条链已删除 —— 见 ground-truth §6)
+            //      esync_inflight_window_ms / esync_inflight_beta (整条像素域在途链已删)
+            //      esync_self_motion_gain  (AM 没有"额外增益", 平台位移直接乘用户系数)
+            //    ★ 注意 esync_vel_window_ms 的【旧值 100】不能迁到新键
+            //      esync_vel_sample_ms 上 —— 两者语义不同(旧的是"累加窗", 新的是
+            //      "沿用旧值的窗"), 直接搬会把默认 20 变成 100。所以新键从默认值起。
+            (void)get_long(sec, "esync_assoc_radius_px", 0);
+            (void)get_long(sec, "esync_vel_window_ms", 0);
+            (void)get_double(sec, "esync_counts_per_pixel_x", 0.0);
+            (void)get_double(sec, "esync_counts_per_pixel_y", 0.0);
+            (void)get_long(sec, "esync_inflight_window_ms", 0);
+            (void)get_double(sec, "esync_inflight_beta", 0.0);
+            (void)get_double(sec, "esync_self_motion_gain", 0.0);
             // ★★ 迁移 (2026-09-14): pidf_mapping_version < 5 的配置里, pidf_inflight_x/y
             //    存的是【旧语义】(像素/拍的补偿系数, 或早期"停用"阶段留下的占位 0)。
             //    这两种老值放到新语义(无量纲 beta)下都是错的:
@@ -917,40 +933,38 @@ bool Config::loadConfig(const std::string& filename)
             hk.aim_scale_base_h = 0.0f;
 
         // ─ PID-EventSync (本档唯一链路) ─────────────────────────────────────
+        // ★★ 2026-09-16: 夹取域已按 AM 1.0.30 重写(ground-truth §2.1/§2.2)。
+        //    原则: AM 的解析器【没有夹取】的键, 这里也不夹(只挡 NaN/Inf);
+        //    AM 有夹取的键, 用 AM 的域。
         if (!std::isfinite(hk.esync_assoc_iou))
-            hk.esync_assoc_iou = 0.20f;
-        // min_hits: 1..30。1 = 来一帧就确认(AM 有 min_hits=3, 但本项目上游 selector
-        //   已经做过一轮选靶, 不需要在这里再重复"确认"这道闸; 大了只会拖慢换锁)。
-        hk.esync_min_hits = std::clamp(hk.esync_min_hits, 1, 30);
-        // max_age: 1..60 帧。跟踪器内部还会做 max(min_hits+1, max_age)(AM 同款保护),
-        //   所以这里只夹物理上说得通的域。
-        hk.esync_max_age = std::clamp(hk.esync_max_age, 1, 60);
-        // 关联门限: 5..500px。太小 = 正常横穿也会被当成"新目标"。
-        hk.esync_assoc_radius_px = std::clamp(hk.esync_assoc_radius_px, 5, 500);
-        // IoU 阈值: 0..1。0 = 只靠最近邻(IoU 这道闸关掉)。
+            hk.esync_assoc_iou = 0.30f;
+        // IoU 阈值: 0..1(AM 的 UI from/to 就是 0..1)。0 = 关联那道闸关掉。
         hk.esync_assoc_iou = std::clamp(hk.esync_assoc_iou, 0.0f, 1.0f);
-        // 速度采样窗: 0..1000ms。0 = 逐帧重算(保留这个取值是为了能对照实验;
-        //   8.3ms 拍间隔下逐帧差分噪声有几百 px/s, 生产不该用 0)。
-        hk.esync_vel_window_ms = std::clamp(hk.esync_vel_window_ms, 0, 1000);
+        // min_hits: 1..30。AM 默认 3, 本项目沿用同值。
+        hk.esync_min_hits = std::clamp(hk.esync_min_hits, 1, 30);
+        // max_age: 1..60 帧。AM 默认 5。
+        hk.esync_max_age = std::clamp(hk.esync_max_age, 1, 60);
+        // 速度采样窗: ★ AM 的解析器夹取域就是 [1, 1000](anchors.txt L21702-21711),
+        //   照抄。默认 20ms(= AM)。
+        hk.esync_vel_sample_ms = std::clamp(hk.esync_vel_sample_ms, 1, 1000);
 
-        // ⑤ k̂: 非法(非有限/非正)一律回落到 1.0(不做换算), 并夹到 AM 的域 [0.001, 10000]。
-        if (!std::isfinite(hk.esync_counts_per_pixel_x) || hk.esync_counts_per_pixel_x <= 0.0f)
-            hk.esync_counts_per_pixel_x = 1.0f;
-        hk.esync_counts_per_pixel_x = std::clamp(hk.esync_counts_per_pixel_x, 0.001f, 10000.0f);
-        if (!std::isfinite(hk.esync_counts_per_pixel_y) || hk.esync_counts_per_pixel_y <= 0.0f)
-            hk.esync_counts_per_pixel_y = 1.0f;
-        hk.esync_counts_per_pixel_y = std::clamp(hk.esync_counts_per_pixel_y, 0.001f, 10000.0f);
-        // ⑤ 在途窗口: 上限是真实链路死区 46ms —— 超过它会把早已生效的指令再扣一次,
-        //   正反馈发散(CLAUDE.md 在途补偿要点①)。0 = 关闭。
-        hk.esync_inflight_window_ms = std::clamp(hk.esync_inflight_window_ms, 0, 46);
-        // ⑤ 在途增益: 非有限回落 1.0; 0..4 是"比 AM 更激进"的可用区间。
-        if (!std::isfinite(hk.esync_inflight_beta) || hk.esync_inflight_beta < 0.0f)
-            hk.esync_inflight_beta = 1.0f;
-        hk.esync_inflight_beta = std::clamp(hk.esync_inflight_beta, 0.0f, 4.0f);
-        // ⑥ 自运动增益: 非有限回落 0(关闭); 幅度夹在 ±1.0(与 aim_tracker.h 一致)。
-        if (!std::isfinite(hk.esync_self_motion_gain))
-            hk.esync_self_motion_gain = 0.0f;
-        hk.esync_self_motion_gain = std::clamp(hk.esync_self_motion_gain, -1.0f, 1.0f);
+        // 预测补偿: ★ AM 对 prediction_factor_x/y 【无夹取】(ground-truth §2.2),
+        //   所以这里只挡非有限值, 不夹 ±0.2(那是此前自加的, 已删除)。
+        //   ★★ 但本项目【有意】保留一道 ±1.0 的宽夹取 —— 任务书 §4.2 要求提前量
+        //   有界, 而 1.0 是"提前量 = 平台位移"这个物理意义的自然上限(再大就是
+        //   放大, 不再是补偿)。默认 0(关闭)时与 AM 逐位一致, 所以这不是行为偏差,
+        //   是一个只在用户主动填超范围值时才生效的安全网。
+        if (!std::isfinite(hk.esync_pred_factor_x)) hk.esync_pred_factor_x = 0.0f;
+        if (!std::isfinite(hk.esync_pred_factor_y)) hk.esync_pred_factor_y = 0.0f;
+        hk.esync_pred_factor_x = std::clamp(hk.esync_pred_factor_x, -1.0f, 1.0f);
+        hk.esync_pred_factor_y = std::clamp(hk.esync_pred_factor_y, -1.0f, 1.0f);
+        // 尺寸区间: 只保证 max > min(AM 原文 iVar16 = max(min+1, max), 跟踪器里再兜)。
+        // ★ 下限 ≥ 1: 权重公式的分母是 (max - min), 且 min 参与 `min < h` 比较,
+        //   取 0 时语义上等于"任何正框高都进区间", 不是 AM 的用法。
+        hk.esync_pred_min_w = std::clamp(hk.esync_pred_min_w, 1, 4000);
+        hk.esync_pred_max_w = std::clamp(hk.esync_pred_max_w, 1, 4000);
+        if (hk.esync_pred_max_w <= hk.esync_pred_min_w)
+            hk.esync_pred_max_w = hk.esync_pred_min_w + 1;
 
         // 0 直线 / 1 贝塞尔 / 2 自定义 / 3 WindMouse。★ 上限必须跟着枚举一起改,
         // 否则填了 3 的方案会在加载时被静默降级回"自定义手绘"。
@@ -1193,14 +1207,12 @@ bool Config::saveConfig(const std::string& filename)
              // PID-EventSync (本档唯一链路; 原 aim_mode 键已于 2026-09-16 删除)。
              << "esync_min_hits = " << hk.esync_min_hits << "\n"
              << "esync_max_age = " << hk.esync_max_age << "\n"
-             << "esync_assoc_radius_px = " << hk.esync_assoc_radius_px << "\n"
              << "esync_assoc_iou = " << hk.esync_assoc_iou << "\n"
-             << "esync_vel_window_ms = " << hk.esync_vel_window_ms << "\n"
-             << "esync_counts_per_pixel_x = " << hk.esync_counts_per_pixel_x << "\n"
-             << "esync_counts_per_pixel_y = " << hk.esync_counts_per_pixel_y << "\n"
-             << "esync_inflight_window_ms = " << hk.esync_inflight_window_ms << "\n"
-             << "esync_inflight_beta = " << hk.esync_inflight_beta << "\n"
-             << "esync_self_motion_gain = " << hk.esync_self_motion_gain << "\n"
+             << "esync_vel_sample_ms = " << hk.esync_vel_sample_ms << "\n"
+             << "esync_pred_factor_x = " << hk.esync_pred_factor_x << "\n"
+             << "esync_pred_factor_y = " << hk.esync_pred_factor_y << "\n"
+             << "esync_pred_min_w = " << hk.esync_pred_min_w << "\n"
+             << "esync_pred_max_w = " << hk.esync_pred_max_w << "\n"
              // 尺度增益调度 (2026-09-14 新增; 同日改为"单基准"设计)
              << "aim_scale_enabled = " << hk.aim_scale_enabled << "\n"
              << "aim_scale_max = " << hk.aim_scale_max << "\n"
