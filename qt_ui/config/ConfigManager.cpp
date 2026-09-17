@@ -1,5 +1,7 @@
 #include "config/ConfigManager.h"
 
+#include "config.h"   // kFixedMaxDetections
+
 #include <QFileInfo>
 
 ConfigManager::ConfigManager()

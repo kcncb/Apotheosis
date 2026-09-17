@@ -23,6 +23,7 @@
 #include "config.h"
 #include "config/ConfigManager.h"
 #include "config/config_bridge.h"
+#include "pages/TargetPage.h"    // setTargetPage(): 取 &TargetPage::classFiltersChanged 需要完整定义
 #include "runtime/config_snapshot.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
@@ -216,7 +217,7 @@ void AimSettingsPage::buildAimClassCard()
 
     auto* note = new QLabel(QString::fromUtf8(
         u8"这些类别会被控制器当作【可瞄目标】（Aim 桶）。\n"
-        u8"★ 顺序无关 —— 控制器按"离准星最近"选，不按列表顺序。\n"
+        u8"★ 顺序无关 —— 控制器按「离准星最近」选，不按列表顺序。\n"
         u8"★ 不在这里、也不在「目标」页设为可见的类别，一律不瞄。"));
     note->setWordWrap(true);
     note->setObjectName("hint");
@@ -432,7 +433,7 @@ void AimSettingsPage::buildControllerCard()
     // ★ 稳定器 5 项与"认目标"判据是【占位值】—— 必须让用户看见这一点。
     auto* note = new QLabel(QString::fromUtf8(
         u8"★ 「稳定器」那 5 项与滞回倍数目前都是【占位值】，没有实测依据，"
-        u8"默认值只保证"程序能跑"。\n"
+        u8"默认值只保证「程序能跑」。\n"
         u8"★ 六个增益默认 Kp=35 / 其余 0，等价于历史单套行为 —— 是安全起点。\n"
         u8"★ 改完立即生效：控制器每拍重读配置，不用重启会话。"));
     note->setWordWrap(true);

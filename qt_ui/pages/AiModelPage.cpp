@@ -1,4 +1,5 @@
 #include "pages/AiModelPage.h"
+#include "config.h"              // kFixedMaxDetections
 #include "config/ConfigManager.h"
 #include "widgets/CardWidget.h"
 #include "widgets/FormKit.h"
