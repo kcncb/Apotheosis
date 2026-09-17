@@ -36,7 +36,7 @@ def main() -> None:
     print("A. 由实机日志反推死区，并与 kAimDeadTimeS 互证")
     print("=" * 72)
 
-    # CLAUDE.md: Kp=100 时误差以 5.00 Hz / 200ms 摆动；g = Kp*dt*k = 0.494
+    
     period_ms = 200.0
     dt_ms_120 = 1000.0 / 120.0          # 8.333 ms -> 200ms = 24 拍
     period_ticks = period_ms / dt_ms_120

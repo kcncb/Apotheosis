@@ -1,6 +1,6 @@
 #include "runtime/aim_loop.h"
 
-// ★★ 通用控制器层的运行期外壳。设计见 docs/generic-controller-layer.md。
+
 //
 // 职责边界（刻意划清楚）:
 //   本文件【只做接线】—— 取检测、取准星、算 dt、调 control::AimController、

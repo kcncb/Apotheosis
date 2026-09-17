@@ -2,7 +2,7 @@
 
 // α-β 滤波（默认实现）
 //
-// ★ 平滑强度是**编译期常数**，不做成用户旋钮（control-architecture.md:73-75）：
+// ★ 平滑强度是**编译期常数**，不做成用户旋钮：
 //   "平滑强度与 Kp 耦合，两个一起调极容易调乱"。
 //
 // ★ 速度只是内部状态，不外传（见 filter.h 的说明）。
@@ -11,7 +11,7 @@
 
 namespace control {
 
-// 30ms —— ★ 历史实测值（control-architecture.md），不要随手改。
+// 30ms —— ★ 历史实测值，不要随手改。
 // 它的来历：α-β 的等效时间常数是靠 G1/G2 阶跃表实测定下来的，
 // 不是照搬教科书。
 inline constexpr double kAnchorFilterTauMs = 30.0;

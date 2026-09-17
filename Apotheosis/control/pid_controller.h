@@ -2,7 +2,7 @@
 
 // ⑤⑥ PID 控制 + 出口量化
 //
-// ★★★ 公式（docs/generic-controller-layer.md §4.3.2）：
+// ★★★ 公式：
 //
 //   ── 每个方向 d ∈ {x, y} 各算一遍 ──
 //
@@ -60,7 +60,6 @@ struct PidConfig
     //    死区已被实测证伪（5px ⇒ 10.2 次/秒的"动/不动"翻转抖动），
     //    而它想解决的问题（末段不冲过头）已由 pFullScalePx 连续饱和负责。
     //    ★ 保留一个"能调但调了就坏"的旋钮比没有更糟 —— 别加回来。
-    //    依据见 docs/generic-controller-layer.md §5.1。
 
     // 移动限幅（计数/拍）。0 = 内置 200。
     int maxOutputCounts = 200;
@@ -147,7 +146,7 @@ private:
     ControlTelemetry telemetry_;
 };
 
-// ★ 稳定线常数（docs/generic-controller-layer.md §4.2）：
+// ★ 稳定线常数：
 //   d = 46ms（实测死区，不是估算）；120fps ⇒ d = 5.5 拍
 //   g_crit = 2·sin(π/(2(2d+1))) = 0.2602
 //   k̂ ≈ 0.593（本机实测）

@@ -2,7 +2,7 @@
 //
 // ★★ 为什么单独一个文件: 漏映射的表现是【静默失效】(界面能改、跑起来没变),
 //    不报错、不留痕。这类 bug 只能靠测试挡 —— 它是本仓库反复踩的坑
-//    （见 CLAUDE.md 里"配了没反应的死旋钮"）。
+//    （"配了没反应的死旋钮"）。
 //
 // ★ 它只测 aim_loop 的【纯函数】(FlatConfig → ControllerConfig),
 //   不碰 detectionBuffer / MouseThread / 找色 —— 那些要 Windows + 设备,

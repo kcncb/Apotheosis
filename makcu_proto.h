@@ -21,7 +21,7 @@
 
 namespace makcu {
 
-// ---- 命令码 (与 docs/proto.md §2 一致) ----
+
 enum Cmd : uint8_t {
     CMD_MOVE            = 0x01,
     CMD_MOVE_RAW        = 0x02,

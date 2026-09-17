@@ -1,7 +1,7 @@
 find_package(Threads REQUIRED)
 
 # 界面几何测试需要 Qt。用 QUIET + 可选: 逻辑测试的卖点是任何平台都能单独编
-# (见 CLAUDE.md), 不能因为找不到 Qt 就让整个 logic-tests 配置失败。
+
 # 找不到就跳过这一类测试, 其余照常。
 find_package(Qt6 QUIET COMPONENTS Widgets)
 

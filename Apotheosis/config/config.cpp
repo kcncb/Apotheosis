@@ -550,7 +550,7 @@ bool Config::loadConfig(const std::string& filename)
             //   那个常数也随字段一起删掉了。
 
             // ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ───────────────────
-            // 六个增益全部分方向; 设计见 docs/generic-controller-layer.md §4.3。
+            
             // ★ 默认值取自 HotkeyProfile 的成员初值(等价历史单套行为),
             //   所以老配置里没有这些键时行为不变。
             hk.ctl_kp_x = get_double(sec, "ctl_kp_x", hk.ctl_kp_x);

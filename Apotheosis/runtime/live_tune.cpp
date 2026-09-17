@@ -150,7 +150,7 @@ bool applyLiveFile(const QString& path, bool suppress_report)
         //       live_tune.ini kp=6.2  ki=3.3 kd=0.024     <- 实际在跑的
         //   调参写一次, 落盘目标就永久留在了 live_tune.ini 上; 用户之后无论怎么改
         //   CF.ini 都不会生效, 而"参数已应用"的提示仍然照常显示 —— 这正是
-        //   CLAUDE.md 里记过的那类「两份真相」事故。
+        
         //
         //   ★ 修法: 在 loadConfig() 之前把 config_path 记下来, 解析完立刻恢复。
         //     这样"读一份副本 → 应用"就不再有重定向落盘目标的副作用。

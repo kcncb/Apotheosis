@@ -3,7 +3,7 @@
 // ★★ 设计纪律：每条断言都必须能【反向验证】—— 把被测代码改一行，它必须变红。
 //    跑法见文件末尾的说明。
 //
-// ★ 本测试不依赖 OpenCV / Windows / Qt，任何平台都能编（见 CLAUDE.md）。
+
 
 #include "control/aim_controller.h"
 #include "control/alpha_beta_filter.h"

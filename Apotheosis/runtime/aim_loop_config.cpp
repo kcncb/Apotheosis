@@ -7,7 +7,7 @@
 //   ★ 漏映射的表现是"界面能改、跑起来没变"，不报错不留痕，
 //     这类 bug 只能靠测试挡，所以它必须可测。
 //
-// 设计见 docs/generic-controller-layer.md §4.3。
+
 
 #include "runtime/aim_loop.h"
 
