@@ -360,72 +360,346 @@ void AimSettingsPage::buildFovCard()
 }
 
 // ── 瞄准类别 ───────────────────────────────────────────────────────────────
+// ★★ 2026-09-17 第四轮续: 按【旧页外观】重建，并把逐类参数真的接进后端。
+//
+//   改之前这里是一个 QListWidget + 「加入/移除」两个按钮 —— 用户明确说
+//   「还是喜欢原来的」。旧页的形态是每类一张行卡片，行内有：
+//     #优先级 + [id] 类名 + ▲▼✕  +  「随机锁点 Y」双 spin + 「置信」滑块
+//   那些逐类参数（y_offset / y_offset_max / min_conf）本来就在 config 里
+//   存着，重建时只是没接后端 —— 现在接上了（见 control/aim_controller.cpp
+//   的 classAimPoints 查表 与 control/selector.cpp 的逐类置信度门槛）。
 void AimSettingsPage::buildAimClassCard()
 {
-    auto* card = new CardWidget(QStringLiteral("瞄准类别 (优先目标)"), QStringLiteral("target"));
+    auto* card = new CardWidget(QStringLiteral("瞄准类别 (优先级排序)"), QStringLiteral("target"));
     auto* cl = card->contentLayout();
 
-    auto* note = makeHint(QString::fromUtf8(
-        u8"这些类别会被控制器当作【可瞄目标】（Aim 桶）。\n"
-        u8"★ 顺序无关 —— 控制器按「离准星最近」选，不按列表顺序。\n"
-        u8"★ 不在这里、也不在「目标」页设为可见的类别，一律不瞄。"));
-    cl->addWidget(note);
+    cl->addWidget(makeHint(QString::fromUtf8(
+        u8"从「目标类别」页勾选「瞄准」的类别会出现在下方。"
+        u8"用 ▲ ▼ 调整优先级（顶部 = 最高），✕ 移除。")));
 
-    auto* list = new QListWidget;
-    list->setObjectName("aimClassList");
-    list->setMaximumHeight(120);
-    cl->addWidget(list);
+    // ★ 优先级列表：普通 QWidget + QVBoxLayout 承载自定义行卡片。
+    //   旧页注释明确记着不用 QListWidget + setItemWidget + InternalMove ——
+    //   那套会压扁行 / 横向溢出 / 拖拽后留空行。换位改由每行的 ▲▼ 完成，
+    //   高度天然贴合内容，由外层页面统一滚动。
+    m_aimClassContainer = new QWidget;
+    m_aimClassLayout = new QVBoxLayout(m_aimClassContainer);
+    m_aimClassLayout->setContentsMargins(0, 0, 0, 0);
+    m_aimClassLayout->setSpacing(8);
+    cl->addWidget(m_aimClassContainer);
 
-    auto* row = new QHBoxLayout;
-    auto* combo = new QComboBox; combo->setObjectName("classCombo");
-    auto* addBtn = new QPushButton(QStringLiteral("加入"));
-    auto* delBtn = new QPushButton(QStringLiteral("移除"));
-    row->addWidget(combo, 1);
-    row->addWidget(addBtn);
-    row->addWidget(delBtn);
-    cl->addLayout(row);
+    // 「+ 添加」行
+    auto* addRow = new QHBoxLayout;
+    addRow->setSpacing(6);
+    m_addClassCombo = new QComboBox;
+    m_addClassCombo->setMinimumWidth(120);
+    m_addClassCombo->setMinimumHeight(30);
+    addRow->addWidget(m_addClassCombo, 1);
 
-    connect(addBtn, &QPushButton::clicked, this, [this, combo]() {
+    m_addClassBtn = new QPushButton(QString::fromUtf8(u8"+ 添加"));
+    m_addClassBtn->setFixedHeight(30);
+    m_addClassBtn->setCursor(Qt::PointingHandCursor);
+    addRow->addWidget(m_addClassBtn);
+    cl->addLayout(addRow);
+
+    connect(m_addClassBtn, &QPushButton::clicked, this, [this] {
         const int ri = currentRuntimeIndex();
-        if (ri < 0 || combo->currentIndex() < 0) return;
-        const int cid = combo->currentData().toInt();
+        if (ri < 0 || m_addClassCombo->currentIndex() < 0) return;
+        const int cid = m_addClassCombo->currentData().toInt();
+        if (cid < 0) return;
         {
             std::lock_guard<std::recursive_mutex> lk(configMutex);
             if (ri >= static_cast<int>(config.hotkeys.size())) return;
             auto& acs = config.hotkeys[ri].aim_classes;
-            const bool exists = std::any_of(acs.begin(), acs.end(),
-                [cid](const HotkeyAimClass& a) { return a.class_id == cid; });
-            if (!exists)
-            {
-                HotkeyAimClass a;
-                a.class_id = cid;
-                a.y_offset = 0.5f;
-                a.y_offset_max = 0.5f;
-                a.min_conf = 0.0f;
-                acs.push_back(a);
-            }
+            for (const auto& a : acs)
+                if (a.class_id == cid) return;   // 已存在
+            HotkeyAimClass a;
+            a.class_id = cid;
+            // ★ 默认 0.65 = 偏上半身/头颈，与旧页一致（旧页注释原话：
+            //   "1=框顶, 0=框底; 默认锁上半身/头颈"）。
+            a.y_offset = 0.65f;
+            a.y_offset_max = 0.65f;
+            // ★ 默认预填 AI 页的全局置信度，让新加类别显示 = "跟随全局"；
+            //   用户想收紧就上拉滑条，拉到 0 → 视作再次退回全局跟随。
+            a.min_conf = static_cast<float>(config.confidence_threshold);
+            acs.push_back(a);
         }
         ConfigBridge::instance().markDirty();
-        reloadProfileToUi();
-    });
-
-    connect(delBtn, &QPushButton::clicked, this, [this, list]() {
-        const int ri = currentRuntimeIndex();
-        auto* item = list->currentItem();
-        if (ri < 0 || !item) return;
-        const int cid = item->data(Qt::UserRole).toInt();
-        {
-            std::lock_guard<std::recursive_mutex> lk(configMutex);
-            if (ri >= static_cast<int>(config.hotkeys.size())) return;
-            auto& acs = config.hotkeys[ri].aim_classes;
-            acs.erase(std::remove_if(acs.begin(), acs.end(),
-                [cid](const HotkeyAimClass& a) { return a.class_id == cid; }), acs.end());
-        }
-        ConfigBridge::instance().markDirty();
-        reloadProfileToUi();
+        rebuildAimClassRows();
     });
 
     m_rightLayout->addWidget(card);
+    rebuildAimClassRows();
+}
+
+// 重建「+ 添加」下拉：来源是全局 class_filters（Target 页维护的那份）。
+void AimSettingsPage::rebuildAddClassCombo()
+{
+    if (!m_addClassCombo) return;
+    m_addClassCombo->clear();
+    std::lock_guard<std::recursive_mutex> lk(configMutex);
+    for (const auto& cf : config.class_filters)
+    {
+        const QString nm = cf.class_name.empty()
+            ? QStringLiteral("class_%1").arg(cf.class_id)
+            : QString::fromUtf8(cf.class_name.c_str());
+        m_addClassCombo->addItem(QStringLiteral("[%1] %2").arg(cf.class_id).arg(nm), cf.class_id);
+    }
+}
+
+// 交换两个类别在优先级列表里的位置（★ 顺序 = 优先级，index 0 最高）。
+void AimSettingsPage::moveAimClass(int from, int to)
+{
+    const int ri = currentRuntimeIndex();
+    if (ri < 0) return;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        if (ri >= static_cast<int>(config.hotkeys.size())) return;
+        auto& ac = config.hotkeys[ri].aim_classes;
+        const int n = static_cast<int>(ac.size());
+        if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+        std::swap(ac[from], ac[to]);
+    }
+    ConfigBridge::instance().markDirty();
+    rebuildAimClassRows();
+}
+
+// 按 config.hotkeys[当前].aim_classes 重建整段行卡片。
+void AimSettingsPage::rebuildAimClassRows()
+{
+    if (!m_aimClassLayout) return;
+
+    // 清空（连同旧 widget 一起删）
+    while (QLayoutItem* it = m_aimClassLayout->takeAt(0))
+    {
+        if (QWidget* w = it->widget()) w->deleteLater();
+        delete it;
+    }
+
+    struct Row { int cid; float yMin; float yMax; float c; QString name; };
+    std::vector<Row> rows;
+    {
+        std::lock_guard<std::recursive_mutex> lk(configMutex);
+        const int ri = currentRuntimeIndex();
+        if (ri >= 0 && ri < static_cast<int>(config.hotkeys.size()))
+        {
+            for (const auto& ac : config.hotkeys[ri].aim_classes)
+            {
+                QString name = QStringLiteral("class_%1").arg(ac.class_id);
+                for (const auto& cf : config.class_filters)
+                    if (cf.class_id == ac.class_id && !cf.class_name.empty())
+                    { name = QString::fromUtf8(cf.class_name.c_str()); break; }
+                rows.push_back({ ac.class_id, ac.y_offset, ac.y_offset_max, ac.min_conf, name });
+            }
+        }
+    }
+
+    if (rows.empty())
+    {
+        auto* empty = new QLabel(QString::fromUtf8(
+            u8"（无瞄准类别 — 先在「目标类别」页把类别切到「瞄准」）"));
+        empty->setProperty("class", "hint");
+        empty->setWordWrap(true);
+        empty->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+        empty->setMinimumHeight(36);
+        m_aimClassLayout->addWidget(empty);
+        rebuildAddClassCombo();
+        return;
+    }
+
+    // 只读置信标签: raw <= 0 → 「全局」（回退 AI 页阈值），否则 0.00~1.00。
+    auto confText = [](int raw) {
+        return raw <= 0 ? QString::fromUtf8(u8"全局")
+                        : QString::number(raw / 100.0, 'f', 2);
+    };
+
+    const int total = static_cast<int>(rows.size());
+    for (int idx = 0; idx < total; ++idx)
+    {
+        const Row r = rows[idx];
+        const int classId = r.cid;
+
+        auto* rowFrame = new QFrame;
+        rowFrame->setObjectName("aimRow");
+        rowFrame->setStyleSheet(
+            "QFrame#aimRow{background:#FAFAFB; border:1px solid rgba(0,0,0,0.06);"
+            " border-radius:8px;}");
+        auto* rl = new QVBoxLayout(rowFrame);
+        rl->setContentsMargins(12, 8, 10, 10);
+        rl->setSpacing(8);
+
+        // ── 第一行: #优先级 + [id] 类名 + ▲ ▼ ✕ ──
+        auto* top = new QHBoxLayout;
+        top->setSpacing(8);
+
+        auto* priLabel = new QLabel(QStringLiteral("#%1").arg(idx + 1));
+        priLabel->setFixedWidth(30);
+        priLabel->setStyleSheet("color:#5E6AD2; font-size:13px; font-weight:600; border:none;");
+        top->addWidget(priLabel);
+
+        auto* nameLabel = new QLabel(QStringLiteral("[%1] %2").arg(r.cid).arg(r.name));
+        nameLabel->setStyleSheet("color:#3C3C44; font-size:13px; font-weight:500; border:none;");
+        top->addWidget(nameLabel, 1);
+
+        auto makeIconBtn = [](const QString& glyph, const QString& color,
+                              const QString& hover, const QString& tip) {
+            auto* b = new QPushButton(glyph);
+            b->setFixedSize(26, 26);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setToolTip(tip);
+            b->setStyleSheet(QStringLiteral(
+                "QPushButton{color:%1; background:transparent;"
+                " border:1px solid rgba(0,0,0,0.08); border-radius:6px;"
+                " font-size:13px; padding:0;}"
+                "QPushButton:hover{color:%2; border-color:%2;}"
+                "QPushButton:disabled{color:#C8C8CE; border-color:rgba(0,0,0,0.05);}")
+                .arg(color, hover));
+            return b;
+        };
+
+        auto* upBtn = makeIconBtn(QString::fromUtf8(u8"▲"), QStringLiteral("#71717A"),
+                                  QStringLiteral("#5E6AD2"),
+                                  QString::fromUtf8(u8"上移（提高优先级）"));
+        auto* downBtn = makeIconBtn(QString::fromUtf8(u8"▼"), QStringLiteral("#71717A"),
+                                    QStringLiteral("#5E6AD2"),
+                                    QString::fromUtf8(u8"下移（降低优先级）"));
+        auto* delBtn = makeIconBtn(QString::fromUtf8(u8"✕"), QStringLiteral("#D25A5A"),
+                                   QStringLiteral("#B83232"), QString::fromUtf8(u8"移除"));
+        upBtn->setEnabled(idx > 0);
+        downBtn->setEnabled(idx < total - 1);
+        top->addWidget(upBtn);
+        top->addWidget(downBtn);
+        top->addWidget(delBtn);
+        rl->addLayout(top);
+
+        // ── 第二行: 随机锁点 Y 范围（每次新锁定抽一次，锁定期间不重抽）──
+        auto makeOffsetSpin = [](float value) {
+            auto* sp = new QDoubleSpinBox;
+            sp->setRange(0.0, 1.0);
+            sp->setSingleStep(0.01);
+            sp->setDecimals(2);
+            sp->setValue(value);
+            sp->setMinimumHeight(28);
+            sp->setMinimumWidth(76);
+            return sp;
+        };
+
+        auto* rangeRow = new QHBoxLayout;
+        rangeRow->setSpacing(8);
+        auto* yLbl = new QLabel(QString::fromUtf8(u8"随机锁点 Y"));
+        yLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        auto* yMinSpin = makeOffsetSpin(r.yMin);
+        auto* yMaxSpin = makeOffsetSpin(r.yMax);
+        yMinSpin->setToolTip(QString::fromUtf8(
+            u8"范围下限：1=框顶，0.5=中心，0=框底。\n"
+            u8"★ 该类的值会覆盖「控制器」卡里的热键级瞄点 Y（只在设了该类时）。"));
+        yMaxSpin->setToolTip(QString::fromUtf8(
+            u8"范围上限：每次新锁定在上下限之间随机一次。\n"
+            u8"★ 等于下限时不随机（固定打同一个点）。"));
+        rangeRow->addWidget(yLbl);
+        rangeRow->addWidget(yMinSpin);
+        rangeRow->addWidget(new QLabel(QString::fromUtf8(u8"—")));
+        rangeRow->addWidget(yMaxSpin);
+        rangeRow->addStretch();
+        rl->addLayout(rangeRow);
+
+        // ── 第三行: 最低置信度（准入）──
+        auto* cSlider = new QSlider(Qt::Horizontal);
+        cSlider->setRange(0, 100);
+        cSlider->setSingleStep(1);
+        cSlider->setPageStep(5);
+        cSlider->setValue(std::clamp(static_cast<int>(std::lround(r.c * 100.0f)), 0, 100));
+        cSlider->setMinimumWidth(80);
+        cSlider->setToolTip(QString::fromUtf8(
+            u8"最低置信度：低于此值的框不会夺锁。0 = 跟随 AI 页全局阈值。\n"
+            u8"★ 与全局阈值是「都要过」的关系 —— 这里是额外收紧，不替代它。"));
+
+        auto* bottom = new QHBoxLayout;
+        bottom->setSpacing(10);
+        auto* cLbl = new QLabel(QString::fromUtf8(u8"置信"));
+        cLbl->setFixedWidth(32);
+        cLbl->setStyleSheet("color:#71717A; font-size:12px; border:none;");
+        auto* cVal = new QLabel(confText(cSlider->value()));
+        cVal->setFixedWidth(38);
+        cVal->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        cVal->setStyleSheet("color:#3C3C44; font-size:12px; border:none;");
+        bottom->addWidget(cLbl);
+        bottom->addWidget(cSlider, 1);
+        bottom->addWidget(cVal);
+        rl->addLayout(bottom);
+
+        m_aimClassLayout->addWidget(rowFrame);
+
+        // ── 回调 ──
+        // ★ m_loading 期间不回写：reloadProfileToUi() 会重建这些控件，
+        //   而 setValue 会触发 valueChanged ⇒ 若无条件回写，加载过程会把
+        //   刚读出来的值再写一遍（并 markDirty），变成"假脏"。
+        auto persistRange = [this, classId, yMinSpin, yMaxSpin](bool minChanged) {
+            if (m_loading) return;
+            // ★ 交叉钳制：改下限时若越过了上限，把上限顶上去（反之亦然）。
+            //   不这么做的话会把一个 lo>hi 的区间写进配置，运行时再靠
+            //   computeAnchor 内部 swap 兜底 —— 界面显示就与实际不符了。
+            if (minChanged && yMinSpin->value() > yMaxSpin->value())
+                yMaxSpin->setValue(yMinSpin->value());
+            else if (!minChanged && yMaxSpin->value() < yMinSpin->value())
+                yMinSpin->setValue(yMaxSpin->value());
+
+            const int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                for (auto& a : config.hotkeys[ri2].aim_classes)
+                    if (a.class_id == classId)
+                    {
+                        a.y_offset = static_cast<float>(yMinSpin->value());
+                        a.y_offset_max = static_cast<float>(yMaxSpin->value());
+                        break;
+                    }
+            }
+            ConfigBridge::instance().markDirty();
+        };
+        connect(yMinSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(true); });
+        connect(yMaxSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [persistRange](double) { persistRange(false); });
+
+        connect(cSlider, &QSlider::valueChanged, this,
+                [this, classId, cVal, confText](int raw) {
+            cVal->setText(confText(raw));
+            if (m_loading) return;
+            const float v = static_cast<float>(raw) / 100.0f;
+            const int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                for (auto& a : config.hotkeys[ri2].aim_classes)
+                    if (a.class_id == classId) { a.min_conf = v; break; }
+            }
+            ConfigBridge::instance().markDirty();
+        });
+
+        connect(upBtn, &QPushButton::clicked, this,
+                [this, idx] { moveAimClass(idx, idx - 1); });
+        connect(downBtn, &QPushButton::clicked, this,
+                [this, idx] { moveAimClass(idx, idx + 1); });
+        connect(delBtn, &QPushButton::clicked, this, [this, classId] {
+            const int ri2 = currentRuntimeIndex();
+            if (ri2 < 0) return;
+            {
+                std::lock_guard<std::recursive_mutex> lk(configMutex);
+                if (ri2 >= static_cast<int>(config.hotkeys.size())) return;
+                auto& ac2 = config.hotkeys[ri2].aim_classes;
+                ac2.erase(std::remove_if(ac2.begin(), ac2.end(),
+                    [classId](const HotkeyAimClass& a) { return a.class_id == classId; }),
+                    ac2.end());
+            }
+            ConfigBridge::instance().markDirty();
+            rebuildAimClassRows();
+        });
+    }
+
+    rebuildAddClassCombo();
 }
 
 // ── 准星找色 ───────────────────────────────────────────────────────────────
@@ -571,18 +845,16 @@ void AimSettingsPage::buildControllerCard()
                                        QString::fromUtf8(d.tip)));
 
     cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"输出与瞄点")));
-    const D outAndAnchor[] = {
-        { "ctlYOffset", "瞄点 Y 偏移 (1=框顶, 0=框底)", 0.0, 1.0, 0.05, 0.5,
-          "瞄点在检测框内的纵向位置：1.0 = 框顶（头），0.5 = 框中心，0.0 = 框底。\n"
-          "0.5 就是打中心。想打头就调到 0.7~0.9 之间试。" },
-        { "ctlYOffsetMax", "Y 偏移上限（随机抖动用）", 0.0, 1.0, 0.05, 0.5,
-          "Y 偏移的随机上限。大于上面的『瞄点 Y 偏移』时，\n"
-          "每帧会在两者之间随机取一个位置，避免每枪都打同一个像素点。\n"
-          "★ 等于『瞄点 Y 偏移』= 不随机。" },
-    };
-    for (const D& d : outAndAnchor)
-        cl->addWidget(makeDoubleRowTip(d.obj, d.label, d.lo, d.hi, d.step, d.def,
-                                       QString::fromUtf8(d.tip)));
+    // ★★ 2026-09-17 第四轮续: 这里原本有一对【热键级】的「瞄点 Y 偏移」/
+    //   「Y 偏移上限」。按用户要求"改成和原来一样"，它们被删掉了 ——
+    //   因为旧页【没有】热键级的 Y 设置，Y 只存在于「瞄准类别」卡里每一类的
+    //   「随机锁点 Y」上（旧页全文搜 ctl_ 零命中，y_offset 只出现在逐类行里）。
+    //
+    //   ★ 删掉不是丢功能: 逐类 y_offset / y_offset_max 现在已经真的接进后端了
+    //     （aim_controller 按锁定目标的 classId 查表，见 control::ClassAimPoint）。
+    //   ★ 热键级的 ctl_y_offset / ctl_y_offset_max 字段仍在 config 里、仍会被
+    //     搬运，作为【没设该类别时】的兜底值 —— 界面不再直接编辑它们，
+    //     它们的值由配置文件保留（默认 0.5 = 框中心，正是"不干预"的语义）。
 
     cl->addWidget(makeSectionTitle(QString::fromUtf8(u8"选靶与稳定器")));
     const D targetAndStab[] = {
@@ -628,7 +900,7 @@ void AimSettingsPage::buildControllerCard()
     cl->addWidget(makeIntRow("ctlRandomSeed", "瞄点随机种子 (0=固定)", 0, 999999, 1, 0,
         QString::fromUtf8(u8"瞄点 Y 随机抖动的种子。0 = 用内部固定常数（同一帧可复现）。\n"
         "★ 非 0 时每次启动都会得到不同的抖动序列。\n"
-        "★ 只在『Y 偏移上限』大于『瞄点 Y 偏移』时才有意义。")));
+        "★ 只在「瞄准类别」里某一类的『随机锁点 Y』上下限【不相等】时才有意义。")));
 
     // ★ 稳定器 5 项与"认目标"判据是【占位值】—— 必须让用户看见这一点。
     auto* note = makeHint(QString::fromUtf8(
@@ -663,8 +935,10 @@ void AimSettingsPage::buildControllerCard()
         hp.ctl_i_max            = d("ctlIMax");
         hp.ctl_max_output_counts= i("ctlMaxOutputCounts");
         hp.ctl_p_full_scale_px  = d("ctlPFullScalePx");
-        hp.ctl_y_offset         = d("ctlYOffset");
-        hp.ctl_y_offset_max     = d("ctlYOffsetMax");
+        // ★★ 2026-09-17 第四轮续: ctl_y_offset / ctl_y_offset_max 不再从界面写。
+        //   热键级 Y 这对控件已按"和旧页一样"删除（旧页没有它们，Y 只逐类设）。
+        //   ★ 刻意【不】在这里写 hp.ctl_y_offset —— 保持配置里已有的值不动。
+        //     写 0.5 的话会把用户配置文件里可能存在的兜底值静默冲掉。
         hp.ctl_hysteresis_ratio = d("ctlHysteresisRatio");
         hp.ctl_max_distance_px  = d("ctlMaxDistancePx");
         hp.ctl_random_seed      = i("ctlRandomSeed");
@@ -1141,8 +1415,8 @@ void AimSettingsPage::reloadProfileToUi()
             sd("ctlTauDerivSec", hp.ctl_tau_deriv_sec);
             sd("ctlIMax", hp.ctl_i_max);
             sd("ctlPFullScalePx", hp.ctl_p_full_scale_px);
-            sd("ctlYOffset", hp.ctl_y_offset);
-            sd("ctlYOffsetMax", hp.ctl_y_offset_max);
+            // ★★ ctlYOffset / ctlYOffsetMax 的 sd() 已删 —— 那对控件不存在了。
+            //   逐类 Y 由 rebuildAimClassRows() 从 hp.aim_classes 直接重建。
             sd("ctlHysteresisRatio", hp.ctl_hysteresis_ratio);
             sd("ctlMaxDistancePx", hp.ctl_max_distance_px);
             sd("ctlMatchCenterRatio", hp.ctl_match_center_ratio);
@@ -1196,33 +1470,15 @@ void AimSettingsPage::reloadProfileToUi()
             sd("windStep",            hp.aim_path_wind_step);
             sd("windDistance",        hp.aim_path_wind_distance);
 
-            // 已选类别列表
-            if (auto* l = findChild<QListWidget*>("aimClassList"))
-            {
-                l->clear();
-                for (const auto& ac : hp.aim_classes)
-                {
-                    auto* it = new QListWidgetItem(QString::number(ac.class_id));
-                    it->setData(Qt::UserRole, ac.class_id);
-                    l->addItem(it);
-                }
-            }
+            // 已选类别行卡片（★ 整段重建：逐类参数按 classId 对应，
+            //   沿用旧控件指针在增删/换位后会错位）。
+            rebuildAimClassRows();
         }
     }
 
-    // 可选类别下拉：来自全局 class_filters（Target 页维护的那份）
-    if (auto* c = findChild<QComboBox*>("classCombo"))
-    {
-        c->clear();
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        for (const auto& cf : config.class_filters)
-        {
-            const QString nm = cf.class_name.empty()
-                ? QStringLiteral("class_%1").arg(cf.class_id)
-                : QString::fromUtf8(cf.class_name.c_str());
-            c->addItem(QStringLiteral("[%1] %2").arg(cf.class_id).arg(nm), cf.class_id);
-        }
-    }
+    // ★ 旧的 aimClassList / classCombo 命名查找已随 QListWidget 版卡片一起删除。
+    //   现在的类别行由 rebuildAimClassRows() 自持，下拉由 rebuildAddClassCombo()
+    //   重建（来源仍是全局 class_filters），两者都在上面那次调用里刷新过了。
 
     m_loading = false;
 }

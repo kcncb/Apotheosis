@@ -24,6 +24,23 @@
 
 namespace control {
 
+// ★★ 逐类别的瞄点覆盖（2026-09-17 第四轮续）。
+//
+//   背景：旧界面按【每个类别】各设一个 Y 锁点范围（默认 0.65 = 上半身/头颈），
+//   而本轮重建时把它压成了热键级一对 ctl_y_offset。那会丢掉一个真实需求 ——
+//   同一个热键同时瞄 head 和 body 时，两者该瞄的框内位置本来就不一样。
+//
+//   ★ 语义：按下表查到的类别【覆盖】热键级的 yOffset/yOffsetMax；
+//     查不到就退回热键级。这样"只在需要时逐类覆盖"，不是两套并列真相。
+//   ★ 只带 y_offset 两项：min_conf 不在这里 —— 它管的是【选靶门槛】，
+//     属于 selector 的职责，塞进瞄点结构会让两个阶段的责任混在一起。
+struct ClassAimPoint
+{
+    int    classId = -1;
+    double yOffset = 0.5;
+    double yOffsetMax = 0.5;
+};
+
 struct ControllerConfig
 {
     ClassBuckets buckets;
@@ -31,6 +48,10 @@ struct ControllerConfig
     StabilizerConfig stabilizer;
     AimPointConfig aimPoint;
     PidConfig pid;
+
+    // 逐类别瞄点覆盖。空 = 全部走 aimPoint。
+    // ★ 用 vector 而不是 map：类别数只有几十个，线性查找比哈希快且无分配抖动。
+    std::vector<ClassAimPoint> classAimPoints;
 
     // 新鲜度门禁（二值，§3.3 第 1/2 条）。调用方每帧把 "是否新鲜" 传进来。
     // ★ 这里不做"连续降权" —— 用户明确决定不做（"无法区分该帧是否是 200ms 前的"）。

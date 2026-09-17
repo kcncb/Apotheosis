@@ -540,8 +540,12 @@ static void testFlattenProfile()
     hk.ctl_min_aspect = 0.11;
     hk.ctl_max_aspect = 6.6;
     hk.aim_classes.clear();
-    { HotkeyAimClass a; a.class_id = 3; hk.aim_classes.push_back(a); }
-    { HotkeyAimClass a; a.class_id = 7; hk.aim_classes.push_back(a); }
+    // ★ 两个类别的 y_offset / min_conf 故意设成【互不相同且非默认】——
+    //   若两者一样, "只搬了第一条"或"搬错下标"这类变异区分不出来。
+    { HotkeyAimClass a; a.class_id = 3; a.y_offset = 0.71f; a.y_offset_max = 0.83f;
+      a.min_conf = 0.42f; hk.aim_classes.push_back(a); }
+    { HotkeyAimClass a; a.class_id = 7; a.y_offset = 0.22f; a.y_offset_max = 0.29f;
+      a.min_conf = 0.15f; hk.aim_classes.push_back(a); }
 
     std::vector<ClassFilterState> cfilters;
     { ClassFilterState c; c.class_id = 1; c.bucket = ClassBucket::Filter; cfilters.push_back(c); }
@@ -574,6 +578,60 @@ static void testFlattenProfile()
     check(f.detectionResolution == 640, "detectionResolution 搬了");
     check(f.aimClassIds.size() == 2 && f.aimClassIds[0] == 3 && f.aimClassIds[1] == 7,
           "aim_classes 的 class_id 全搬了");
+
+    // ★★ 逐类别瞄点 + 置信度必须被搬运（2026-09-17 第四轮续）。
+    //   不搬的表现是「界面上每类 Y 范围/置信度改了没反应」—— 静默失效。
+    section("★★ 逐类别瞄点 + 置信度必须被搬运");
+    check(f.classAimPoints.size() == 2, "classAimPoints 条数对");
+    if (f.classAimPoints.size() == 2)
+    {
+        check(std::abs(f.classAimPoints[0][0] - 3.0) < 1e-9 &&
+              std::abs(f.classAimPoints[0][1] - 0.71) < 1e-6 &&
+              std::abs(f.classAimPoints[0][2] - 0.83) < 1e-6,
+              "★★ 第 1 条: classId=3 / yOffset=0.71 / yOffsetMax=0.83 全搬了");
+        check(std::abs(f.classAimPoints[1][0] - 7.0) < 1e-9 &&
+              std::abs(f.classAimPoints[1][1] - 0.22) < 1e-6 &&
+              std::abs(f.classAimPoints[1][2] - 0.29) < 1e-6,
+              "★★ 第 2 条: classId=7 / yOffset=0.22 / yOffsetMax=0.29 全搬了");
+    }
+    check(f.classMinConf.size() == 2, "classMinConf 条数对");
+    if (f.classMinConf.size() == 2)
+    {
+        check(f.classMinConf[0].first == 3 && std::abs(f.classMinConf[0].second - 0.42) < 1e-6,
+              "★★ classId=3 的 min_conf 0.42 搬了");
+        check(f.classMinConf[1].first == 7 && std::abs(f.classMinConf[1].second - 0.15) < 1e-6,
+              "★★ classId=7 的 min_conf 0.15 搬了");
+    }
+
+    // ★★ 端到端: 搬过来的这两张表必须真的进到 ControllerConfig, 且按 classId 对齐。
+    {
+        const control::ControllerConfig cc = toControllerConfig(f);
+        check(cc.classAimPoints.size() == 2, "→ ControllerConfig.classAimPoints 有 2 条");
+        bool found3 = false, found7 = false;
+        for (const auto& p : cc.classAimPoints)
+        {
+            if (p.classId == 3) { found3 = true;
+                check(std::abs(p.yOffset - 0.71) < 1e-6 && std::abs(p.yOffsetMax - 0.83) < 1e-6,
+                      "★★ classId=3 的瞄点区间真的进了控制器配置"); }
+            if (p.classId == 7) { found7 = true;
+                check(std::abs(p.yOffset - 0.22) < 1e-6 && std::abs(p.yOffsetMax - 0.29) < 1e-6,
+                      "★★ classId=7 的瞄点区间真的进了控制器配置"); }
+        }
+        check(found3 && found7, "两个类别都在配置里 (按 classId 可查到)");
+
+        check(cc.selector.minConfByClassId.size() >= 8,
+              "minConf 表按 classId 下标展开 (至少到 7)");
+        if (cc.selector.minConfByClassId.size() >= 8)
+        {
+            check(std::abs(cc.selector.minConfByClassId[3] - 0.42) < 1e-6,
+                  "★★ classId=3 的置信度门槛 0.42 落在下标 3");
+            check(std::abs(cc.selector.minConfByClassId[7] - 0.15) < 1e-6,
+                  "★★ classId=7 的置信度门槛 0.15 落在下标 7");
+            // ★ 没设门槛的类别必须是 0(=不限), 不能是垃圾值。
+            check(cc.selector.minConfByClassId[4] == 0.0,
+                  "★ 未设门槛的类别 ⇒ 0 (不限, 不是误挡)");
+        }
+    }
 
     section("★★ class_filters 必须被搬运（这是原来的断层）");
     check(f.classFilters.size() == 2, "class_filters 条数对");

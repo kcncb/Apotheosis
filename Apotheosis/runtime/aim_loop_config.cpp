@@ -93,6 +93,21 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
     // ★ 0 = 不限制。距离门控目前由 FOV 椭圆承担，不在这里重复设第二道。
     cfg.selector.maxDistancePx = flat.maxDistancePx;
 
+    // ★★ 逐类别最低置信度（准入）。下标 = classId, 越界视为不限。
+    //   表的大小取"出现过的最大 classId + 1", 这样越界查询天然返回不限。
+    cfg.selector.minConfByClassId.clear();
+    for (const auto& mc : flat.classMinConf)
+    {
+        const int id = mc.first;
+        if (id < 0) continue;
+        if (static_cast<size_t>(id) >= cfg.selector.minConfByClassId.size())
+            cfg.selector.minConfByClassId.resize(static_cast<size_t>(id) + 1, 0.0);
+        // ★ 同一 classId 出现多次时取【更严】的那个: 门槛是安全约束,
+        //   取宽的那个会让"某一条设置"静默失效。
+        cfg.selector.minConfByClassId[static_cast<size_t>(id)] =
+            std::max(cfg.selector.minConfByClassId[static_cast<size_t>(id)], mc.second);
+    }
+
     // ── 稳定器（②）───────────────────────────────────────────────────
     // ★ 这 5 项此前【写死在 control/ 的默认值里、没有配置槽位】——
     //   等于谁都调不了。现在可调（⚠️ 数值仍全是待实测的占位，方案 §7 第 6 条）。
@@ -106,6 +121,26 @@ control::ControllerConfig toControllerConfig(const FlatConfig& flat)
     cfg.aimPoint.yOffset = flat.yOffset;
     cfg.aimPoint.yOffsetMax = flat.yOffsetMax;
     cfg.aimPoint.randomSeed = flat.randomSeed;   // 0 = 用内部固定常数
+
+    // ★★ 逐类别瞄点覆盖。查得到就用该类的, 查不到退回上面的热键级。
+    //   ★ 顺序保留（与 aim_classes 一致）, 但下游按 classId 查 —— 顺序无影响。
+    cfg.classAimPoints.clear();
+    cfg.classAimPoints.reserve(flat.classAimPoints.size());
+    for (const auto& cap : flat.classAimPoints)
+    {
+        control::ClassAimPoint p;
+        p.classId = static_cast<int>(cap[0]);
+        p.yOffset = cap[1];
+        p.yOffsetMax = cap[2];
+        // ★ 与 config 的 clamp 对齐: 范围必须在 [0,1] 且 lo <= hi。
+        //   不在这里重算的话, 一个"越界的旧配置"会直接把瞄点算到框外。
+        p.yOffset = std::clamp(p.yOffset, 0.0, 1.0);
+        p.yOffsetMax = std::clamp(p.yOffsetMax, 0.0, 1.0);
+        if (p.yOffsetMax < p.yOffset)
+            std::swap(p.yOffset, p.yOffsetMax);
+        if (p.classId >= 0)
+            cfg.classAimPoints.push_back(p);
+    }
 
     // ── PID ───────────────────────────────────────────────────────────
     cfg.pid.kpX = flat.kpX;
@@ -160,6 +195,22 @@ FlatConfig flattenProfile(const HotkeyProfile& hk, int detectionResolution,
     flat.aimClassIds.reserve(hk.aim_classes.size());
     for (const auto& ac : hk.aim_classes)
         flat.aimClassIds.push_back(ac.class_id);
+
+    // ★★ 逐类别瞄点 + 置信度门槛。两者都从 aim_classes 里搬 ——
+    //   它们本来就是"逐类别"的参数, 只是重建时后端没接。
+    //   ★ 顺序与 aim_classes 一致（那是优先级顺序）, 但下游按 classId 查,
+    //     不依赖顺序 —— 顺序只影响选靶优先级, 由 aimClassIds 那条路管。
+    flat.classAimPoints.clear();
+    flat.classAimPoints.reserve(hk.aim_classes.size());
+    flat.classMinConf.clear();
+    flat.classMinConf.reserve(hk.aim_classes.size());
+    for (const auto& ac : hk.aim_classes)
+    {
+        flat.classAimPoints.push_back({ static_cast<double>(ac.class_id),
+                                        static_cast<double>(ac.y_offset),
+                                        static_cast<double>(ac.y_offset_max) });
+        flat.classMinConf.push_back({ ac.class_id, static_cast<double>(ac.min_conf) });
+    }
 
     // ★★ 全局类别桶: TargetPage 写的就是它。
     //   不读它 ⇒ 用户在界面上设的类别对控制器【完全无效】(这就是原来的断层)。

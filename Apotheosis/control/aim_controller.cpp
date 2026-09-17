@@ -59,7 +59,8 @@ ControlOutput AimController::update(const ControlInput& in)
     }
 
     // ── ① 筛选 + 选靶 ──────────────────────────────────────────────────
-    const std::vector<size_t> aimIdx = filterAimCandidates(in.candidates, cfg_.buckets);
+    const std::vector<size_t> aimIdx = filterAimCandidates(in.candidates, cfg_.buckets,
+                                                           cfg_.selector);
     if (aimIdx.empty())
     {
         // 没有可瞄目标 ⇒ 锁定失效，下游必须复位（§3.3 第 3 条）。
@@ -115,7 +116,22 @@ ControlOutput AimController::update(const ControlInput& in)
 
     // ── ④ 瞄点 ────────────────────────────────────────────────────────
     // ★ 用【滤波后的中心点】+【稳定器的框尺寸】—— 滤波只有中心点被平滑。
-    out.anchor = computeAnchor(filteredCenter, stab.box, cfg_.aimPoint, in.frameIndex);
+    //
+    // ★★ 逐类别覆盖：同一热键同时瞄 head / body 时，两者该瞄的框内位置不同
+    //    （头要贴框顶，身体要居中）。查得到就用该类的范围，查不到退回热键级。
+    //    ★ 用 sel.classId（选靶层的判定结果），不是别的来源 —— 瞄点必须
+    //      跟着"这一拍实际锁的是哪一类"走。
+    AimPointConfig aimCfg = cfg_.aimPoint;
+    for (const ClassAimPoint& cap : cfg_.classAimPoints)
+    {
+        if (cap.classId == sel.classId)
+        {
+            aimCfg.yOffset = cap.yOffset;
+            aimCfg.yOffsetMax = cap.yOffsetMax;
+            break;
+        }
+    }
+    out.anchor = computeAnchor(filteredCenter, stab.box, aimCfg, in.frameIndex);
 
     // ── ④b 目标框与身份（供自动扳机算命中区 / 判转火）──────────────────
     // ★ 用【稳定后的框】而不是原始 sel.box —— 命中区应当跟着控制实际用的

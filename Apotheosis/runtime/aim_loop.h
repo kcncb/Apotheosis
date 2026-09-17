@@ -21,6 +21,7 @@
 //   本文件在边界上做单位换算，**换算系数全部为 1**：
 //   检测分辨率就是控制坐标系，不引入任何缩放。
 
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -95,6 +96,17 @@ struct FlatConfig
     //   于是【用户在界面上设的类别, 控制器完全看不到】。
     //   两个来源都读, 界面改的东西才会真的作用到控制器上。
     std::vector<int> aimClassIds;
+
+    // ★★ 逐类别瞄点覆盖（2026-09-17 第四轮续）。
+    //   每项 {classId, yOffset, yOffsetMax}。空 = 全部走热键级 yOffset/yOffsetMax。
+    //   背景：旧界面按【每个类别】各设一个 Y 锁点范围（默认 0.65 = 上半身/头颈），
+    //   重建时被压成热键级一对 —— 那丢掉了"同一热键同时瞄 head/body 时两者
+    //   该瞄的框内位置不同"这个真实需求。
+    std::vector<std::array<double, 3>> classAimPoints;   // {classId, lo, hi}
+
+    // ★★ 逐类别最低置信度（准入）。每项 {classId, minConf}，minConf <= 0 = 不限。
+    //   旧界面每行有个「置信」滑块，能按类别收紧门槛（头 0.35 / 身体 0.15）。
+    std::vector<std::pair<int, double>> classMinConf;
 
     // 全局类别桶: 每个元素 {classId, bucket}, bucket ∈ {0=Delete, 1=Filter, 2=Aim}
     // ★ 与 config.h 的 ClassBucket 数值一致（Delete=0 / Filter=1 / Aim=2）。

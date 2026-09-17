@@ -71,6 +71,13 @@ private:
     void buildKeyBindCard();       // 触发按键
     void buildFovCard();           // 视野 FOV
     void buildAimClassCard();      // 瞄准类别（写 aim_classes）
+    // ★★ 按旧外观重建的行列表（2026-09-17 第四轮续）:
+    //   每行 = 优先级 #N + 类名 + ▲▼✕ + 随机锁点 Y 双 spin + 置信滑块。
+    //   ★ 用 QWidget+QVBoxLayout 承载，不用 QListWidget+setItemWidget ——
+    //     旧页明确试过后者，会压扁行 / 横向溢出 / 拖拽后留空行。
+    void rebuildAimClassRows();
+    void rebuildAddClassCombo();
+    void moveAimClass(int from, int to);
     void buildCrosshairCard();     // 准星找色开关
     void buildControllerCard();    // ★★ 通用控制器层（23 个 ctl_*）
     void buildDynamicFovCard();    // 动态 FOV
@@ -123,6 +130,15 @@ private:
     std::vector<QSpinBox*>       m_pathInts;
     std::vector<QDoubleSpinBox*> m_pathDoubles;
     QLabel*                      m_pathSectionBezier = nullptr;
+
+    // ★★ 瞄准类别卡的行容器（2026-09-17 第四轮续，按旧外观重建）。
+    //   ★ 每次 reloadProfileToUi / 增删改都整段重建 —— 逐类参数是"按 classId
+    //     索引的列表"，增删/换位后沿用旧控件指针极易错位。整段重建虽然笨，
+    //     但"控件 ↔ classId"的对应关系每次都是新鲜的。
+    QWidget*     m_aimClassContainer = nullptr;
+    QVBoxLayout* m_aimClassLayout    = nullptr;
+    QComboBox*   m_addClassCombo     = nullptr;
+    QPushButton* m_addClassBtn       = nullptr;
 
     TargetPage* m_targetPage = nullptr;
     bool m_loading = false;

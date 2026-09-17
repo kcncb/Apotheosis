@@ -56,6 +56,29 @@ struct SelectorConfig
     // <= 0 表示不限制。
     // ★ 这是 FOV 椭圆的粗筛；真正的 FOV 判断在 L0 做，这里是兜底。
     double maxDistancePx = 0.0;
+
+    // ★★ 逐类别的最低置信度（2026-09-17 第四轮续）。
+    //   下标 = classId；值 <= 0 表示该类别不额外过滤（跟随全局阈值）。
+    //   空表 = 全部跟随全局阈值。
+    //
+    //   背景：旧界面每行有一个「置信」滑块，能按类别收紧门槛 ——
+    //   比如"头"要求 0.35 而"身体" 0.15，减少把头误判成身体后乱瞄。
+    //   本轮重建时这个旋钮连同后端一起没了，这里补回来。
+    //
+    //   ★ 放在 selector 而不是 anchor：它管的是"这个框够不够格参与选靶"，
+    //     属于【准入】，与"选中之后瞄框内哪个点"是两件事。
+    //   ★ 全局阈值（AI 页）仍然在下游生效，这里是【额外的收紧】，
+    //     不替代它 —— 所以是 max(全局, 逐类)，不是覆盖。
+    std::vector<double> minConfByClassId;
+
+    // 取某类别的置信度门槛。<= 0（含越界/空表）= 不限。
+    double minConfOf(int classId) const
+    {
+        if (classId < 0 || static_cast<size_t>(classId) >= minConfByClassId.size())
+            return 0.0;
+        const double v = minConfByClassId[static_cast<size_t>(classId)];
+        return v > 0.0 ? v : 0.0;
+    }
 };
 
 // 选靶状态（跨帧保持，滞回需要它）。
@@ -91,8 +114,11 @@ struct TargetSelection
 // 从推理输出里筛出 Aim 候选。
 // ★ 保留 Filter 的判定入口：Filter 类别"可见但不瞄"，所以不进结果，
 //   但仍会被 L0 用于显示（调用方自行取用）。
+// 筛出可瞄候选（Bucket::Aim 且过逐类置信度门槛）。
+// ★ 顺序即 candidates 的下标，调用方据此回查。
 std::vector<size_t> filterAimCandidates(const std::vector<Candidate>& candidates,
-                                        const ClassBuckets& buckets);
+                                        const ClassBuckets& buckets,
+                                        const SelectorConfig& cfg);
 
 // 选靶 + 滞回。
 //   cross  : 准星位置（检测像素）

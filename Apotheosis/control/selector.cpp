@@ -6,14 +6,24 @@
 namespace control {
 
 std::vector<size_t> filterAimCandidates(const std::vector<Candidate>& candidates,
-                                        const ClassBuckets& buckets)
+                                        const ClassBuckets& buckets,
+                                        const SelectorConfig& cfg)
 {
     std::vector<size_t> out;
     out.reserve(candidates.size());
     for (size_t i = 0; i < candidates.size(); ++i)
     {
-        if (candidates[i].box.valid() && buckets.bucketOf(candidates[i].classId) == Bucket::Aim)
-            out.push_back(i);
+        if (!candidates[i].box.valid())
+            continue;
+        if (buckets.bucketOf(candidates[i].classId) != Bucket::Aim)
+            continue;
+        // ★★ 逐类别最低置信度（准入）。<= 0 表示该类不限。
+        //   ★ 这里是【额外收紧】, 不替代 AI 页的全局阈值 —— 全局阈值在下游
+        //     仍然生效, 所以两者是"都要过"的关系, 这里不做 max 合并。
+        const double need = cfg.minConfOf(candidates[i].classId);
+        if (need > 0.0 && candidates[i].confidence < need)
+            continue;
+        out.push_back(i);
     }
     return out;
 }

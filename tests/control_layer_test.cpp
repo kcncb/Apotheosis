@@ -12,6 +12,7 @@
 #include "control/selector.h"
 #include "control/stabilizer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -55,6 +56,11 @@ static void testSelector()
 {
     section("① 筛选 + 选靶");
 
+    // ★ 本节的用例只关心"桶"的筛选, 不关心逐类置信度门槛 ——
+    //   用一个空门槛表(= 谁都不额外过滤)把那一层关掉, 免得它干扰断言。
+    //   ★★ 逐类置信度的正面/反面用例在 testPerClassConfGate() 里单独钉。
+    const SelectorConfig noConfGate;
+
     // 类别桶：0=Aim, 1=Delete, 2=Filter, 3=Aim
     ClassBuckets buckets;
     buckets.byClassId = { Bucket::Aim, Bucket::Delete, Bucket::Filter, Bucket::Aim };
@@ -66,7 +72,7 @@ static void testSelector()
     Candidate d; d.box = Box{ 105, 300, 40, 80 }; d.classId = 3; d.confidence = 0.9;
     cands = { a, b, c, d };
 
-    const std::vector<size_t> aimIdx = filterAimCandidates(cands, buckets);
+    const std::vector<size_t> aimIdx = filterAimCandidates(cands, buckets, noConfGate);
     check(aimIdx.size() == 2, "Delete 与 Filter 被筛掉, 只剩 2 个 Aim");
     check(aimIdx[0] == 0 && aimIdx[1] == 3, "留下的是下标 0 与 3");
 
@@ -75,13 +81,13 @@ static void testSelector()
     small.byClassId = { Bucket::Aim };
     Candidate odd; odd.box = Box{ 0, 0, 10, 10 }; odd.classId = 99;
     std::vector<Candidate> one = { odd };
-    check(filterAimCandidates(one, small).empty(),
+    check(filterAimCandidates(one, small, noConfGate).empty(),
           "越界 classId 视为 Delete (未知类别不瞄)");
 
     // 无效框被排除
     Candidate bad; bad.box = Box{ 0, 0, 0, 0 }; bad.classId = 0;
     std::vector<Candidate> inv = { bad };
-    check(filterAimCandidates(inv, buckets).empty(), "无效框(w=0)被排除");
+    check(filterAimCandidates(inv, buckets, noConfGate).empty(), "无效框(w=0)被排除");
 
     // ── 选最近的 ──────────────────────────────────────────────────────
     SelectorConfig sc;
@@ -89,7 +95,7 @@ static void testSelector()
     SelectorState st;
     const Vec2 cross{ 110, 140 };   // 靠近 a 的中心 (120,140)
     std::vector<Candidate> two = { a, d };
-    const std::vector<size_t> idx2 = filterAimCandidates(two, buckets);
+    const std::vector<size_t> idx2 = filterAimCandidates(two, buckets, noConfGate);
     TargetSelection sel = selectTarget(two, idx2, cross, sc, st);
     check(sel.found, "选到了目标");
     checkNear(sel.distancePx, 10.0, 1e-9, "选中的是更近的 a (距离 10px)");
@@ -131,12 +137,12 @@ static void testSelector()
         SelectorState stF;
         const Vec2 crossF{ 110, 140 };      // 距 a 中心 10px
         std::vector<Candidate> one2 = { a };   // a 距 10px ⇒ 在范围内
-        const std::vector<size_t> idxA = filterAimCandidates(one2, buckets);
+        const std::vector<size_t> idxA = filterAimCandidates(one2, buckets, noConfGate);
         check(selectTarget(one2, idxA, crossF, far, stF).found,
               "maxDistancePx=50 时 10px 的目标可选");
 
         std::vector<Candidate> farAway = { d };  // d 中心 (125,340) 距 crossF 很远
-        const std::vector<size_t> idxD = filterAimCandidates(farAway, buckets);
+        const std::vector<size_t> idxD = filterAimCandidates(farAway, buckets, noConfGate);
         SelectorState stF2;
         check(!selectTarget(farAway, idxD, crossF, far, stF2).found,
               "★ maxDistancePx=50 时超距目标被排除 (found=false)");
@@ -153,7 +159,7 @@ static void testSelector()
     SelectorState st4;
     selectTarget(two2, idx2, cross, sc, st4);
     std::vector<Candidate> onlyD = { d };
-    const std::vector<size_t> idxOnlyD = filterAimCandidates(onlyD, buckets);
+    const std::vector<size_t> idxOnlyD = filterAimCandidates(onlyD, buckets, noConfGate);
     TargetSelection afterGone = selectTarget(onlyD, idxOnlyD, cross2, sc, st4);
     check(afterGone.found && afterGone.classId == 3, "锁定目标消失后改选剩下的 d");
 
@@ -839,6 +845,230 @@ static void testFullChain()
     }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// ★★ 逐类别瞄点覆盖 + 逐类别置信度门槛（2026-09-17 第四轮续）
+//
+//   这两条是为"把旧界面的『瞄准类别』卡改回原样"补的后端。
+//   改之前 aim_classes[].y_offset / min_conf 是【存盘但没人读】的 ——
+//   界面上能调、跑起来没反应，正是本仓库反复踩的"死旋钮"坑。
+//   所以这两节的存在理由就是: 让"没人读"这件事变成一个会变红的断言。
+// ══════════════════════════════════════════════════════════════════════════
+
+static void testPerClassAimPoint()
+{
+    section("★ 逐类别瞄点覆盖 (y_offset 真的被读)");
+
+    // 框: 中心 (500,300), 高 100 ⇒ 框顶 y=250, 框底 y=350。
+    const Box box{ 460, 250, 80, 100 };
+    const Vec2 center{ 500, 300 };
+
+    // 基准: 不传覆盖 ⇒ 用热键级的 0.5（框中心）。
+    {
+        AimPointConfig c;
+        c.yOffset = 0.5; c.yOffsetMax = 0.5;
+        const Vec2 a = computeAnchor(center, box, c, 0);
+        check(std::abs(a.y - 300.0) < 1e-9, "无覆盖: yOffset=0.5 ⇒ 瞄点=框中心 300");
+    }
+
+    // ★★★ 核心: 必须走【真的 AimController】, 不能在测试里重抄一遍查表逻辑。
+    //   我第一版就是把查表逻辑复制进测试 —— 结果把"覆盖完全没接线"这类变异
+    //   全放过了(实测 3 条变异全绿)。复制逻辑的测试只验证了它自己。
+    auto anchorYFor = [box](int classId, const std::vector<ClassAimPoint>& table,
+                            double hotkeyLo, double hotkeyHi) {
+        ControllerConfig cfg;
+        // ★ 必须把类别放进 Aim 桶, 否则 bucketOf() 返回 Delete ⇒ 没有候选 ⇒
+        //   engaged=false ⇒ anchor 恒为 0。第一版漏了这句, 于是 6 条断言全在
+        //   比 0 —— 它们"失败"是对的, 但失败的原因不是覆盖表, 而是没接上。
+        cfg.buckets.byClassId.assign(64, Bucket::Aim);
+        cfg.selector.hysteresisRatio = 1.0;
+        cfg.stabilizer.matchCenterRatio = 100.0;   // 稳定器怎么都认
+        cfg.stabilizer.kSnapMult = 1000.0;
+        cfg.stabilizer.minAspect = 0.01;
+        cfg.stabilizer.maxAspect = 100.0;
+        cfg.aimPoint.yOffset = hotkeyLo;
+        cfg.aimPoint.yOffsetMax = hotkeyHi;
+        cfg.classAimPoints = table;
+
+        AimController ac;
+        ac.setConfig(cfg);
+        ControlInput in;
+        in.dtSec = 0.008;
+        in.cross = Vec2{ 500, 300 };          // 准星就在中心, 减少滤波扰动
+        Candidate c; c.box = box; c.classId = classId; c.confidence = 0.9;
+        in.candidates = { c };
+
+        // 跑几拍让滤波收敛, 取最后一拍。
+        ControlOutput out;
+        for (int i = 0; i < 12; ++i) { in.frameIndex = static_cast<uint64_t>(i); out = ac.update(in); }
+        return out.anchor.y;
+    };
+
+    // ★ 类别 7 = 头 ⇒ 0.9（贴框顶）; 热键级是 0.5（中心）。
+    const std::vector<ClassAimPoint> table = { ClassAimPoint{ 7, 0.9, 0.9 },
+                                               ClassAimPoint{ 9, 0.5, 0.5 } };
+
+    // yOffset=0.9 ⇒ 中心 + (0.5-0.9)*100 = 300 - 40 = 260
+    const double headY = anchorYFor(7, table, 0.5, 0.5);
+    checkNear(headY, 260.0, 0.5,
+              "★★ 类别 7 命中覆盖表 ⇒ 瞄点 ~260 (贴框顶), 不是热键级的 300");
+
+    const double bodyY = anchorYFor(9, table, 0.5, 0.5);
+    checkNear(bodyY, 300.0, 0.5,
+              "类别 9 覆盖为 0.5 ⇒ 瞄点仍 ~300 (覆盖表逐类生效, 不串台)");
+
+    // ★ 查不到的类别 ⇒ 退回热键级（不是退回 0，也不是不瞄）。
+    const double otherY = anchorYFor(42, table, 0.5, 0.5);
+    checkNear(otherY, 300.0, 0.5,
+              "★ 未列入覆盖表的类别 ⇒ 退回热键级 yOffset (不是失效)");
+
+    // ★★ 决定性断言: 覆盖表【为空】时, 同一个类别 7 必须回到热键级 300。
+    //   没有这条, "覆盖表根本没被读"也能让上面的 260 通过(如果表被硬编码)。
+    const double headNoTable = anchorYFor(7, {}, 0.5, 0.5);
+    checkNear(headNoTable, 300.0, 0.5,
+              "★★ 覆盖表为空 ⇒ 类别 7 回到热键级 300 (证明 260 真的来自覆盖表)");
+
+    // ★ 热键级本身也要仍然有效（覆盖表不该"劫持"全部类别）。
+    const double hotkeyOnly = anchorYFor(7, {}, 0.8, 0.8);
+    checkNear(hotkeyOnly, 270.0, 0.5,
+              "★ 无覆盖表时热键级 0.8 ⇒ 瞄点 ~270 (热键级路径没被覆盖逻辑破坏)");
+
+    // ★ 顺序无关: 把表打乱, 类别 7 仍然是 0.9。
+    const std::vector<ClassAimPoint> shuffled = { ClassAimPoint{ 9, 0.5, 0.5 },
+                                                  ClassAimPoint{ 7, 0.9, 0.9 } };
+    checkNear(anchorYFor(7, shuffled, 0.5, 0.5), 260.0, 0.5,
+              "覆盖表顺序打乱 ⇒ 仍按 classId 匹配到 7 ⇒ 260");
+
+    // ★★ 随机区间: lo != hi ⇒ 瞄点必须落在区间内, 且【两端都要覆盖到】。
+    //   上面所有用例的 lo 都等于 hi, 所以"只覆盖 lo、丢了 hi"那个变异
+    //   完全区分不出来(实测: 未被捕获)。这里补一条 lo≠hi 的。
+    //   ★ 算准: anchorY = 中心 + (0.5 − offset) × h, h=100
+    //     offset = 0.8 ⇒ 300 + (0.5−0.8)×100 = 270  （贴框顶那一端）
+    //     offset = 0.4 ⇒ 300 + (0.5−0.4)×100 = 310  （靠框底那一端）
+    //   ⇒ y ∈ [270, 310]。★ 若只覆盖 lo(0.4) 而丢了 hi, 每拍恒为 310。
+    //     （我第一版把 0.4 那一端错算成 280 —— 符号写反了, 探针实测才看出来。）
+    {
+        ControllerConfig cfg;
+        cfg.buckets.byClassId.assign(64, Bucket::Aim);
+        cfg.selector.hysteresisRatio = 1.0;
+        cfg.stabilizer.matchCenterRatio = 100.0;
+        cfg.stabilizer.kSnapMult = 1000.0;
+        cfg.stabilizer.minAspect = 0.01;
+        cfg.stabilizer.maxAspect = 100.0;
+        cfg.aimPoint.yOffset = 0.5; cfg.aimPoint.yOffsetMax = 0.5;   // 热键级: 中心
+        cfg.classAimPoints.push_back(ClassAimPoint{ 7, 0.4, 0.8 });
+
+        AimController ac;
+        ac.setConfig(cfg);
+        ControlInput in;
+        in.dtSec = 0.008;
+        in.cross = Vec2{ 500, 300 };
+        Candidate c; c.box = box; c.classId = 7; c.confidence = 0.9;
+        in.candidates = { c };
+
+        double lo = 1e9, hi = -1e9;
+        for (int i = 0; i < 200; ++i)
+        {
+            in.frameIndex = static_cast<uint64_t>(i);
+            const ControlOutput o = ac.update(in);
+            // ★ 跳过前 30 拍的收敛暂态 —— 滤波从初始位置滑到稳定值期间,
+            //   anchor 会被滤波后的中心点带飞(y 一度到 309), 那是暂态不是设计。
+            //   ★ 只统计稳定段, 断言才钉的是"随机区间"本身。
+            if (i < 30) continue;
+            lo = std::min(lo, o.anchor.y);
+            hi = std::max(hi, o.anchor.y);
+        }
+        // y ∈ [270, 310]: 期望最小 ~270（offset 0.8）, 最大 ~310（offset 0.4）。
+        checkNear(lo, 270.0, 1.0, "★ 逐类随机区间: 最小值 ~270 (offset=0.8 那一端被用到)");
+        checkNear(hi, 310.0, 1.0, "★★ 逐类随机区间: 最大值 ~310 (offset=0.4 那一端也被用到)");
+        check(hi - lo > 30.0,
+              "★★ 逐类 lo≠hi ⇒ 瞄点真的在区间内散开 (不是恒打同一点)");
+    }
+}
+
+static void testPerClassConfGate()
+{
+    section("★ 逐类别置信度门槛 (min_conf 真的被读)");
+
+    ClassBuckets buckets;
+    buckets.byClassId = { Bucket::Aim, Bucket::Aim, Bucket::Aim };
+
+    // 三类都是 Aim, 置信度分别 0.10 / 0.30 / 0.90。
+    auto mk = [](int cid, double conf) {
+        Candidate c; c.box = Box{ 100.0 * cid, 100, 40, 80 };
+        c.classId = cid; c.confidence = conf; return c;
+    };
+    std::vector<Candidate> cands = { mk(0, 0.10), mk(1, 0.30), mk(2, 0.90) };
+
+    // 门槛表: 类别 0 要 0.35（0.10 过不了）, 类别 1 要 0.20（0.30 能过）。
+    SelectorConfig cfg;
+    cfg.minConfByClassId = { 0.35, 0.20, 0.0 };
+
+    const std::vector<size_t> idx = filterAimCandidates(cands, buckets, cfg);
+    check(idx.size() == 2, "★ 类别 0 被置信度门槛挡掉, 剩 2 个");
+    check(idx[0] == 1 && idx[1] == 2, "留下的是下标 1(0.30≥0.20) 与 2(0.90, 门槛0=不限)");
+
+    // ★ 反面: 门槛设成 0 ⇒ 完全不过滤（"0 = 跟随全局"的语义）。
+    {
+        SelectorConfig off;
+        off.minConfByClassId = { 0.0, 0.0, 0.0 };
+        check(filterAimCandidates(cands, buckets, off).size() == 3,
+              "★ 门槛全 0 ⇒ 三个都留下 (0 = 不限, 不是『要 0 置信度』)");
+    }
+
+    // ★ 空表 ⇒ 谁都不额外过滤。
+    {
+        SelectorConfig empty;
+        check(filterAimCandidates(cands, buckets, empty).size() == 3,
+              "空门槛表 ⇒ 不过滤");
+    }
+
+    // ★ 越界 classId 查询 ⇒ 返回 0（不限），不是崩也不是误挡。
+    {
+        SelectorConfig cfg2;
+        cfg2.minConfByClassId = { 0.9 };
+        check(cfg2.minConfOf(99) == 0.0, "★ 越界 classId 的门槛查询 ⇒ 0 (不限, 安全)");
+        check(std::abs(cfg2.minConfOf(0) - 0.9) < 1e-9, "表内 classId 取到 0.9");
+    }
+
+    // ★★ 门槛必须是真的【下限比较】: 恰好等于门槛 ⇒ 放行（>= 不是 >）。
+    //   ★ 用类别 1（置信度恰好 0.30）配 0.30 的门槛来测边界。
+    //     （我一开始错写成类别 0 —— 它置信度 0.10, 本来就该被挡掉。）
+    {
+        SelectorConfig eq;
+        eq.minConfByClassId = { 0.0, 0.30, 0.0 };
+        // 把类别 1 的置信度精确设成 0.30, 与门槛逐位相等。
+        std::vector<Candidate> c2 = { mk(1, 0.30) };
+        const std::vector<size_t> r = filterAimCandidates(c2, buckets, eq);
+        check(r.size() == 1,
+              "★ 置信度恰好等于门槛(0.30) ⇒ 放行 (>= 语义, 边界不吃掉目标)");
+    }
+
+    // ★ 反面: 比门槛小一点点 ⇒ 必须挡掉。没有这条, 上面那条"总是放行"也能过。
+    {
+        SelectorConfig eq;
+        eq.minConfByClassId = { 0.0, 0.30, 0.0 };
+        std::vector<Candidate> c2 = { mk(1, 0.2999) };
+        check(filterAimCandidates(c2, buckets, eq).empty(),
+              "★ 置信度略低于门槛(0.2999 < 0.30) ⇒ 被挡掉");
+    }
+
+    // ★★ 表里存了【负数】⇒ 必须当成"不限", 不能当成"门槛 -0.5"。
+    //   负门槛在数值上会让所有候选都通过(confidence >= 0 > -0.5),
+    //   看似"无害", 但它会让 minConfOf 失去"<=0 即不限"这条契约 ——
+    //   而下游(以及未来的调用方)依赖这条契约判断"这一类有没有设门槛"。
+    //   ★ 实测: 不把负值归零的变异, 在没有这条用例时【完全区分不出来】。
+    {
+        SelectorConfig neg;
+        neg.minConfByClassId = { -0.5, 0.0, 0.0 };
+        check(neg.minConfOf(0) == 0.0,
+              "★★ 表里存负数 ⇒ minConfOf 归零 (契约: <=0 即『不限』)");
+        // 且行为上确实不过滤低置信度候选。
+        std::vector<Candidate> low = { mk(0, 0.0001) };
+        check(filterAimCandidates(low, buckets, neg).size() == 1,
+              "★★ 负门槛类别 ⇒ 极低置信度候选也放行 (确认它真的是『不限』)");
+    }
+}
+
 int main()
 {
     std::printf("=== 控制器层逻辑回归 ===\n");
@@ -849,6 +1079,8 @@ int main()
     testAnchor();
     testPid();
     testFullChain();
+    testPerClassAimPoint();
+    testPerClassConfGate();
 
     std::printf("\n%d 项断言, 失败 %d\n", g_checks, g_failures);
     if (g_failures == 0)
