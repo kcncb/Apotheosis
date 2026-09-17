@@ -89,6 +89,8 @@ private:
 
     void rebuildGroupCombo();
     void rebuildProfileList();
+    // 列表行的选中态配色（旧页 restyleProfileItems 的恢复）
+    void restyleProfileItems();
     void reloadProfileToUi();
     void commitProfileFromUi();
 

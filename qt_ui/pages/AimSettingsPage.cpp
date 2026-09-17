@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QShowEvent>      // showEvent 的参数类型
 #include <QSpinBox>
+#include <QSplitter>       // 左栏/右栏可拖动分隔（旧页的写法）
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -94,14 +95,27 @@ AimSettingsPage::AimSettingsPage(QWidget* parent)
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    // ★★ 左栏宽度与分割方式按旧页 (HotkeyPage) 恢复：
+    //    · 旧页是 190px，新页写成了 260px —— 宽了 37%，这就是"热键组那一列过宽"。
+    //    · 旧页用 QSplitter（可拖动分隔条），新页是普通固定宽 QWidget ⇒ 拖不动。
+    //    setStretchFactor(0,0)/(1,1) 保证拉窗口时宽度只给右栏。
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->setChildrenCollapsible(false);
+
     auto* left = new QWidget;
-    left->setFixedWidth(260);
+    left->setFixedWidth(190);
     buildLeftPanel(left);
-    root->addWidget(left);
 
     auto* right = new QWidget;
     buildRightPanel(right);
-    root->addWidget(right, 1);
+
+    splitter->addWidget(left);
+    splitter->addWidget(right);
+    splitter->setSizes({190, 700});
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+
+    root->addWidget(splitter);
 
     // ★★ configLoaded：任何外部改配置（切方案 / 调参 / live_tune）都要重读控件。
     //    铁律 (a) 的落点。漏了它，本页就成了"随时把旧值灌回去的缓存"。
@@ -617,22 +631,66 @@ void AimSettingsPage::rebuildProfileList()
         {
             const auto& hp = config.hotkeys[i];
             if (QString::fromUtf8(hp.group.c_str()) != group) continue;
+
             QString keys;
             for (const auto& k : hp.keys)
             {
                 if (!keys.isEmpty()) keys += QStringLiteral(" / ");
                 keys += QString::fromUtf8(k.c_str());
             }
-            auto* item = new QListWidgetItem(
-                QStringLiteral("%1\n%2").arg(QString::fromUtf8(hp.name.c_str()),
-                                             keys.isEmpty() ? QStringLiteral("(无)") : keys));
+            if (keys.isEmpty()) keys = QStringLiteral("None");
+
+            // ★ 旧页的列表行是【两行自定义 widget】(名字 + 按键)，不是
+            //   "名字\n按键" 的单条 item —— 后者两行共用同一个字体/颜色，
+            //   没有主次层级。这里按旧页恢复：QListWidgetItem 只当作容器，
+            //   真正显示的是 setItemWidget 挂上去的两行 QLabel。
+            auto* item = new QListWidgetItem(m_profileList);
             item->setData(Qt::UserRole, i);
-            m_profileList->addItem(item);
+
+            auto* w = new QWidget;
+            w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            auto* v = new QVBoxLayout(w);
+            v->setContentsMargins(11, 8, 11, 8);
+            v->setSpacing(3);
+
+            auto* nameLbl = new QLabel(QString::fromUtf8(hp.name.c_str()));
+            nameLbl->setObjectName("pname");
+            auto* keyLbl = new QLabel(keys);
+            keyLbl->setObjectName("pkey");
+
+            v->addWidget(nameLbl);
+            v->addWidget(keyLbl);
+
+            item->setSizeHint(w->sizeHint());
+            m_profileList->setItemWidget(item, w);
         }
     }
     m_profileList->blockSignals(false);
     if (m_profileList->count() > 0)
+    {
         m_profileList->setCurrentRow(0);
+        onProfileSelected(0);
+    }
+    restyleProfileItems();
+}
+
+// ★ 选中态的两行颜色。旧页这段(line 1594)随页面一起被删了 ——
+//   没有它，选中行的名字和按键都保持同一个颜色，看不出哪一行被选中。
+void AimSettingsPage::restyleProfileItems()
+{
+    if (!m_profileList) return;
+    for (int i = 0; i < m_profileList->count(); ++i)
+    {
+        auto* w = m_profileList->itemWidget(m_profileList->item(i));
+        if (!w) continue;
+        const bool sel = (i == m_profileList->currentRow());
+        if (auto* n = w->findChild<QLabel*>("pname"))
+            n->setStyleSheet(sel ? "color:#4A55C8; font-size:13px; font-weight:500;"
+                                 : "color:#3C3C44; font-size:13px;");
+        if (auto* k = w->findChild<QLabel*>("pkey"))
+            k->setStyleSheet(sel ? "color:#7E88D8; font-size:11px;"
+                                 : "color:#A1A1AA; font-size:11px;");
+    }
 }
 
 void AimSettingsPage::onGroupChanged(int)
@@ -642,6 +700,7 @@ void AimSettingsPage::onGroupChanged(int)
 
 void AimSettingsPage::onProfileSelected(int)
 {
+    restyleProfileItems();   // ★ 选中态换色, 必须在 reload 之前/之后都刷一次
     reloadProfileToUi();
 }
 
