@@ -35,44 +35,22 @@ SessionPage::SessionPage(QWidget* parent)
     auto& cfg = ConfigManager::instance();
 
     // ── 推理后端 (Backend) ──
+    // ★ 2026-09-17: DirectML 后端整条移除 → 后端下拉框与 "DirectML 显卡" 一起删除。
+    //   TensorRT 是唯一后端, 所以这里只做只读展示 + 状态行。
     auto* backendCard = new CardWidget(tr("推理后端"), QStringLiteral("cpu"), container);
     auto* bc = backendCard->contentLayout();
 
-    m_backendCombo = new QComboBox();
-    m_backendCombo->addItem(QStringLiteral("TensorRT (CUDA)"), QStringLiteral("TRT"));
-    m_backendCombo->addItem(QStringLiteral("DirectML (CPU/GPU)"), QStringLiteral("DML"));
-    auto* backendRow = FormKit::fieldRow(tr("推理后端"), m_backendCombo);
-    bc->addWidget(backendRow);
-    m_backendCombo->setToolTip(tr(
+    auto* backendLabel = new QLabel(QStringLiteral("TensorRT (CUDA)"));
+    backendLabel->setToolTip(tr(
         "TRT(CUDA): N 卡专用,延迟最低,需要 CUDA 与 TensorRT 运行时。\n"
-        "DML(DirectML): 通用后端,A 卡/Intel 卡也能跑。停止推理后才能切换。"));
-
-    // DML device ID
-    m_dmlDeviceId = new QSpinBox();
-    m_dmlDeviceId->setRange(0, 15);
-    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
-    m_dmlDeviceRow = FormKit::fieldRow(tr("DirectML 显卡"), m_dmlDeviceId);
-    bc->addWidget(m_dmlDeviceRow);
-    m_dmlDeviceId->setToolTip(tr(
-        "DirectML 后端跑在哪个显卡上。多显卡机器请选独显;只在 DML 后端时生效。"));
+        "DirectML 后端已于 2026-09-17 整条移除, 本程序现在只有这一个后端。"));
+    bc->addWidget(FormKit::fieldRow(tr("推理后端"), backendLabel));
 
     // Current backend status line
     m_backendStatusLabel = new QLabel();
     m_backendStatusLabel->setProperty("class", "secondary");
+    m_backendStatusLabel->setText(tr("当前选择：TensorRT (CUDA)"));
     bc->addWidget(m_backendStatusLabel);
-
-    // Set initial backend selection and visibility
-    {
-        QString be = cfg.backend();
-        int idx = m_backendCombo->findData(be);
-        if (idx >= 0)
-            m_backendCombo->setCurrentIndex(idx);
-        bool isDml = (be == QStringLiteral("DML"));
-        m_dmlDeviceRow->setVisible(isDml);
-        m_backendStatusLabel->setText(
-            isDml ? tr("当前选择：DirectML (CPU/GPU)")
-                  : tr("当前选择：TensorRT (CUDA)"));
-    }
 
     layout->addWidget(backendCard);
 
@@ -101,7 +79,8 @@ SessionPage::SessionPage(QWidget* parent)
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         gc->addWidget(FormKit::toggleRow(tr("CUDA Graph"), config.use_cuda_graph, m_cudaGraph));
-        gc->addWidget(FormKit::toggleRow(tr("双缓冲流水线"), config.use_double_buffer, m_dualBuffer));
+        // ★ 2026-09-17: "双缓冲流水线" 开关已删除 —— 双缓冲整条移除
+        //   (它白加一整帧延迟, 与"降推理延迟"的目标相反)。
         gc->addWidget(FormKit::toggleRow(tr("GPU 独占模式"), config.enableGpuExclusiveMode, m_gpuExclusive));
 
         QSlider* gpuSlider = nullptr;
@@ -119,7 +98,7 @@ SessionPage::SessionPage(QWidget* parent)
         m_systemMemoryReserve->setSingleStep(256);
     }
 
-    auto* restartHint = new QLabel(tr("GPU/CPU/系统资源预留与 GPU 独占模式在下次启动应用时生效；双缓冲在重新启动推理后生效。"));
+    auto* restartHint = new QLabel(tr("GPU/CPU/系统资源预留与 GPU 独占模式在下次启动应用时生效。"));
     restartHint->setProperty("class", "secondary");
     restartHint->setWordWrap(true);
     gc->addWidget(restartHint);
@@ -127,11 +106,6 @@ SessionPage::SessionPage(QWidget* parent)
     connect(m_cudaGraph, &ToggleSwitch::toggled, this, [this](bool v) {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         config.use_cuda_graph = v;
-        ConfigBridge::instance().markDirty();
-    });
-    connect(m_dualBuffer, &ToggleSwitch::toggled, this, [this](bool v) {
-        std::lock_guard<std::recursive_mutex> lk(configMutex);
-        config.use_double_buffer = v;
         ConfigBridge::instance().markDirty();
     });
     connect(m_gpuExclusive, &ToggleSwitch::toggled, this, [this](bool v) {
@@ -163,31 +137,12 @@ SessionPage::SessionPage(QWidget* parent)
     root->addWidget(scroll);
 
     // ── Connections ──
-    connect(m_backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &SessionPage::onBackendChanged);
-    connect(m_dmlDeviceId, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &SessionPage::onDmlDeviceChanged);
+    // ★ 2026-09-17: 后端下拉框/DML 设备的连接已删除 (DirectML 后端整条移除)。
     connect(m_showWindow, &ToggleSwitch::toggled,
             this, &SessionPage::onShowWindowChanged);
     connect(&cfg, &ConfigManager::configLoaded,
             this, &SessionPage::loadConfig);
 }
-
-void SessionPage::onBackendChanged(int index) {
-    auto& cfg = ConfigManager::instance();
-    QString val = m_backendCombo->itemData(index).toString();
-    bool isDml = (val == QStringLiteral("DML"));
-    m_dmlDeviceRow->setVisible(isDml);
-    m_backendStatusLabel->setText(
-        isDml ? tr("当前选择：DirectML (CPU/GPU)")
-              : tr("当前选择：TensorRT (CUDA)"));
-    cfg.setBackend(val);
-}
-
-void SessionPage::onDmlDeviceChanged(int value) {
-    ConfigManager::instance().setDmlDeviceId(value);
-}
-
 
 void SessionPage::onShowWindowChanged(bool checked) {
     ConfigManager::instance().setShowWindow(checked);
@@ -196,22 +151,8 @@ void SessionPage::onShowWindowChanged(bool checked) {
 void SessionPage::loadConfig() {
     auto& cfg = ConfigManager::instance();
 
-    // Backend
-    m_backendCombo->blockSignals(true);
-    int idx = m_backendCombo->findData(cfg.backend());
-    if (idx >= 0)
-        m_backendCombo->setCurrentIndex(idx);
-    bool isDml = (cfg.backend() == QStringLiteral("DML"));
-    m_dmlDeviceRow->setVisible(isDml);
-    m_backendStatusLabel->setText(
-        isDml ? tr("当前选择：DirectML (CPU/GPU)")
-              : tr("当前选择：TensorRT (CUDA)"));
-    m_backendCombo->blockSignals(false);
-
-    // DML device ID
-    m_dmlDeviceId->blockSignals(true);
-    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
-    m_dmlDeviceId->blockSignals(false);
+    // ★ 2026-09-17: 后端恒为 TensorRT, 状态行是固定文案, 不需要还原控件状态。
+    m_backendStatusLabel->setText(tr("当前选择：TensorRT (CUDA)"));
 
     // Preview window
     m_showWindow->blockSignals(true);
@@ -224,9 +165,6 @@ void SessionPage::loadConfig() {
         m_cudaGraph->blockSignals(true);
         m_cudaGraph->setChecked(config.use_cuda_graph);
         m_cudaGraph->blockSignals(false);
-        m_dualBuffer->blockSignals(true);
-        m_dualBuffer->setChecked(config.use_double_buffer);
-        m_dualBuffer->blockSignals(false);
         m_gpuExclusive->blockSignals(true);
         m_gpuExclusive->setChecked(config.enableGpuExclusiveMode);
         m_gpuExclusive->blockSignals(false);

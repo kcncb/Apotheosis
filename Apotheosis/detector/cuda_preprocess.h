@@ -19,35 +19,5 @@ void launch_resize_bgr_u8_to_chw_rgb_f16(
     cudaStream_t stream
 );
 
-// Fused decode + confidence filter kernel. Reads YOLOv8-style raw output
-// (fp16 or fp32), does argmax over nc class scores per anchor, converts
-// (cx, cy, w, h) -> (x1, y1, x2, y2) in model space, and atomically pushes
-// kept detections into a compact [K, 6] buffer.
-//
-// `cnLayout` selects between the two YOLO-family export layouts:
-//   true  -> [1, C, N] (Ultralytics default, channels-major)
-//   false -> [1, N, C] (transposed export, anchors-major)
-// In both cases C is the channel count (4 + numClasses) and N the anchor count.
-//
-// dstCounter must be pre-zeroed on the same stream. The CPU then only has to
-// D2H ~K*24 bytes instead of N*C*4 bytes, skip the fp16->fp32 cast, skip the
-// cross-class argmax loop, and run NMS on a much smaller candidate set.
-//
-// The layout of each kept row is: [x1, y1, x2, y2, score, classId_as_float]
-// matching the existing cols==6 postProcessYolo path.
-void launch_decode_and_filter(
-    const void* srcCN,
-    int C,
-    int N,
-    int numClasses,
-    bool isHalf,
-    float confThreshold,
-    float smallConf,
-    float areaThreshPx,
-    float imgScale,
-    int maxCandidates,
-    bool cnLayout,
-    int* dstCounter,
-    float* dstCandidates,
-    cudaStream_t stream
-);
+// ★ 2026-09-17: launch_decode_and_filter 的声明整段删除 —— 它服务 raw YOLO
+//   输出路径, 而本程序现在只接受 end2end 模型 [1,N,6](解码已烘进图内)。

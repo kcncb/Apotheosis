@@ -82,12 +82,15 @@ private:
 
     class OverviewPage*      m_overviewPage{};
     class TargetPage*        m_targetPage{};
-    class HotkeyPage*        m_hotkeyPage{};
+    // ★★ 瞄准设置页 (2026-09-17 第三轮续恢复)。它同时是 config.hotkeys[] 的
+    //    【唯一界面写入者】—— 在它被恢复之前, 那个数组没有任何写入者。
+    class AimSettingsPage*   m_hotkeyPage{};
+
     class StatsPage*         m_statsPage{};
     class LogPage*           m_logPage{};
     class DebugPage*         m_debugPage{};
     class AutoCapturePage*   m_autoCapPage{};
-    class AutoTunePage*      m_autoTunePage{};
+
 
     // Last AppLog snapshot size — only tail-new lines get pushed each tick.
     int m_logCursor = 0;

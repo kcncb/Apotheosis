@@ -37,12 +37,9 @@
 #include "runtime/inference_session.h"
 #include "runtime/latency_probe.h"
 #include "runtime/live_tune.h"
-#include "mouse/autotune_runtime.h"   // 调参 agent 的生产接线
 #include "runtime/config_snapshot.h"
 #include "runtime/aim_telemetry.h"
 #include "runtime/sched_boost.h"
-#include "runtime/thread_loops.h"
-#include "detector/dml_detector.h"
 #include "auth/auth_state.h"
 
 #include "tensorrt/nvinf.h"
@@ -63,10 +60,8 @@ std::mutex inputDeviceMutex;
 
 TrtDetector trt_detector;
 
-DirectMLDetector* dml_detector = nullptr;
 IDetector* g_detector = nullptr;
 runtime::InferenceSession* g_inference_session = nullptr;
-MouseThread* globalMouseThread = nullptr;
 Config config;
 
 
@@ -135,14 +130,8 @@ void createInputDevices()
     std::unique_ptr<KmboxNetConnection> oldKmboxNet;
     {
         std::lock_guard<std::mutex> lock(inputDeviceMutex);
-        if (globalMouseThread)
-        {
-            globalMouseThread->clearQueuedMoves();
-            globalMouseThread->releaseLeftButton();
-            globalMouseThread->setMakcuConnection(nullptr);
-            globalMouseThread->setMakcuNewConnection(nullptr);
-            globalMouseThread->setKmboxNetConnection(nullptr);
-        }
+        // ★ 瞄准下发链已整条删除(2026-09-17): 这里原来会把新设备推给
+        //   globalMouseThread。现在只做"探测/持有设备", 没有任何下发消费者。
         oldMakcu.reset(makcuSerial);
         oldNew.reset(makcuNewSerial);
         oldKmboxNet.reset(kmboxNetSerial);
@@ -182,24 +171,13 @@ void createInputDevices()
         makcuSerial = nextMakcu.release();
         makcuNewSerial = nextNew.release();
         kmboxNetSerial = nextKmboxNet.release();
-        if (globalMouseThread)
-        {
-            globalMouseThread->setMakcuConnection(makcuSerial);
-            globalMouseThread->setMakcuNewConnection(makcuNewSerial);
-            globalMouseThread->setKmboxNetConnection(kmboxNetSerial);
-        }
     }
 }
 
 void assignInputDevices()
 {
-    std::lock_guard<std::mutex> lock(inputDeviceMutex);
-    if (globalMouseThread)
-    {
-        globalMouseThread->setMakcuConnection(makcuSerial);
-        globalMouseThread->setMakcuNewConnection(makcuNewSerial);
-        globalMouseThread->setKmboxNetConnection(kmboxNetSerial);
-    }
+    // ★ 原来是"把当前设备指针推给 globalMouseThread"。瞄准下发链已删除,
+    //   这里不再有消费者, 保留空实现是为了不动 createInputDevices() 的调用序列。
 }
 
 static void applyLightPalette(QApplication& app)
@@ -338,10 +316,13 @@ int main(int argc, char* argv[])
 
         if (config.backend == "TRT" && !cudaStatus.trt_ready())
         {
+            // ★ 2026-09-17: 原来这里会静默回退到 DML。DirectML 后端已整条移除,
+            //   不能再"回退到不存在的后端"——那会让程序带着一个永远起不来的
+            //   会话配置继续跑。改为明确报错, 把原因写清楚。
             std::cerr << "[MAIN] TRT backend requested but unavailable: "
-                      << cudaStatus.failure_reason << ". Falling back to DML." << std::endl;
-            config.backend = "DML";
-            config.saveConfig();
+                      << cudaStatus.failure_reason
+                      << ". DirectML fallback has been removed; TensorRT is the only backend."
+                      << std::endl;
         }
 
         if (cudaStatus.trt_ready())
@@ -412,13 +393,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        MouseRuntimeParams mouse_params{};
-        mouse_params.detection_resolution = config.detection_resolution;
-
-        MouseThread mouseThread(mouse_params);
-
-        globalMouseThread = &mouseThread;
-
         std::vector<std::string> availableModels = getAvailableModels();
 
         if (!config.ai_model.empty())
@@ -456,30 +430,9 @@ int main(int argc, char* argv[])
             }
         }
 
-        {
-            const auto dmlAdapters = EnumerateDMLAdapters();
-            if (!dmlAdapters.empty())
-            {
-                auto selected = std::find_if(dmlAdapters.begin(), dmlAdapters.end(), [](const DmlAdapterInfo& adapter) {
-                    return adapter.device_id == config.dml_device_id;
-                });
-                if (selected == dmlAdapters.end())
-                {
-                    config.dml_device_id = dmlAdapters.front().device_id;
-                    config.saveConfig("config.ini");
-                    selected = dmlAdapters.begin();
-                }
-
-                std::cout << "[MAIN] DirectML adapters detected:" << std::endl;
-                for (const auto& adapter : dmlAdapters)
-                    std::cout << "  [" << adapter.device_id << "] " << adapter.name
-                              << (adapter.device_id == config.dml_device_id ? " (selected)" : "") << std::endl;
-            }
-            else
-            {
-                std::cerr << "[MAIN] No DirectML/DXGI adapters detected." << std::endl;
-            }
-        }
+        // ★ 2026-09-17: DirectML 适配器枚举整块删除 (EnumerateDMLAdapters /
+        //   DmlAdapterInfo / config.dml_device_id)。DirectML 后端已整条移除,
+        //   这段探测的唯一用途就是给那个后端挑设备。
 
         {
             std::string preloadError;
@@ -488,7 +441,7 @@ int main(int argc, char* argv[])
                 std::cerr << "[MAIN] Model metadata preload failed: " << preloadError << std::endl;
         }
 
-        runtime::InferenceSession session(mouseThread);
+        runtime::InferenceSession session;
         g_inference_session = &session;
 
         if (GetEnvironmentVariableA("APOTHEOSIS_AUTOSTART_TRT", nullptr, 0) > 0)
@@ -541,18 +494,10 @@ int main(int argc, char* argv[])
         window.resize(960, 640);
         window.show();
 
-        // 调参 agent 的生产接线 (2026-09-14)。
-        // ★ 必须在配置方案初始化与 live_tune::start() 之后: 它读的是"当前生效
-        //   配置", 而且写回要靠 live_tune 的轮询去应用。
-        // ★ 只是【接线】, 不启动任何线程 —— 真正开跑要点界面上的开关。
-        boss::autotune::install_production_hooks();
+        // ★ 调参 agent 的生产接线已随瞄准控制链一起删除(2026-09-17):
+        //   autotune 的唯一调参对象就是那条回路, 回路没了它没有可调之物。
 
         QObject::connect(&app, &QCoreApplication::aboutToQuit, [] {
-            // 退出前务必撤掉 live_tune 哨兵: 否则会留下一个能改参数的活动入口,
-            // 下次启动时可能被半截配置影响。
-            // ★ 采样会话不需要显式取消 —— 它没有后台线程, 就是个区间标记;
-            //   没点「结束」就没发过请求、也没改过参数。
-            boss::autotune::uninstall_production_hooks();
             ConfigBridge::instance().flush();
             shouldExit = true;
         });
@@ -568,14 +513,9 @@ int main(int argc, char* argv[])
         session.stop();
         g_inference_session = nullptr;
 
-        mouseThread.clearQueuedMoves();
-        mouseThread.releaseLeftButton();
-        // 自动开镜可能正处在"点了还没抬"的那一拍上: 退出前把右键也抬起来,
-        // 否则用户会看到一个卡住的右键(脚本退出后游戏里还在开镜)。
-        mouseThread.releaseRightButton();
-        mouseThread.setMakcuConnection(nullptr);
-        mouseThread.setMakcuNewConnection(nullptr);
-        mouseThread.setKmboxNetConnection(nullptr);
+        // ★ 瞄准下发链已整条删除(2026-09-17): 原来这里要清空下发队列、
+        //   抬左/右键、解绑设备 —— 那些都属于已经被删掉的 MouseThread。
+        //   现在只需要关掉设备本身。
         delete makcuSerial;
         makcuSerial = nullptr;
         delete makcuNewSerial;

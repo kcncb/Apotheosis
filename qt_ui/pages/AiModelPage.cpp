@@ -121,30 +121,18 @@ AiModelPage::AiModelPage(QWidget* parent)
     });
 
     // ── Card 2: 推理后端 ──
+    // ★ 2026-09-17: DirectML 后端整条移除, 所以这里不再有"后端下拉框"和
+    //   "DML 设备 ID" —— TensorRT 是唯一后端。卡片保留, 因为下面的状态标签
+    //   仍然要显示 TensorRT 的可用性(它是有用的诊断信息)。
     auto* backendCard = new CardWidget(QStringLiteral("推理后端"),
                                        QStringLiteral("cpu"));
 
-    m_backendCombo = new QComboBox;
-    m_backendCombo->addItems({
-        QStringLiteral("TensorRT (CUDA)"),
-        QStringLiteral("DirectML (CPU/GPU)"),
-    });
-    m_backendCombo->setToolTip(
+    auto* backendLabel = new QLabel(QStringLiteral("TensorRT (CUDA)"));
+    backendLabel->setToolTip(
         tr("TensorRT(CUDA): N 卡专用,延迟最低,需要 CUDA + TensorRT 运行时。\n"
-           "DirectML: 通用后端,A 卡/Intel 卡也能跑,精度一致但延迟略高。"));
-    {
-        QString currentBackend = cfg.backend();
-        m_backendCombo->setCurrentIndex(currentBackend == QStringLiteral("DML") ? 1 : 0);
-    }
+           "DirectML 后端已于 2026-09-17 整条移除, 本程序现在只有这一个后端。"));
     backendCard->contentLayout()->addWidget(
-        FormKit::fieldRow(QStringLiteral("后端"), m_backendCombo));
-
-    m_dmlDeviceId = new QSpinBox;
-    m_dmlDeviceId->setRange(0, 15);
-    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
-    m_dmlRow = FormKit::fieldRow(QStringLiteral("DML 设备 ID"), m_dmlDeviceId);
-    backendCard->contentLayout()->addWidget(m_dmlRow);
-    m_dmlRow->setVisible(m_backendCombo->currentIndex() == 1);
+        FormKit::fieldRow(QStringLiteral("后端"), backendLabel));
 
     // Backend status label (TRT availability info)
     m_backendStatusLabel = new QLabel;
@@ -154,14 +142,6 @@ AiModelPage::AiModelPage(QWidget* parent)
     backendCard->contentLayout()->addWidget(m_backendStatusLabel);
 
     layout->addWidget(backendCard);
-
-    connect(m_backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &AiModelPage::onBackendChanged);
-    connect(m_dmlDeviceId, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [&cfg](int val) {
-        cfg.setDmlDeviceId(val);
-        emit cfg.configChanged();
-    });
 
     // ── Card 3: 检测参数 ──
     auto* detCard = new CardWidget(QStringLiteral("检测参数"),
@@ -185,15 +165,18 @@ AiModelPage::AiModelPage(QWidget* parent)
     m_nmsSlider->setToolTip(m_nmsSpin->toolTip());
     detCard->contentLayout()->addWidget(nmsRow);
 
-    QSlider* maxDetSlider = nullptr;
-    auto* maxDetRow = FormKit::sliderRow(
-        QStringLiteral("最大检测数"), 1, 100, cfg.maxDetections(),
-        maxDetSlider, m_maxDetections);
-    m_maxDetections->setToolTip(
-        tr("单帧最多保留的检测框数量。值太大浪费后处理时间,一般 20~50 够用。"));
-    if (maxDetSlider)
-        maxDetSlider->setToolTip(m_maxDetections->toolTip());
-    detCard->contentLayout()->addWidget(maxDetRow);
+    // ★ 2026-09-17: "最大检测数" 固定为 kFixedMaxDetections (=20), 不再可调。
+    //   原来是 1~100 的滑块, 但那会让人误以为"调大能检出更多" —— 模型是
+    //   end2end 形态, 每帧成品框本来就少, 多出来的框在下游全被丢弃。
+    //   这里改成只读展示, 说明为什么不可调。
+    auto* maxDetLabel = new QLabel(QString::number(kFixedMaxDetections));
+    maxDetLabel->setToolTip(
+        tr("单帧最多保留的检测框数量, 固定为 %1 不可修改。\n"
+           "模型为 end2end 形态, 每帧输出的成品框本来就很少; 下游(预览/选靶)\n"
+           "也只需要极少数目标, 调大不会检出更多, 只会增加后处理开销。")
+            .arg(kFixedMaxDetections));
+    detCard->contentLayout()->addWidget(
+        FormKit::fieldRow(QStringLiteral("最大检测数"), maxDetLabel));
 
     layout->addWidget(detCard);
 
@@ -206,11 +189,6 @@ AiModelPage::AiModelPage(QWidget* parent)
     connect(m_nmsSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [&cfg](double val) {
         cfg.setNmsThreshold(static_cast<float>(val));
-        emit cfg.configChanged();
-    });
-    connect(m_maxDetections, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [&cfg](int val) {
-        cfg.setMaxDetections(val);
         emit cfg.configChanged();
     });
 
@@ -276,9 +254,6 @@ void AiModelPage::reloadFromConfig() {
     // 整段还原期间屏蔽控件信号: 否则 setValue/setChecked 会走回写路径, 把
     // 中间态当成用户改动塞进新方案。
     const QSignalBlocker blockCombo(m_modelCombo);
-    const QSignalBlocker blockBackend(m_backendCombo);
-    const QSignalBlocker blockDml(m_dmlDeviceId);
-    const QSignalBlocker blockMaxDet(m_maxDetections);
     const QSignalBlocker blockStToggle(m_smallTargetEnabled);
 
     const QString model = cfg.aiModel();
@@ -292,13 +267,10 @@ void AiModelPage::reloadFromConfig() {
     if (modelIdx >= 0)
         m_modelCombo->setCurrentIndex(modelIdx);
 
-    m_backendCombo->setCurrentIndex(cfg.backend() == QStringLiteral("DML") ? 1 : 0);
-    m_dmlDeviceId->setValue(cfg.dmlDeviceId());
-    m_dmlRow->setVisible(m_backendCombo->currentIndex() == 1);
-
+    // ★ 2026-09-17: 后端恒为 TRT(下拉框与 DML 设备 ID 已随 DirectML 后端删除),
+    //   "最大检测数" 固定为 kFixedMaxDetections —— 两者都不再需要还原控件状态。
     setSliderValue(m_confSpin, m_confSlider, cfg.confidenceThreshold(), 0.01, 0.01);
     setSliderValue(m_nmsSpin, m_nmsSlider, cfg.nmsThreshold(), 0.00, 0.01);
-    m_maxDetections->setValue(cfg.maxDetections());
 
     m_smallTargetEnabled->setChecked(cfg.smallTargetEnabled());
     setSliderValue(m_smallTargetConfSpin, m_smallTargetConfSlider,
@@ -313,14 +285,8 @@ void AiModelPage::reloadFromConfig() {
     updateBackendStatus();
 }
 
-void AiModelPage::onBackendChanged(int index) {
-    auto& cfg = ConfigManager::instance();
-    m_dmlRow->setVisible(index == 1);
-    QString backend = (index == 1) ? QStringLiteral("DML") : QStringLiteral("TRT");
-    cfg.setBackend(backend);
-    emit cfg.configChanged();
-    updateBackendStatus();
-}
+// ★ 2026-09-17: onBackendChanged 已删除 —— DirectML 后端整条移除后没有"后端"可选,
+//   TensorRT 是唯一后端, 所以不存在"切换后端"这个动作。
 
 void AiModelPage::onSmallTargetToggled(bool enabled) {
     auto& cfg = ConfigManager::instance();
@@ -395,8 +361,10 @@ void AiModelPage::updateModelInfo() {
 }
 
 void AiModelPage::updateBackendStatus() {
-    const bool dml = m_backendCombo->currentIndex() == 1;
-    m_backendStatusLabel->setText(dml
-        ? QStringLiteral("DirectML 使用所选适配器；切换后请重新启动推理会话。")
-        : QStringLiteral("TensorRT 引擎固定使用 FP16 I/O；ONNX 首次启动时自动构建并缓存引擎。"));
+    // ★ 2026-09-17: 后端只剩 TensorRT, 所以这里不再有分支。
+    //   顺带把"必须是 end2end [1,N,6] 模型"这条硬要求写在界面上 ——
+    //   加载非 end2end 模型现在会直接报错退出。
+    m_backendStatusLabel->setText(QStringLiteral(
+        "TensorRT 引擎固定使用 FP16 I/O；ONNX 首次启动时自动构建并缓存引擎。\n"
+        "只支持 end2end 形态的模型(输出 [1,N,6]，即 NMS/解码已烘进图内)。"));
 }

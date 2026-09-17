@@ -58,10 +58,9 @@ public:
     QString kmboxNetUuid() const;
     void setKmboxNetUuid(const QString& v);
     // AI
+    // ★ 2026-09-17: DirectML 后端已整条移除 → setBackend / dmlDeviceId /
+    //   setDmlDeviceId 三个读写口删除; backend() 恒返回 "TRT"。
     QString backend() const;
-    void setBackend(const QString& v);
-    int dmlDeviceId() const;
-    void setDmlDeviceId(int v);
     QString aiModel() const;
     void setAiModel(const QString& v);
     float confidenceThreshold() const;
@@ -139,41 +138,41 @@ public:
         QString group;
         QStringList keys;
         int fovX = 106, fovY = 74;
-        bool triggerEnabled = false;
-        int triggerFireDelay = 0;
-        // 0 = 长按模式(按住不松手, 准星离开命中区才松开); >0 = 连点模式。
-        int triggerFireDuration = 0;
-        int triggerFireInterval = 200;
-        int triggerYPercent = 100;
-        int triggerDelayJitterMs    = 0;
-        int triggerDurationJitterMs = 0;
-        int triggerIntervalJitterMs = 0;
-        int triggerSwitchCooldownMs = 0;
-        // 自动开镜 (仿 AimMagic 的「开火方式」): 0 关 / 1 点按右键(切换) / 2 长按右键(按住)
-        int triggerAutoScope = 0;
-        int triggerScopeDelayMs = 0;
-        // 自动急停: 0 关 / 1 开; stopMs = 反方向键短按时长(只有 MAKCUNEW 生效)
-        int triggerAutoStop = 0;
-        int triggerStopMs = 60;
+        // ★ 2026-09-17: 原来这里有 ~20 个瞄准链成员(trigger_* 12 个 / aim_path_* 8 个)。
+        //   它们只在这个结构体和 QSettings 之间往返, 没有任何运行时消费者, 所以随
+        //   瞄准控制链一起删除。删掉它们也意味着 QSettings 里那些键不再被读写 ——
+        //   用户旧的 QSettings 里残留的值会被忽略, 不影响任何活着的键。
+        // ── 下面这些仍然活着(检测 / 瞄点选择 / 准星找色 在用) ──
         // 优先级排序的类别列表, 每条 "id:y_min:y_max:min_conf", 分号分隔。
         QString aimClasses;
         bool crosshairDetectEnabled = false;
         bool dynamicFovEnabled = false;
         float dynamicFovStrength = 0.60f;
-        // Aim trajectory curve. 0=Linear, 1=Bezier, 2=Custom, 3=WindMouse.
-        int   aimPathMode = 0;
-        float aimPathBezierCx1 = 0.30f;
-        float aimPathBezierCy1 = 0.00f;
-        float aimPathBezierCx2 = 0.70f;
-        float aimPathBezierCy2 = 0.00f;
-        // WindMouse 曲线 (mode=3): AM 的 wind_mouse_G0/W0/M0/D0 + curve_threshold。
-        float aimPathWindGravity   = 5.0f;
-        float aimPathWindWind      = 2.0f;
-        float aimPathWindStep      = 10.0f;
-        float aimPathWindDistance  = 8.0f;
-        int   aimPathWindThreshold = 10;
-        // Comma-separated high-resolution floats. Empty = straight line.
-        QString aimPathCustomSamples;
+
+        // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────
+        // 与 HotkeyProfile 的 ctl_* 一一对应，由 config_bridge 双向同步。
+        // ★★ 必须逐个列出: 这个结构是界面侧的落盘载体，`aim_classes` 当初
+        //    就是因为"只在 HotkeyProfile 里有、这里没有"而断过线。
+        // ★ 默认值与 HotkeyProfile 的成员初值一致（等价历史单行为）。
+        bool   ctlEnabled = false;
+        double ctlKpX = 35.0, ctlKpY = 35.0;
+        double ctlKiX = 0.0,  ctlKiY = 0.0;
+        double ctlKdX = 0.0,  ctlKdY = 0.0;
+        double ctlTauUnwindSec = 0.030;
+        double ctlTauDerivSec = 0.020;
+        double ctlIMax = 0.0;
+        int    ctlMaxOutputCounts = 200;
+        double ctlPFullScalePx = 0.0;
+        double ctlYOffset = 0.5;
+        double ctlYOffsetMax = 0.5;
+        double ctlHysteresisRatio = 1.3;
+        double ctlMaxDistancePx = 0.0;
+        int    ctlRandomSeed = 0;
+        double ctlMatchCenterRatio = 0.5;
+        double ctlAreaRatioTol = 2.0;
+        double ctlKSnapMult = 1.15;
+        double ctlMinAspect = 0.2;
+        double ctlMaxAspect = 5.0;
     };
 
     HotkeyData hotkey(int index) const;

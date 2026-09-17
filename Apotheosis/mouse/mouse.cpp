@@ -23,13 +23,11 @@ MouseRuntimeParams sanitize(MouseRuntimeParams p)
 
 } // namespace
 
-// Flick / Track telemetry (kept for overlay compat).
-std::atomic<float> g_pid_last_err_px{ 0.0f };
-std::atomic<bool>  g_pid_mode_track{ false };
-
-// Dynamic-FOV telemetry.
-std::atomic<float> g_dynamic_fov_radius_x_px{ 0.0f };
-std::atomic<float> g_dynamic_fov_radius_y_px{ 0.0f };
+// ★ 瞄准遥测全局量已随控制链删除(2026-09-17)。
+//   原来这里有 g_pid_last_err_px / g_pid_mode_track / g_dynamic_fov_radius_x/y ——
+//   它们的唯一生产者是 mouse_thread_loop.cpp, 该文件已删除, 于是它们退化成
+//   "永远为 0 的死读"(预览窗和 DebugPage 之前还在读)。死读比没有更糟: 界面上会
+//   显示一个永远不动、看起来像"FOV 收缩没生效"的数字。所以连同读取点一起删掉。
 
 MouseThread::MouseThread(
     const MouseRuntimeParams& params,

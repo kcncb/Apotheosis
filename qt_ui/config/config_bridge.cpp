@@ -87,12 +87,13 @@ void ConfigBridge::syncToRuntime() {
     config.kmbox_net_uuid     = qs(cm.kmboxNetUuid());
     // --- AI ---
     std::string oldModel = config.ai_model;
-    config.backend              = qs(cm.backend());
-    config.dml_device_id        = cm.dmlDeviceId();
+    // ★ 2026-09-17: backend 恒为 TRT, dml_device_id 已随 DirectML 后端删除,
+    //   max_detections 固定 kFixedMaxDetections —— 三者都不再从界面回写。
+    config.backend              = "TRT";
     config.ai_model             = qs(cm.aiModel());
     config.confidence_threshold = cm.confidenceThreshold();
     config.nms_threshold        = cm.nmsThreshold();
-    config.max_detections       = cm.maxDetections();
+    config.max_detections       = kFixedMaxDetections;
     config.small_target_enabled    = cm.smallTargetEnabled();
     config.small_target_confidence = cm.smallTargetConfidence();
     config.small_target_area_frac  = cm.smallTargetAreaFrac();
@@ -200,12 +201,12 @@ void ConfigBridge::syncFromRuntime()
     cm.setKmboxNetPort(qstr(config.kmbox_net_port));
     cm.setKmboxNetUuid(qstr(config.kmbox_net_uuid));
     // --- AI ---
-    cm.setBackend(qstr(config.backend));
-    cm.setDmlDeviceId(config.dml_device_id);
+    // ★ 2026-09-17: setBackend / setDmlDeviceId 已删除(DirectML 后端整条移除);
+    //   max_detections 固定, 但 setter 保留以维持既有调用序列。
     cm.setAiModel(qstr(config.ai_model));
     cm.setConfidenceThreshold(config.confidence_threshold);
     cm.setNmsThreshold(config.nms_threshold);
-    cm.setMaxDetections(config.max_detections);
+    cm.setMaxDetections(kFixedMaxDetections);
     cm.setSmallTargetEnabled(config.small_target_enabled);
     cm.setSmallTargetConfidence(config.small_target_confidence);
     cm.setSmallTargetAreaFrac(config.small_target_area_frac);
@@ -267,19 +268,17 @@ void ConfigBridge::syncFromRuntime()
             hd.keys.push_back(qstr(k));
         hd.fovX = hp.fovX;
         hd.fovY = hp.fovY;
-        hd.triggerEnabled      = hp.trigger_enabled;
-        hd.triggerFireDelay    = hp.trigger_fire_delay;
-        hd.triggerFireDuration = hp.trigger_fire_duration;
-        hd.triggerFireInterval = hp.trigger_fire_interval;
-        hd.triggerYPercent     = hp.trigger_y_percent;
-        hd.triggerDelayJitterMs    = hp.trigger_delay_jitter_ms;
-        hd.triggerDurationJitterMs = hp.trigger_duration_jitter_ms;
-        hd.triggerIntervalJitterMs = hp.trigger_interval_jitter_ms;
-        hd.triggerSwitchCooldownMs = hp.trigger_switch_cooldown_ms;
-        hd.triggerAutoScope    = hp.trigger_auto_scope;
-        hd.triggerScopeDelayMs = hp.trigger_scope_delay_ms;
-        hd.triggerAutoStop     = hp.trigger_auto_stop;
-        hd.triggerStopMs       = hp.trigger_stop_ms;
+        // ── 【2026-09-17 整条删除】瞄准控制链的手键参数不再同步 ───────────────
+        // 这里原本把 hp.trigger_* / hp.aim_path_* 等几十个字段整片抄进
+        // ConfigManager::HotkeyData。HotkeyProfile 上那些字段已随瞄准控制链
+        // (aim_pid / boss_aim / aim_scale / aim_path / auto_stop / trigger_scope /
+        //  autotune_*)一起删除, 所以这些赋值也一并删除 —— 否则编不过。
+        // ★ ConfigManager::HotkeyData 里对应的成员暂时【保留】: 它们是界面侧的
+        //   本地结构, 不属于本次「配置层自洽」的范围; 但从此它们与 HotkeyProfile
+        //   不再有任何连线(永远是结构体默认值), 只有 UI 页面自己读写。
+        //   谁要清理它们, 应该连同页面上的控件一起做。
+        //
+        // 下面这些【保留】: 检测/瞄准点选择与准星找色这一侧还活着。
         {
             QString joined;
             for (size_t ai = 0; ai < hp.aim_classes.size(); ++ai) {
@@ -298,19 +297,37 @@ void ConfigBridge::syncFromRuntime()
         hd.crosshairDetectEnabled  = hp.crosshair_detect_enabled;
         hd.dynamicFovEnabled  = hp.dynamic_fov_enabled;
         hd.dynamicFovStrength = hp.dynamic_fov_strength;
-        hd.aimPathMode        = hp.aim_path_mode;
-        hd.aimPathBezierCx1   = hp.aim_path_bezier_cx1;
-        hd.aimPathBezierCy1   = hp.aim_path_bezier_cy1;
-        hd.aimPathBezierCx2   = hp.aim_path_bezier_cx2;
-        hd.aimPathBezierCy2   = hp.aim_path_bezier_cy2;
-        hd.aimPathWindGravity   = hp.aim_path_wind_gravity;
-        hd.aimPathWindWind      = hp.aim_path_wind_wind;
-        hd.aimPathWindStep      = hp.aim_path_wind_step;
-        hd.aimPathWindDistance  = hp.aim_path_wind_distance;
-        hd.aimPathWindThreshold = hp.aim_path_wind_threshold;
-        // 高密度曲线由 Config 的 .curve 二进制资产持久化。
-        // QSettings 不再重复保存数万个文本浮点数。
-        hd.aimPathCustomSamples.clear();
+        // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────────
+        // ★ 这一段的用途是「让界面控件按运行期真值重读」—— 铁律 (a) 要求
+        //   每个改 config 的入口都刷新控件，否则界面会变成一个
+        //   "随时把旧值灌回去的缓存"（HotkeyPage 当年就是这么出事的）。
+        // ★★ 所以这里【必须】逐个赋值: 漏一个 = 那个控件永远显示旧值,
+        //    用户一改别的控件就整片写回，把参数悄悄改回去、不报错不留痕。
+        hd.ctlEnabled          = hp.ctl_enabled;
+        hd.ctlKpX              = hp.ctl_kp_x;
+        hd.ctlKpY              = hp.ctl_kp_y;
+        hd.ctlKiX              = hp.ctl_ki_x;
+        hd.ctlKiY              = hp.ctl_ki_y;
+        hd.ctlKdX              = hp.ctl_kd_x;
+        hd.ctlKdY              = hp.ctl_kd_y;
+        hd.ctlTauUnwindSec     = hp.ctl_tau_unwind_sec;
+        hd.ctlTauDerivSec      = hp.ctl_tau_deriv_sec;
+        hd.ctlIMax             = hp.ctl_i_max;
+        hd.ctlMaxOutputCounts  = hp.ctl_max_output_counts;
+        hd.ctlPFullScalePx     = hp.ctl_p_full_scale_px;
+        hd.ctlYOffset          = hp.ctl_y_offset;
+        hd.ctlYOffsetMax       = hp.ctl_y_offset_max;
+        hd.ctlHysteresisRatio  = hp.ctl_hysteresis_ratio;
+        hd.ctlMaxDistancePx    = hp.ctl_max_distance_px;
+        hd.ctlRandomSeed       = hp.ctl_random_seed;
+        hd.ctlMatchCenterRatio = hp.ctl_match_center_ratio;
+        hd.ctlAreaRatioTol     = hp.ctl_area_ratio_tol;
+        hd.ctlKSnapMult        = hp.ctl_k_snap_mult;
+        hd.ctlMinAspect        = hp.ctl_min_aspect;
+        hd.ctlMaxAspect        = hp.ctl_max_aspect;
+        // ★ 瞄准轨迹曲线 (aim_path_*) 与扳机 (trigger_*) 的同步已于 2026-09-17
+        //   随 HotkeyProfile 上的字段一起删除 —— 那些字段没有消费者了。
+        //   ConfigManager::HotkeyData 里的对应成员保持结构体默认值(见上)。
         if (i < cm.hotkeyCount())
             cm.setHotkey(i, hd);
         else

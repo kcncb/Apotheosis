@@ -14,16 +14,13 @@ public:
     explicit SessionPage(QWidget* parent = nullptr);
 
 private slots:
-    void onBackendChanged(int index);
-    void onDmlDeviceChanged(int value);
+    // ★ 2026-09-17: onBackendChanged / onDmlDeviceChanged 已删除
+    //   (DirectML 后端整条移除, TensorRT 是唯一后端)。
     void onShowWindowChanged(bool checked);
     void loadConfig();
 
 private:
-    // Backend card
-    QComboBox* m_backendCombo{};
-    QSpinBox* m_dmlDeviceId{};
-    QWidget* m_dmlDeviceRow{};
+    // Backend card — 只剩只读展示 + 状态行
     QLabel* m_backendStatusLabel{};
 
     // Preview card
@@ -31,7 +28,6 @@ private:
 
     // CUDA settings card
     ToggleSwitch* m_cudaGraph{};
-    ToggleSwitch* m_dualBuffer{};
     ToggleSwitch* m_gpuExclusive{};
     QSpinBox* m_gpuReserve{};
     QSpinBox* m_cpuReserve{};

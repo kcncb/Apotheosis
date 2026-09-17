@@ -67,8 +67,10 @@ function(copy_runtime target path)
     endif()
 endfunction()
 
-pick_latest_dir(ONNXRUNTIME_DIR "${PACKAGES_DIR}/Microsoft.ML.OnnxRuntime.DirectML.*")
-pick_latest_dir(DIRECTML_DIR "${PACKAGES_DIR}/Microsoft.AI.DirectML.*")
+# ★ 2026-09-17: DirectML 后端整条移除, 所以这里不再选 DirectML 风味的 ORT 包。
+#   ONNX Runtime 本身【保留】—— model_inspector.cpp 用它读 .onnx 的类别名与
+#   输入输出形状 (与推理后端无关, 换模型时要用)。
+pick_latest_dir(ONNXRUNTIME_DIR "${PACKAGES_DIR}/Microsoft.ML.OnnxRuntime.*")
 pick_latest_dir(OPENCV_VC_DIR "${OPENCV_ROOT}/x64/vc*")
 if(OPENCV_VC_DIR STREQUAL "")
     set(OPENCV_VC_DIR "${OPENCV_ROOT}/x64/vc18")
@@ -88,9 +90,11 @@ endif()
 require_file("${OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp" "OpenCV headers")
 require_file("${OPENCV_LIB}" "OpenCV library")
 require_file("${OPENCV_DLL}" "OpenCV runtime")
+# ★ ONNX Runtime 保留: model_inspector.cpp 用它读 .onnx 的类别名/输入输出形状,
+#   与 DirectML 后端【无关】。DirectML 已于 2026-09-17 随 DML 后端一起移除
+#   (见下方 DIRECTML_DIR / dml_detector 的删除说明)。
 require_file("${ONNXRUNTIME_DIR}/build/native/include/onnxruntime_cxx_api.h" "ONNX Runtime headers")
 require_file("${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.lib" "ONNX Runtime library")
-require_file("${DIRECTML_DIR}/bin/x64-win/DirectML.dll" "DirectML runtime")
 require_file("${TENSORRT_ROOT}/include/NvInfer.h" "TensorRT headers")
 require_file("${TENSORRT_ROOT}/lib/nvinfer_10.lib" "TensorRT nvinfer library")
 require_file("${TENSORRT_ROOT}/lib/nvonnxparser_10.lib" "TensorRT nvonnxparser library")
@@ -102,19 +106,13 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 set(QT_UI_DIR "${CMAKE_SOURCE_DIR}/qt_ui")
 
-# 目标关联 + 瞄点(锁谁 / 瞄框内哪个点)。这部分与 PID 无关, 予以保留。
+# ★ AVA 选靶/瞄点那一组(mouse/ava_exact/, 12 个文件)已于 2026-09-17 删除。
+#   它随瞄准控制链一起失去消费者后, 曾以"编进去但没人调"的状态保留了一段时间;
+#   现按要求连同构建列表一起移除。
 # 原 AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、
 # aim_movement_pipeline、controller_orchestration、pid_input、qx_curve、
 # process_humanization、humanization_math、热键旁路、mouse_output、timed_button)
-# 已全部删除, 由新写的 PID 取代 —— 接入点在 mouse/boss_aim.cpp 的 tick()。
-set(AVA_TARGET_SOURCES
-    "${SRC_DIR}/mouse/ava_exact/target_region_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selection_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selector_config_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_tracker_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_selector_top_exact.cpp"
-    "${SRC_DIR}/mouse/ava_exact/target_to_aimpoint_exact.cpp"
-)
+# 已全部删除。
 
 set(APP_SOURCES
     "${SRC_DIR}/Apotheosis.cpp"
@@ -132,7 +130,6 @@ set(APP_SOURCES
     "${SRC_DIR}/crosshair/crosshair_runtime.cpp"
     "${SRC_DIR}/detector/cuda_preprocess.cu"
     "${SRC_DIR}/detector/detection_buffer.cpp"
-    "${SRC_DIR}/detector/dml_detector.cpp"
     "${SRC_DIR}/detector/model_inspector.cpp"
     "${SRC_DIR}/detector/postProcess.cpp"
     "${SRC_DIR}/detector/trt_detector.cpp"
@@ -147,15 +144,10 @@ set(APP_SOURCES
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
-    "${SRC_DIR}/mouse/aim_pid.cpp"
-    "${SRC_DIR}/mouse/boss_aim.cpp"
-    # 调参 agent (2026-09-14): LLM 客户端走 WinHTTP, 零新依赖。
-    # runtime/agent/hooks 三层分开: 纯逻辑层(可进逻辑测试) + Qt/config 接入层。
-    "${SRC_DIR}/mouse/autotune_llm.cpp"
-    "${SRC_DIR}/mouse/autotune_agent.cpp"
-    "${SRC_DIR}/mouse/autotune_runtime.cpp"
-    "${SRC_DIR}/mouse/autotune_hooks.cpp"
-    ${AVA_TARGET_SOURCES}
+    # ★ 瞄准控制链已整条删除(2026-09-17): aim_pid / boss_aim / aim_tracker /
+    #   aim_scale / aim_path / anchor_filter / auto_stop / trigger_scope /
+    #   autotune_* 与 runtime/mouse_thread_loop.cpp 全部移除。
+    #   本程序现在只做【采集 → 推理】, 检测结果供预览窗显示。
     "${SRC_DIR}/mouse/Makcu.cpp"
     "${SRC_DIR}/mouse/MakcuNew.cpp"
     # KMBox Net (以太网 UDP) 后端 + 驱动抽象层 (2026-09-15 恢复/新增)。
@@ -167,6 +159,20 @@ set(APP_SOURCES
     "${SRC_DIR}/overlay/app_log.cpp"
     "${SRC_DIR}/overlay/preview_window.cpp"
     "${SRC_DIR}/runtime/active_hotkey.cpp"
+    # ── ★★ 通用控制器层 (2026-09-17 第三轮重建) ──────────────────────────
+    # control/ 是【零依赖】的纯计算层(不引 OpenCV/Windows/Qt), 所以它同时被
+    # 主程序与 tests/control_layer_test 编译 —— 一份代码两处用, 不复制。
+    # runtime/aim_loop.cpp 是它的运行期外壳(取检测/取准星/算 dt/下发)。
+    "${SRC_DIR}/control/types.cpp"
+    "${SRC_DIR}/control/selector.cpp"
+    "${SRC_DIR}/control/stabilizer.cpp"
+    "${SRC_DIR}/control/alpha_beta_filter.cpp"
+    "${SRC_DIR}/control/anchor.cpp"
+    "${SRC_DIR}/control/pid_controller.cpp"
+    "${SRC_DIR}/control/aim_controller.cpp"
+    "${SRC_DIR}/runtime/aim_loop.cpp"
+    # aim_loop_config.cpp 是【纯映射】, 不依赖 OpenCV/Windows ⇒ 逻辑测试也编它。
+    "${SRC_DIR}/runtime/aim_loop_config.cpp"
     "${SRC_DIR}/runtime/aim_telemetry.cpp"
     "${SRC_DIR}/runtime/cuda_availability.cpp"
     "${SRC_DIR}/runtime/config_snapshot.cpp"
@@ -175,7 +181,6 @@ set(APP_SOURCES
     "${SRC_DIR}/runtime/latency_probe.h"
     "${SRC_DIR}/runtime/live_tune.cpp"
     "${SRC_DIR}/runtime/live_tune.h"
-    "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
     "${SRC_DIR}/runtime/sched_boost.cpp"
     "${SRC_DIR}/runtime/sched_boost.h"
     "${SRC_DIR}/scr/file_picker.cpp"
@@ -192,10 +197,12 @@ set(APP_SOURCES
     "${QT_UI_DIR}/config/config_bridge.h"
     "${QT_UI_DIR}/pages/AiModelPage.cpp"
     "${QT_UI_DIR}/pages/AiModelPage.h"
+    # ★★ 瞄准设置页 (2026-09-17 第三轮续重建): 热键管理 + 通用控制器层参数。
+    #   它同时是 config.hotkeys[] 的唯一界面写入者。
+    "${QT_UI_DIR}/pages/AimSettingsPage.cpp"
+    "${QT_UI_DIR}/pages/AimSettingsPage.h"
     "${QT_UI_DIR}/pages/AutoCapturePage.cpp"
     "${QT_UI_DIR}/pages/AutoCapturePage.h"
-    "${QT_UI_DIR}/pages/AutoTunePage.cpp"
-    "${QT_UI_DIR}/pages/AutoTunePage.h"
     "${QT_UI_DIR}/pages/CapturePage.cpp"
     "${QT_UI_DIR}/pages/CapturePage.h"
     "${QT_UI_DIR}/pages/CrosshairPage.cpp"
@@ -204,8 +211,6 @@ set(APP_SOURCES
     "${QT_UI_DIR}/pages/DebugPage.h"
     "${QT_UI_DIR}/pages/HardwarePage.cpp"
     "${QT_UI_DIR}/pages/HardwarePage.h"
-    "${QT_UI_DIR}/pages/HotkeyPage.cpp"
-    "${QT_UI_DIR}/pages/HotkeyPage.h"
     "${QT_UI_DIR}/pages/LogPage.cpp"
     "${QT_UI_DIR}/pages/LogPage.h"
     "${QT_UI_DIR}/pages/ModelToolsPage.cpp"
@@ -361,8 +366,6 @@ copy_runtime(ai "${SRC_DIR}/assets/apotheosis_logo.png")
 
 copy_runtime(ai "${OPENCV_DLL}")
 copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")
-copy_runtime(ai "${ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
-copy_runtime(ai "${DIRECTML_DIR}/bin/x64-win/DirectML.dll")
 copy_runtime(ai "${MSVC_REDIST_DIR}/concrt140.dll")
 copy_runtime(ai "${MSVC_REDIST_DIR}/msvcp140.dll")
 copy_runtime(ai "${MSVC_REDIST_DIR}/msvcp140_1.dll")
@@ -417,7 +420,6 @@ add_custom_command(TARGET ai POST_BUILD
 message(STATUS "Apotheosis portable build (Qt6 UI)")
 message(STATUS "OpenCV: ${OPENCV_VC_DIR}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_DIR}")
-message(STATUS "DirectML: ${DIRECTML_DIR}")
 message(STATUS "TensorRT: ${TENSORRT_ROOT}")
 message(STATUS "cuDNN: ${CUDNN_ROOT}")
 message(STATUS "CUDA: ${CUDAToolkit_BIN_DIR}")

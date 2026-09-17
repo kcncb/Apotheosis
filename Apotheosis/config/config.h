@@ -2,7 +2,6 @@
 #define CONFIG_H
 
 #include <memory>
-#include <array>
 #include <string>
 #include <vector>
 
@@ -52,186 +51,20 @@ struct HotkeyProfile
     int fovX = 106;
     int fovY = 74;
 
-    // ── 瞄准控制器 (mouse/aim_pid.h) ────────────────────────────────────────
-    // 旧 AVA PIDF 管线已整条删除, 这几个槽位沿用下来但语义已换, 单位都带时间量纲
-    // (u = dt*Kp*[e + Ki*∫e + Kd*e'], 所以换帧率不用重调):
-    //   pidf_kp_*   Kp 计数/(像素*秒) —— 回路速度。唯一与游戏灵敏度挂钩的旋钮:
-    //              手感拖沓就往上加(每次 +50%), 开始抖/画圈就退回来。
-    //   pidf_ki_*   Ki 1/秒 —— 积分速率(Ti = 1/Ki), 磨掉匀速目标的滞后与残余偏置。
-    //   pidf_kd_*   Kd 秒 —— 微分时间, 压过冲。检测框抖动在微分眼里是尖峰, 所以默认很小。
-    //   pidf_psat_* P项饱和阈值 像素(0 = 关, 默认关: 见字段处说明)
-    //   pidf_limit_*    每拍计数上限(0 = 内置 200)
-    // 默认值由闭环回归(每计数 0.25 像素 + 50ms 死区)扫出来的稳定边界决定, 见
-    // tests/aim_pid_test.cpp。
-    int pidf_mapping_version = 6;
-    float pidf_kp_x = 35.0f, pidf_kp_y = 35.0f;
-    float pidf_ki_x = 1.0f, pidf_ki_y = 1.0f;
-    float pidf_kd_x = 0.0f, pidf_kd_y = 0.0f;
-
-    // ── P 项饱和阈值 (原「移动死区」, 2026-09-14 改名并重新界定) ─────────────
-    // 历史: 这里曾经是【死区宽度】(像素), 死区本身已整段删除 —— 它会让误差在瞄点
-    // 周围永久丢精度, 还会制造 10 次/秒的输出抖动。字段随后被【借去】当 P 项饱和
-    // 阈值用, 但界面一直叫"移动死区", 造成名实不符。
+    // ── 【2026-09-17 整条删除】瞄准控制链的配置槽位 ─────────────────────────
+    // 整个瞄准控制链(aim_pid / boss_aim / aim_tracker / aim_scale / aim_path /
+    // anchor_filter / auto_stop / trigger_scope / autotune_*)连同
+    // runtime/mouse_thread_loop.cpp 一起被删除, 程序现在只做【采集 → 推理】。
+    // 因此下列槽位再没有任何消费者, 字段本身也删掉了:
+    //   pidf_mapping_version (迁移机制本身 —— 槽位没了, 没有东西可迁移)
+    //   pidf_kp_*/pidf_ki_*/pidf_kd_*/pidf_psat_*/pidf_limit_*
+    //   pidf_predict_*
+    //   pidf_inflight_x/y 与 pidf_inflight_window_ms
+    //   esync_min_hits/assoc_iou/vel_sample_ms/pred_*
+    //   aim_scale_enabled/max/min/base_h
+    //   aim_path_*/trigger_*
+    // 老配置里这些键仍然存在, 加载时【读都不读】(不报错), 下次保存时自动消失。
     //
-    // 现在正式改名。语义: |误差| <= 此值(px) 时 P 项满增益, 超过则按 此值/|误差|
-    // 连续衰减(经过原点, 无硬切换)。0 = 关闭饱和(默认, 生产用它)。
-    //
-    // 实测(400px 阶跃, Kp 扫描): 饱和对过冲的影响【取决于 Kp】——
-    //      Kp 15/25: 饱和让过冲【变差】(12.1→20.4 / 11.0→21.6)
-    //      Kp 35+  : 饱和让过冲【变好】(43.6→28.2 / 145.6→50.1)
-    // 转折点在 Kp≈30。生产 Kp=35 恰好压在转折点右侧, 所以默认关闭(少一个非线性
-    // 环节, 行为更可预测)。★ 改这一段必须重做那张扫描表。
-    int pidf_psat_x = 0, pidf_psat_y = 0;
-
-    // 输出限幅: 每个控制周期最多下发的鼠标计数。0 = 用内置上限(200)。
-    int pidf_limit_x = 0, pidf_limit_y = 0;
-
-    // ── 预测补偿 (2026-09-13 重做) ──────────────────────────────────────────
-    //
-    // 这是 **AimMagic 1.0.30「预测补偿」那一页的等价实现**, 公式逐项对齐逆向报告
-    // (依据见 mouse/aim_tracker.h 的 predictionLead 顶部)。做法是: 把"目标在这一拍里
-    // 会走到哪"算出来, 直接加到瞄点上, 再送去 PID —— 所以 PID 追的是一个"将要到"的位置。
-    // ★ 状态住在【每条轨迹】上(见 AimTracker), 不再是全局一份。
-    //
-    // 原式 (AM 两处代码路径互证):
-    //     sizeWeight = (maxW - w) / (maxW - minW)      // minW < w < maxW, 否则 0
-    //     predX      = factor_x * motionX * sizeWeight
-    //     k          = (predX * predXPrev < 0) ? K_damp : 1.0   // 方向翻转阻尼
-    //     box.cx    += (1-k)*predXPrev + k*predX       // ★ 直接改写框心
-    //
-    // ★ 与之前那套"在途补偿"的区别(那套已删除, 不是 AM 也不是原神的做法):
-    //     预测: 改【目标在哪】—— 输出仍然是 误差→PID→计数;
-    //     在途: 改【PID 怎么算】—— 把未落地的计数从误差里扣掉。
-    //   两者不叠加, 现在只保留预测。
-    //
-    // ★★ 2026-09-14 重做: 系数范围从 0..100 收到 0..0.2, 并加【硬像素上限】★★
-    //
-    // 原范围是错的: 提前量 = 系数 × sizeWeight × 目标屏幕速度, 想要"死区 46ms 内目标
-    // 走过的距离"(物理上合理的提前量), 需要的系数是 0.046/sizeWeight ≈ 0.05~0.2。
-    // 而界面给的是 0..100 —— 差 500~2000 倍。实测把滑条拨到 1.0, v=300px/s 时提前量
-    // 就是 150px(等效 0.5 秒), 拨到 100 是 15000px。这直接违反任务书 §4.2 的
-    // "绝不允许稳态瞄偏随速度线性增长"。
-    //
-    // 现在三道约束(§4.2 五条的落地):
-    //   ① 系数范围 0..0.2, 合理值就在区间内, 拨到头也只到物理量级;
-    //   ② 【硬像素上限】(pidf_predict_max_px): lead 被夹在 该值 与 v×死区 的较小者,
-    //      这是"从物理量导出的硬上限", 不是可调旋钮放开就无限大;
-    //   ③ 【速度噪声门】(见 pidf_predict_vel_floor): 目标速度低于门限时提前量归零,
-    //      因为静止目标的 v̂ 噪声实测 p99=46px/s —— 不设门会把噪声乘成几像素假误差。
-    //
-    // pidf_predict_x/y      预测系数 X/Y。0 = 该轴不预测(默认关闭)。
-    //   提前量 = 系数 × 目标屏幕速度 × 尺寸权重, 再被上面 ② 夹取。
-    // pidf_predict_min_w    最小预测宽度(像素, AM 默认 20)。
-    // pidf_predict_max_w    最大预测宽度(像素, AM 默认 80)。
-    //   这两个框定"哪些目标才补": 框宽 <= minW 或 >= maxW 一律不补, 中间按线性梯度。
-    //   ★ 注意用的是【框宽 bbox.width】, 而尺度调度用的是【框高 bbox.height】—— 两者
-    //     历史来源不同, 不算 bug, 但同时启用时"远近"判断不一致, 已在设计说明记明。
-    // pidf_predict_damp     方向翻转阻尼(0..1, 1 = 不阻尼)。
-    //   目标左右横跳时速度估计瞬间反向, 提前量会从 +x 直接跳到 -x —— 幅度 2×lead 的
-    //   突变, 看起来是"准星猛抽一下"。阻尼让它滑过去。
-    //   ★ 现在由 AimTracker::axisLead 消费(每轨一份平滑状态)。
-    // pidf_predict_max_px   提前量的【硬上限】(像素, 0 = 用内置默认 12px)。
-    // pidf_predict_vel_floor 速度噪声门(px/s): |v̂| 低于此值提前量归零。实测静止目标
-    //   的 v̂ 噪声 p99=46 / max=52, 所以默认 60 能挡住噪声又不影响真实移动目标。
-    float pidf_predict_x = 0.0f, pidf_predict_y = 0.0f;
-    int pidf_predict_min_w = 20;
-    int pidf_predict_max_w = 80;
-    float pidf_predict_damp = 0.25f;
-    int pidf_predict_max_px = 12;
-    int pidf_predict_vel_floor = 60;
-
-    // ── PID-EventSync (本档唯一链路) ───────────────────────────────────────
-    //
-    // ★★ 这是 AimMagic 1.0.30「PID-EventSync」整条链路的移植 ★★
-    //
-    // 它移植的是 AM 的【架构】, 不是它的数字(docs/aimmagic-port-spec.md §0.1:
-    // "抄形状, 不抄数值" —— AM 的 x_kp=0.1 是 counts/像素/帧, 与本项目的
-    // counts/(像素·秒) 不同纲, 照抄必错)。
-    //
-    // 三件东西:
-    //   ① 【跟踪器】(mouse/aim_tracker.h): 目标身份跨帧粘滞(IoU + 最近邻),
-    //      min_hits / max_age 生命周期, 速度按【采样窗】估计而不是逐帧重建。
-    //      → 解掉本项目"身份每秒变 8 次、每次都可能复位积分"的老问题。
-    //   ② 【每轨预测状态机】: 预测系数按 0.1/帧 爬升、-0.2/帧 回落,
-    //      状态住在【每条轨迹】上。→ 换目标不串状态, 短暂漏检不清零。
-    //   ③ 【事件驱动消费】: 每次推理只出一拍位移, 帧间不做外推补拍。
-    //      → 与 AM 的 EventSync 语义一致: 控制器只在"有新观测"时动。
-    //      (旧的 use_prediction_tick / prediction_tick_* 三个键已随之删除。)
-    //
-    // ★ 2026-09-16: 「经典 PID（现役）」档与它的全局 AimPredict 已删除 ——
-    //   本档不再是"开关", 而是唯一的控制器链路。原先的 aim_mode 键也删掉了
-    //   (老配置里如果还写着它, 读入时忽略, 不再有任何效果)。
-    // 单位/取值:
-    // ── 跟踪器 (AM 的 Group 作用域, 键名与 AM 一致) ──────────────────────────
-    // ★★ 2026-09-16 重建: 此前本组有 6 个键(esync_assoc_radius_px / esync_assoc_iou /
-    //   esync_vel_window_ms / esync_counts_per_pixel_x/y / esync_inflight_window_ms /
-    //   esync_inflight_beta / esync_self_motion_gain), 复核 AM 1.0.30 后确认
-    //   **其中 5 个在 AM 里根本没有对应键**, 是"按思路适配"进来的。
-    //   现在只保留 AM 真正暴露的那几个, 且键名照抄(便于对照)。
-    //   证据: docs/aimmagic-ground-truth.md §2.1 / §2.5。
-    //
-    // 跟踪器: 连续命中多少帧才算"确认轨迹"。AM: min_hits 默认 3(config+0x44)。
-    // 判据是 `min_hits <= hits`, 与 max_age 一起构成"够格输出"(ground-truth §4.3)。
-    int esync_min_hits = 3;
-    // 跟踪器: 漏帧多少帧后删除轨迹。AM: max_age 默认 5(config+0x48)。
-    // ★ 删除判据是 `max_age < misses`(严格), 即**漏 max_age 帧后仍存活**,
-    //   第 max_age+1 帧才删。所以它就是 EventSync 的滑行窗口, 但比"漏 N 帧就删"
-    //   多扛一帧。调大 = 遮挡时更能扛, 但目标真走了会多追几拍残影。
-    int esync_max_age = 5;
-    // 跟踪器: IoU 关联门限。AM: tracking_iou_threshold 默认 **0.3**(config+0x4C)。
-    // ★ AM 的关联是"**类别 id 相等** 且 **IoU 严格大于**此值", 没有距离半径
-    //   (ground-truth §4.2)。此前本项目的 80px 最近邻半径是自加的, 已删除。
-    float esync_assoc_iou = 0.30f;
-    // 跟踪器: 速度采样窗(毫秒)。AM: tracking_velocity_sample_ms 默认 **20**,
-    // 解析器夹取 [1, 1000](anchors.txt L21702-21711)。
-    // ★ AM 的做法是"**窗内沿用旧速度**、窗外才重算并按 0.25/0.75 混合"
-    //   (ground-truth §4.4) —— 不是"窗内累加、满窗结算"。窗越大 = 速度越平滑、
-    //   滞后越大; 窗越小 = 越灵敏、量化噪声越大。
-    int esync_vel_sample_ms = 20;
-
-    // ── 预测补偿 (AM 的 AimKey 作用域, 键名与 AM 一致) ───────────────────────
-    // AM: prediction_factor_x/y 默认 0(且真值是**无夹取**的, ground-truth §9.1)。
-    // ★ 提前量 = 系数 × **平台位移** × 尺寸权重 × 每轨系数 —— 是"自己甩枪时画面
-    //   跟不上"那一部分, **不是"目标会往哪走"**。此前本实现用目标速度是语义错误。
-    float esync_pred_factor_x = 0.0f;
-    float esync_pred_factor_y = 0.0f;
-    // AM: prediction_min_width / prediction_max_width, 默认 20 / 80。
-    // ★ 尺寸权重吃【框高】(AM FUN_14006e470 L107 用 pfVar14[2]), 所以这两个量的
-    //   语义是"框高区间"。区间外权重为 0(框太大/太小都不预测)。
-    int esync_pred_min_w = 20;
-    int esync_pred_max_w = 80;
-
-    // ── 在途自身位移补偿 (Smith) —— 2026-09-14 【重新启用】 ──────────────────
-    //
-    // ★★ 这一段的历史必须读, 否则会犯同一个错 ★★
-    // 2026-09-13 它曾被整条停用, 停用理由写在旧注释里("不是 AM 的做法, 也没解决
-    // 用户的问题")。但 2026-09-14 重做时查明: 当时【不是这个机制错, 是它的实现错】——
-    // 旧实现在【像素域】扣, 隐含假设 kp = 1/k̂, 于是补偿被放大了约 5 倍, 同时把误差
-    // 顶成反号导致积分永不累积, 表现为"滞后随系数线性增长"(正是任务书 §4.2 禁止的
-    // 形态)。所以当时得出的"没用"是错的结论。
-    //
-    // 现在的实现改成【计数域】: `u -= beta * (N / W)`。N 是控制器自己记账的已下发
-    // 计数, W 是窗口拍数。★ 全程不做 counts<->px 换算, 表达式里【没有 k̂】, 所以
-    // 不存在"标定不准就自激"的老毛病。
-    //
-    // 实测效果 (Kp=35, 400px 阶跃, 4s, 60fps):
-    //     beta = 0.0  -> 尾段 293~621px 的自持极限环 (60fps 发散)
-    //     beta = 1.6  -> 0.295px, 且在 60/120/240/1000fps 四个帧率上完全一致
-    // 即: beta=0 不是"关掉一个可选优化", 而是【拆掉了主刹车】。
-    //
-    // 单位: 无量纲(补偿强度倍数)。0 = 关闭(仅用于对照实验), 1.6 = 生产默认。
-    // 上限 3.0(kMaxInflightBeta); 2.0 在 60fps 已发散, 不要填大。
-    //
-    // ★ 用【负值】表示"没填/用默认 1.6"。0 是合法值(关闭), 见 mouse_thread_loop.cpp
-    //   的 pid_params()。默认给 -1 就是为了让"没配置过的机器"自动拿到 1.6,
-    //   而不是静默地关掉补偿。
-    float pidf_inflight_x = -1.0f, pidf_inflight_y = -1.0f;
-    // 窗口长度(ms)。★ 必须 = 真实链路死区 46ms。窗口小于死区 = 补不足(安全, 只是
-    // 回到原来的延迟); 大于死区 = 把已生效的位移当在途重复扣除 → 正反馈发散。
-    // 运行时实际用它去填 inflight_window_s, 但代码里是直接引用 boss::kAimDeadTimeS,
-    // 这个槽位只作为配置文件里的可见记录, 改它不影响行为(见 mouse_thread_loop.cpp)。
-    int pidf_inflight_window_ms = 46;
-
     // ── 【2026-09-14 整条删除】aim_px_per_count_x/y (每计数像素 k̂) ──────────
     // 它曾经是前馈(延迟预测/提前量)的必需输入, 也是那个「测量」按钮要测的东西。
     // 前馈删除后它只剩配置往返, 控制链 0 引用, 所以字段本身也删掉了。
@@ -244,138 +77,16 @@ struct HotkeyProfile
     //   —— 配置里根本不该存在这个量, 免得又有人去"标定"它。
     //   老配置里的这两个键读进来会被忽略, 写回时不再出现。
 
-    // 瞄点平滑现在由 mouse/anchor_filter.h 的 α-β 滤波器负责, 位置紧挨在 PID 之前
-    // (boss_aim.cpp)。时间常数是编译期常数 kAnchorFilterTauMs, 故意不做成用户旋钮
-    // —— 平滑强度与 Kp 是耦合的, 两个一起调极容易调乱。
+    // 瞄点平滑原本由 mouse/anchor_filter.h 的 α-β 滤波器负责(紧挨在 PID 之前);
+    // 两者都随瞄准控制链一起删除了, 这里只留个记号, 免得后来的人以为它还在。
 
-    // ── 尺度增益调度 s(bbox.height) —— 2026-09-14 新增 (mouse/aim_scale.h) ──
-    //
-    // 用【检测框高度】判断目标"比我调参时大了多少", 按公式调制等效增益:
-    //
-    //     s = clamp( (h / 基准框高)^γ , s_min , s_max )      γ = 1.0
-    //
-    //   h = 当前框高, 基准框高 = 用户整定参数那个距离上的框高中位数(自动学)。
-    //   h = 基准 时 s 恒为 1.0 —— 与你整定时的行为逐位相同。
-    //
-    // ★★ 为什么不再有"近处框高/远处框高"两个阈值 (2026-09-14 用户纠正) ★★
-    //   那版设计让用户填两个绝对像素值, 但用户【根本测不出来】当前框高是多少,
-    //   而且在靶场里也无法判断"这个距离算近还是算远"。换游戏/换分辨率后同一段
-    //   像素高度对应的距离感完全不同, 写死两个数换个场景就废。
-    //   用户真正需要的参照系是【他自己调参时的那个框高】, 所以基准改成自动学,
-    //   用户一个像素值都不用填。
-    //
-    // ★ 远处【也】真的降增益(与上一版相反, 已按用户意见纠正)。
-    //   上一版把 s_min 钉在 1.0, 理由是"降增益会让远处更跟不上"; 那个论证隐含
-    //   假设了像素速度固定, 但远处目标的像素速度本来就小(v_px ≈ f·v_world/d),
-    //   所以按框高等比缩放正是正确的距离补偿。用户原话: "远处敌人看着移动会变慢
-    //   啊, 那肯定也是按公式下降"。s_min 因此放开, 允许 < 1.0。
-    //
-    // ★ 上界受临界增益约束: Kp x s_max 不能越过 g_crit 反推的上限(60fps、k̂≈0.593
-    //   时约 52)。默认 Kp=35 x 1.5 = 52.5 就贴在这个上限上, 想再提高倍数必须先降 Kp。
-    //
-    // ★ 尺度只用 bbox.height 这一个量, 【不引入任何深度/相机内参假设】;
-    //   也不许再乘第二个"按框高做几何距离补偿"的因子(那会把深度算两遍)。
-    int   aim_scale_enabled = 1;      // 0 = 关闭(等价于 s 恒为 1.0)
-    float aim_scale_max = 1.50f;      // 近处上限 s_max, 有效区间 [1.0, 2.0]
-    float aim_scale_min = 1.00f;      // 远处下限 s_min, 有效区间 [0.30, 1.00]
-    // 基准框高(px)。由调参 agent 在整定期间自动学出(那一段的框高中位数)。
-    // 0 = 还没学到 -> 整条链路恒为中性 1.0, 与关闭本项逐位相同。
-    // ★ 这不是要给用户填的阈值, 是"用户整定时目标有多大"的记录。
-    float aim_scale_base_h = 0.0f;
-
-    // 用户 AimPath：在 AVA PIDF 输出后执行轨迹整形。
-    //   0 = 直线(透传)  1 = 贝塞尔  2 = 自定义手绘曲线  3 = WindMouse 拟人曲线
-    int   aim_path_mode = 0;
-    int   aim_path_influence = 25; // 0..100，仅影响 PIDF 主方向
-    float aim_path_bezier_cx1 = 0.30f;
-    float aim_path_bezier_cy1 = 0.00f;
-    float aim_path_bezier_cx2 = 0.70f;
-    float aim_path_bezier_cy2 = 0.00f;
-    // 32768 个采样, Y∈[-1, 1], 首尾端点固定 = 0。
-    static constexpr int kAimPathSampleCount = 32768;
-
-    // ── WindMouse 曲线 (aim_path_mode = 3) ─────────────────────────────────
-    // 仿 AimMagic 的 enable_mouse_curve: 用 WindMouse 物理模型生成一条"像人
-    // 甩出来的"路径, 只把它当【局部切线】去旋转 PID 输出, 幅值仍由控制器决定。
-    // 单位都是像素 (与 AM 的 wind_mouse_G0/W0/M0/D0 同名同量纲):
-    //   gravity   重力(朝目标的吸引) —— 越大越坚决、路径越直
-    //   wind      风力(横向随机游走幅度) —— 越大越飘
-    //   step      单步最大长度 —— 越小越碎、越慢
-    //   distance  风力开始衰减的距离 —— 越接近目标风越小
-    //   threshold 门控(px, AM 的 curve_threshold): 两轴误差都不超过它时整段
-    //             曲线旁路走直线 —— 微修正保精度, 大甩枪才拟人化。默认 10。
-    float aim_path_wind_gravity   = 5.0f;
-    float aim_path_wind_wind      = 2.0f;
-    float aim_path_wind_step      = 10.0f;
-    float aim_path_wind_distance  = 8.0f;
-    int   aim_path_wind_threshold = 10;
-    // 不可变共享曲线资产:HotkeyProfile 快照只复制指针，UI 修改时才重建。
-    std::shared_ptr<const std::vector<float>> aim_path_custom_samples =
-        std::make_shared<const std::vector<float>>(); // 空 = 直线
-    bool aim_path_neural_enabled = false;
-    // 1→8→1 MLP:w1[8], b1[8], w2[8], b2。
-    std::array<float, 25> aim_path_neural_weights{};
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 扳机 — 5 态状态机 (idle/delay/pressed/cooldown/switch_cd)。
-    //   trigger_fire_delay:    进入命中区后延迟 N ms 才按下(0=立即)
-    //   trigger_fire_duration: 单次按住时长上限。
-    //                          0 = 【长按模式】: 按住不松手, 直到准星离开命中区
-    //                              (目标真的丢了也会松手), 不做"按-松"循环。
-    //                          >0 = 连点模式: 按住 N ms → 松手 → 冷却 interval
-    //                              → 若仍在命中区再按, 即老的点射行为。
-    //   trigger_fire_interval: 连点模式的冷却间隔 / 长按模式离开命中区后的
-    //                          最短重按间隔(防止在判定边缘反复按松)
-    //   trigger_y_percent:     命中区占 bbox 的百分比 (100=整框, >100=预开火)
-    //   trigger_*_jitter_ms:   对应延迟的随机 ±N ms 抖动(破除机械感)
-    //   trigger_switch_cooldown_ms: 目标 track_id 变化时的转火冷却
-    // ─────────────────────────────────────────────────────────────────────
-    bool  trigger_enabled = false;
-    int   trigger_fire_delay = 0;
-    int   trigger_fire_duration = 0;
-    int   trigger_fire_interval = 200;
-    int   trigger_y_percent = 100;
-    int   trigger_delay_jitter_ms    = 0;
-    int   trigger_duration_jitter_ms = 0;
-    int   trigger_interval_jitter_ms = 0;
-    int   trigger_switch_cooldown_ms = 0;
-
-    // ── 自动开镜 (2026-09-12, 仿 AimMagic 的「开火方式」) ──────────────────
-    // 开镜 = 右键。AM 的 fireModes 是 [None, Click Right, Hold Right]:
-    //   0 = 关闭
-    //   1 = 点按右键(切换开镜): 进命中区点一下右键, 离开命中区再点一下收镜。
-    //       靠游戏自己的"切换开镜"。跨两拍完成(按下 → 下一拍抬起), 同一拍里连发
-    //       down/up 多数游戏收不到。
-    //   2 = 长按右键(按住开镜): 命中区里一直按住, 离开时松开。靠"按住开镜"。
-    //
-    // ★ 安全规则: 如果本热键的 keys 里就有 RightMouseButton, 那用户本来就在按
-    //   右键(开镜时也在瞄), 此时自动开镜【一律不生效】—— 否则会把镜切回去。
-    int trigger_auto_scope = 0;
-    // 开镜到开火之间的等待(ms): 先开镜, 等这么久才允许按左键。
-    // 0 = 同一拍(AM 默认)。游戏的开镜过渡要 100~200ms 时, 填上它第一颗子弹
-    // 才是开着镜打出去的; 填 0 则第一枪按 AM 原样"同拍开镜+开火"。
-    int trigger_scope_delay_ms = 0;
-
-    // ── 自动急停 (2026-09-13) ───────────────────────────────────────────────
-    // 开火那一拍, 如果玩家正按着 WASD, 就往盒子补一个【反方向键】的短按:
-    // 绝大多数 FPS 引擎里 W+S 同时存在 = 相互抵消 = 立刻停住, 这一枪才是站定
-    // 打出去的。不需要松开玩家手上的键(盒子也做不到), 所以是"补键"而不是"抢键"。
-    //
-    // ★ 只有 MAKCUNEW 能做 —— 只有它有键盘注入(0x22 KEY_TAP, 固件内定时弹起)。
-    //   输入方式不是 MAKCUNEW 时本项自动失效(runtime 判 input_method)。
-    // ★ 用的是 KEY_TAP 而不是 KEY_MASK: TAP 由固件定时弹起, 是自清的, 上位机
-    //   崩了/停会话了键也会在 ms 级放开; MASK 是绝对态, 漏发清除帧就会把玩家
-    //   的移动键永久卡住。
-    // ★ 一次只补一个方向键, 前/后轴优先(W 在走最常见)。斜向(W+A)只会抵消掉
-    //   前后轴那一半, 横向仍在。
-    // 想"停稳了再开枪"就把 trigger_fire_delay 也设为相近的毫秒数:
-    //   进命中区 -> 补反方向键(本项) -> 等 fire_delay -> 开火。
-    int trigger_auto_stop = 0;     // 0 = 关, 1 = 开
-    int trigger_stop_ms = 60;      // 反方向键的短按时长(ms), 20~300
-
+    // ── 【2026-09-17 删除】尺度增益调度 / 瞄准轨迹曲线 / 扳机 ────────────────
+    //   aim_scale_*   (mouse/aim_scale.h 的 s(bbox.height) 增益调度)
+    //   aim_path_*    (mouse/aim_path.h 的直线/贝塞尔/手绘/WindMouse 整形)
+    //   trigger_*     (mouse_thread_loop.cpp 的扳机 FSM + trigger_scope.h 的自动开镜
+    //                  + auto_stop.h 的自动急停)
+    // 这三组槽位的消费者全部随控制链删除, 字段本身也删掉了。老配置里的这些键
+    // 读都不读(不报错), 下次保存时自动消失。
 
     // ─────────────────────────────────────────────────────────────────────
     // 目标选择 — 按优先级排序的类别列表。列表顺序 = 优先级 (index 0 最高)。
@@ -409,6 +120,78 @@ struct HotkeyProfile
     bool  dynamic_fov_enabled  = false;
     float dynamic_fov_strength = 0.60f;
 
+    // ─────────────────────────────────────────────────────────────────────
+    // ★★ 通用控制器层 (2026-09-17 第三轮重建)
+    //
+    // 公式与设计见 docs/generic-controller-layer.md §4.3。
+    // 数值单位: 增益是【计数/(像素·秒)】, 时是【秒】。
+    // ★★ 六个增益【全部分方向】—— 跟枪(x)与压枪(y)的需求不同。
+    //
+    // ★ 默认值刻意【等价于历史单套行为】(Kp=35, 其余 0):
+    //   这样"从单套改成六套"这个动作本身不改变任何行为, 是安全的起点。
+    //   具体该填多少【没有任何实测依据】, 由用户在实机上调
+    //   (方案 §7 第 10 条: 这是重建控制链里最大的一笔实测工作量)。
+    // ─────────────────────────────────────────────────────────────────────
+    double ctl_kp_x = 35.0;
+    double ctl_kp_y = 35.0;
+    double ctl_ki_x = 0.0;
+    double ctl_ki_y = 0.0;
+    double ctl_kd_x = 0.0;
+    double ctl_kd_y = 0.0;
+
+    // 积分回吐时间常数(秒)。误差反向时积分按 exp(-dt/τ) 快速回吐。
+    // ★★ 历史值 0.2s 在 AD 急停(2-3Hz, 变向间隔 330-500ms)下【太慢】,
+    //    收紧到 30ms 起步。⚠️ 这个值没有实测依据, 由用户实调(方案 §7 第 7 条)。
+    double ctl_tau_unwind_sec = 0.030;
+    // D 项低通时间常数(秒)。零惯性下目标急停会让 de 出现尖峰,
+    // 而 Kd 会把准星朝目标原来运动的方向猛推 —— 这就是 AD 急停超调的成因。
+    // ⚠️ 无实测依据(方案 §7 第 8 条)。
+    double ctl_tau_deriv_sec = 0.020;
+    // 积分上限。0 = 用输出限幅作为上限。⚠️ 无实测依据(方案 §7 第 9 条)。
+    double ctl_i_max = 0.0;
+    // 输出限幅(计数/拍)。0 = 内置 200。
+    int    ctl_max_output_counts = 200;
+    // P 项连续饱和(像素)。误差超过此值时 P 项不再增大。
+    // ★ 它取代了死区 —— 连续且经过原点, 不存在"停了"这个状态。
+    // ★★ 死区已【整项删除】, 不要加回来(方案 §5.1)。
+    double ctl_p_full_scale_px = 0.0;
+
+    // 瞄点: 框内相对位置。1.0 = 框顶, 0.5 = 中心, 0.0 = 框底。
+    // y_offset_max > y_offset 时每帧在两者之间随机取, 避免总打同一点。
+    double ctl_y_offset = 0.5;
+    double ctl_y_offset_max = 0.5;
+
+    // 选靶滞回倍数。已锁定目标时, 新候选必须比它近这个倍数才切换。
+    // ★ 不加滞回 ⇒ 两个目标交替最近 ⇒ 每帧换目标 ⇒ 滤波每帧复位 ⇒ 滤波白做。
+    // ⚠️ 取值无实测依据(方案 §7 第 5 条, 建议从 1.3 起调)。
+    double ctl_hysteresis_ratio = 1.3;
+
+    // ★★ 总开关。默认【关】—— 新增的控制链在真机验证过之前不该自己动鼠标。
+    //   打开后控制器会真的下发位移(通过 MouseThread::sendRawMove)。
+    bool ctl_enabled = false;
+
+    // 选靶距离上限(检测像素)。0 = 不限制。
+    // ⚠️ 默认 0: 距离门控目前由 FOV 椭圆承担, 不在这里重复设一道。
+    double ctl_max_distance_px = 0.0;
+
+    // ── 检测稳定器(②)──────────────────────────────────────────────────
+    // ★ 这 5 项此前【只存在于 control/ 的默认值里, 没有配置槽位】——
+    //   等于"写死在代码里, 谁都调不了"。现在补上, 让它们可调。
+    //   ⚠️ 全部没有实测依据(方案 §7 第 6 条), 当前值是占位。
+    // 认目标: 中心距离小于"上一帧框对角线 × 此系数"算同一个目标。
+    double ctl_match_center_ratio = 0.5;
+    // 面积容差倍数: 面积比超出 [1/tol, tol] 判为换目标。
+    double ctl_area_ratio_tol = 2.0;
+    // 突变系数: 位移超过"上一帧对角线 × 此系数"判为瞬移。
+    double ctl_k_snap_mult = 1.15;
+    // 宽高比合理区间(剔除细长误检)。
+    double ctl_min_aspect = 0.2;
+    double ctl_max_aspect = 5.0;
+
+    // 瞄点随机种子。0 = 用内部固定常数(同一帧可复现)。
+    // ★ 非 0 时每局随机, 让 y 偏移的抖动不可预测。
+    int ctl_random_seed = 0;
+
 };
 
 // One entry in the shared crosshair color palette. Red needs two entries
@@ -424,6 +207,13 @@ struct CrosshairColorProfileConfig
     int v_min = 120;
     int v_max = 255;
 };
+
+// ★ 2026-09-17: 检测上限固定为 20, 不再是用户可调项。
+//   理由: 模型是 end2end 形态([1,N,6]), 每帧成品框本来就很少; 下游(预览/选靶)
+//   只需要极少数目标。把它做成 1~100 的滑块只会让人误以为"调大能检出更多",
+//   而实际上多出来的框在下游全被丢弃。
+//   ★ 它同时是 UI 与配置读写的唯一来源 —— 不要再从 config.ini 读。
+inline constexpr int kFixedMaxDetections = 20;
 
 class Config
 {
@@ -477,12 +267,15 @@ public:
     std::string kmbox_net_uuid = "12345";  // 盒子的 MAC 标识(屏幕上有), 不是标准 UUID 格式
 
     // AI
+    // ★ 2026-09-17: backend 恒为 "TRT"。DirectML 后端整条移除
+    //   (dml_detector + DirectML.dll + dml_device_id), 所以这里不再是"用户可选"。
+    //   老配置里的 backend = DML / dml_device_id 读都不读(不报错), 下次保存时消失。
     std::string backend = "TRT";
-    int dml_device_id = 0;
     std::string ai_model = "sunxds_0.5.6.engine";
     float confidence_threshold = 0.15f;
     float nms_threshold = 0.50f;
-    int max_detections = 20;
+    // 固定为 kFixedMaxDetections (=20), 不可用户设置, 见上面的说明。
+    int max_detections = kFixedMaxDetections;
     // 小目标召回增强:面积自适应置信度阈值。开启后,框面积 < small_target_area_frac
     // × detection_resolution² 的小目标用 small_target_confidence 作为保留门槛,大目标
     // 仍用 confidence_threshold;GPU 粗筛阈值同步降到两者较小值,让弱小目标候选先进入
@@ -537,22 +330,15 @@ public:
     // 两条外推同开会叠加成两层提前量, 与 PID-EventSync 的定义直接冲突。
 
 
-    // 双缓冲流水线: 用第 N+1 帧的 GPU 推理去重叠第 N 帧的 CPU 后处理。
-    //
-    // 代价是【整整一帧延迟】: 检测结果的发布被门控在"下一帧到达"上(后处理块
-    // 在 hasNewFrame 分支内, post_slot 取 prev_slot), 所以帧间隔多长就多等多久
-    // —— 120fps = +8.33ms, 60fps = +16.7ms。
-    //
-    // 默认关闭, 理由:
-    //   · 它换来的吞吐只在 GPU 链 + CPU 后处理逼近帧预算时才有意义。实测
-    //     infer≈0.5ms, 相对 120fps 的 8.33ms 预算有整个数量级的余量, 属于白付一帧。
-    //   · 旧注释称"这一帧延迟远低于采集抖动(~8ms@120fps)"—— 8ms 就是 120fps 的
-    //     整个帧间隔, 它并不"远低于"任何东西。
-    //   · 旧注释称"下游 Kalman 预测会补偿"—— 但预测通路实际是关闭的(tracker 的
-    //     predicted_center_valid 恒为 0, 且 PIDF 的 LR/KF 默认为 0), 没有任何东西
-    //     在补偿这一帧。
-    // 注意: 它与 CUDA Graph 现在可以共存(每槽一张图), 需要吞吐时在界面打开即可。
-    bool use_double_buffer = false;
+    // ── 【2026-09-17 删除】双缓冲流水线 (use_double_buffer) ──────────────────
+    // 原来是"用第 N+1 帧的 GPU 推理去重叠第 N 帧 CPU 后处理"的开关。
+    // 整个机制连同配置键一起删除, 理由:
+    //   · 代价是【整整一帧延迟】(120fps = +8.33ms, 60fps = +16.7ms), 与
+    //     "降低推理延迟"的目标正好相反;
+    //   · 它换来的吞吐只在 GPU 链 + CPU 后处理逼近帧预算时才有意义, 而实测
+    //     推理相对帧预算有整数量级余量 —— 属于白付一帧。
+    // 现在推理恒为单缓冲: 结果一就绪就发布。CUDA Graph 与它无关, 仍然保留。
+    // 老配置里的 use_double_buffer 键读都不读, 下次保存时自动消失。
     int gpuMemoryReserveMB = 2048;
     bool enableGpuExclusiveMode = true;
     int cpuCoreReserveCount = 4;

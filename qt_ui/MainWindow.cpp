@@ -33,16 +33,17 @@
 #include "pages/SessionPage.h"
 #include "pages/ModelToolsPage.h"
 #include "pages/CapturePage.h"
+#include "pages/AimSettingsPage.h"
 #include "pages/TargetPage.h"
 #include "pages/HardwarePage.h"
 #include "pages/AiModelPage.h"
-#include "pages/HotkeyPage.h"
+
 #include "pages/CrosshairPage.h"
 #include "pages/StatsPage.h"
 #include "pages/LogPage.h"
 #include "pages/DebugPage.h"
 #include "pages/AutoCapturePage.h"
-#include "pages/AutoTunePage.h"
+
 #include "capture/auto_capture.h"
 
 namespace {
@@ -66,10 +67,8 @@ const QVector<GroupDef>& navGroups() {
          {QStringLiteral("device-desktop"), QStringLiteral("target"), QStringLiteral("plug"),
           QStringLiteral("cpu")}},
         {QString::fromUtf8(u8"控制"),
-         {QString::fromUtf8(u8"瞄准热键"), QString::fromUtf8(u8"准星找色"),
-          QString::fromUtf8(u8"自动调参")},
-         {QStringLiteral("keyboard"), QStringLiteral("color-swatch"),
-          QStringLiteral("adjustments")}},
+         {QString::fromUtf8(u8"瞄准设置"), QString::fromUtf8(u8"准星找色")},
+         {QStringLiteral("crosshair"), QStringLiteral("color-swatch")}},
         {QString::fromUtf8(u8"监控"),
          {QString::fromUtf8(u8"性能统计"), QString::fromUtf8(u8"日志"), QString::fromUtf8(u8"自动采集"),
           QString::fromUtf8(u8"调试")},
@@ -591,9 +590,14 @@ QWidget* MainWindow::createPage(const QString& name) {
     if (name == QString::fromUtf8(u8"目标"))       { m_targetPage = new TargetPage(); return m_targetPage; }
     if (name == QString::fromUtf8(u8"硬件"))       return new HardwarePage();
     if (name == QString::fromUtf8(u8"AI 模型"))    return new AiModelPage();
-    if (name == QString::fromUtf8(u8"瞄准热键"))   { m_hotkeyPage = new HotkeyPage(); return m_hotkeyPage; }
+    // ★★ 「瞄准设置」页已重建(2026-09-17 第三轮续)。
+    //   上一轮删控制链时把 HotkeyPage 一起删了, 但删过头了 —— 它带走的不只是
+    //   死掉的瞄准参数, 还包括【热键列表管理】、【aim_classes 编辑】、
+    //   【准星找色开关】、【动态 FOV】, 而这些背后是活着的子系统。
+    //   ★ 后果: `config.hotkeys[]` 从那时起没有任何写入者, 界面再也改不动它。
+    if (name == QString::fromUtf8(u8"瞄准设置")) { m_hotkeyPage = new AimSettingsPage(); return m_hotkeyPage; }
     if (name == QString::fromUtf8(u8"准星找色"))   return new CrosshairPage();
-    if (name == QString::fromUtf8(u8"自动调参"))   { m_autoTunePage = new AutoTunePage(); return m_autoTunePage; }
+    // ★ 「自动调参」页已随瞄准控制链删除(2026-09-17)。
     if (name == QString::fromUtf8(u8"性能统计"))   { m_statsPage = new StatsPage(); return m_statsPage; }
     if (name == QString::fromUtf8(u8"日志"))       { m_logPage   = new LogPage();   return m_logPage;   }
     if (name == QString::fromUtf8(u8"自动采集"))   { m_autoCapPage = new AutoCapturePage(); return m_autoCapPage; }
@@ -642,17 +646,15 @@ void MainWindow::pollMonitorTelemetry() {
     m_sessionRunning = running;
 
     int gpuMb = 0, cpuCores = 0;
-    QString model, backendRaw;
+    QString model;
     {
         std::lock_guard<std::recursive_mutex> lk(configMutex);
         gpuMb = config.gpuMemoryReserveMB;
         cpuCores = config.cpuCoreReserveCount;
         model = QString::fromStdString(config.ai_model);
-        backendRaw = QString::fromStdString(config.backend);
     }
-    const QString backendDisp = (backendRaw == QStringLiteral("DML"))
-        ? QStringLiteral("DirectML")
-        : QStringLiteral("TensorRT (CUDA)");
+    // ★ 2026-09-17: DirectML 后端整条移除, 状态栏恒显示 TensorRT。
+    const QString backendDisp = QStringLiteral("TensorRT (CUDA)");
 
     m_statusBar->setInferenceStatus(running);
     m_statusBar->setFps(fps);
@@ -719,17 +721,6 @@ void MainWindow::pollMonitorTelemetry() {
                                       AutoCapture::g_saved_total.load());
     }
 
-    // ── Debug: dynamic FOV readout ──────────────────────────────────────
-    if (m_debugPage) {
-        const float rx = g_dynamic_fov_radius_x_px.load();
-        const float ry = g_dynamic_fov_radius_y_px.load();
-        if (rx > 0.0f && ry > 0.0f) {
-            m_debugPage->setFovReadout(
-                QString::fromUtf8(u8"X = %1 px,  Y = %2 px  (有效半径)")
-                    .arg(rx, 0, 'f', 1).arg(ry, 0, 'f', 1));
-        } else {
-            m_debugPage->setFovReadout(
-                QString::fromUtf8(u8"未启用 / 无锁定目标。在「瞄准热键」面板的「动态 FOV」子段中开启。"));
-        }
-    }
+    // ── Debug: 动态 FOV 读数已随瞄准控制链删除(2026-09-17) ────────────────
+    //   那个读数来自 g_dynamic_fov_radius_x/y, 其唯一生产者是 mouse_thread_loop。
 }

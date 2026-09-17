@@ -91,14 +91,18 @@ bool applyLiveFile(const QString& path, bool suppress_report)
     // 判据用【关键键必须出现】而不是"有没有 [hotkey.0] section" —— 后者挡不住
     // 只写了 section 头、正文还没写完的半截文件(那个也会解析成功并落到默认值)。
     // 要求这些键出现, 半截文件就不可能通过。
+    //
+    // ★ 2026-09-17: 这里原来还检查 pidf_kp_x / pidf_kp_y / pidf_predict_min_w /
+    //   pidf_predict_max_w 四个键。它们已随瞄准控制链删除, 所以判据收缩成
+    //   [hotkey.0] 一条。★ 这一条比原来弱 —— 通道现在能挡住的坏文件类型更少了。
+    //   如果这个通道将来重新被用来扫参, 应该按【当时活着的键】补回同样强度的判据。
     {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
             return false;
         const QByteArray head = f.read(256 * 1024);   // 配置不会超过 256KB
         f.close();
-        for (const char* key : {"[hotkey.0]", "pidf_kp_x", "pidf_kp_y",
-                                "pidf_predict_min_w", "pidf_predict_max_w"})
+        for (const char* key : {"[hotkey.0]"})
         {
             if (!head.contains(key))
             {
@@ -115,23 +119,12 @@ bool applyLiveFile(const QString& path, bool suppress_report)
         return false;
 
     // ── 步骤 2: 再体检一次"解析出来的东西像不像话" ──────────────────────────
-    // 即使有 [hotkey.0], 如果 pidf_kp_x 解析成了 0 或负数, 那也是坏数据 ——
-    // Kp=0 意味着控制器完全不动作, 而用户会以为"这组参数"拉不动枪。
-    // 这里只挡【明显不可能】的值, 不做"合理性调参"(那是使用者的事)。
+    // ★ 2026-09-17: 这里原本还会拒绝 "insane Kp" 与 "insane predict width window"
+    //   —— 那两条检查的都是瞄准参数, 而那些槽位已经没有消费者了。
+    //   现在只剩"解析出来的东西里到底有没有档位"这一条结构判据。
     if (probe.hotkeys.empty())
     {
         return reject("no hotkey profiles parsed");
-    }
-    {
-        const auto& hp = probe.hotkeys[0];
-        if (!(hp.pidf_kp_x > 0.0f) || !(hp.pidf_kp_y > 0.0f))
-        {
-            return reject(QString("insane Kp (%.1f/%.1f)").arg(hp.pidf_kp_x).arg(hp.pidf_kp_y));
-        }
-        if (!(hp.pidf_predict_min_w > 0) || !(hp.pidf_predict_max_w > hp.pidf_predict_min_w))
-        {
-            return reject(QString("insane predict width window (%1..%2)").arg(hp.pidf_predict_min_w).arg(hp.pidf_predict_max_w));
-        }
     }
 
     // ── 步骤 3: 验证通过, 走【和 Qt 界面完全相同】的那条重载路径 ────────────
@@ -224,22 +217,22 @@ void poll()
         g_enabled_once = true;
 
         // 回执里带上关键参数, 脚本可以直接确认"生效的到底是什么"。
+        //
+        // ★ 2026-09-17: 原来这里把 kp/ki/kd/pred/minw/maxw/damp/lim 十二个瞄准参数
+        //   打进回执。那些槽位已随控制链删除, 所以现在回执只报【档位数量】——
+        //   也就是本通道客观上还能验证的东西。
+        //   这是信息量的【下降】: 脚本不再能一眼看出"生效的是哪组参数"。原因是
+        //   通道原本服务的对象没了, 不是回执写错了。
         std::string detail;
         {
             std::lock_guard<std::recursive_mutex> lk(configMutex);
-            int idx = config.hotkeys.empty() ? -1 : 0;
+            const int idx = config.hotkeys.empty() ? -1 : 0;
             if (idx >= 0)
             {
-                const auto& hp = config.hotkeys[0];
-                char buf[512];
+                char buf[128];
                 std::snprintf(buf, sizeof(buf),
-                    "kp=%.1f/%.1f ki=%.2f/%.2f kd=%.3f/%.3f pred=%.2f/%.2f "
-                    "minw=%d maxw=%d damp=%.2f lim=%d/%d",
-                    hp.pidf_kp_x, hp.pidf_kp_y, hp.pidf_ki_x, hp.pidf_ki_y,
-                    hp.pidf_kd_x, hp.pidf_kd_y,
-                    hp.pidf_predict_x, hp.pidf_predict_y,
-                    hp.pidf_predict_min_w, hp.pidf_predict_max_w, hp.pidf_predict_damp,
-                    hp.pidf_limit_x, hp.pidf_limit_y);
+                    "profile_idx=%d profiles=%zu",
+                    idx, config.hotkeys.size());
                 detail = buf;
             }
         }

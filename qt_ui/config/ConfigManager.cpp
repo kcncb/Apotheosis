@@ -24,11 +24,11 @@ bool ConfigManager::load(const QString& path) {
         setCaptureFps(60);
         setCircleMask(true);
 
-        setBackend("TRT");
+        // ★ 2026-09-17: setBackend 已删除(backend 恒为 TRT); maxDetections 固定 20。
         setAiModel("sunxds_0.5.6.engine");
         setConfidenceThreshold(0.10f);
         setNmsThreshold(0.50f);
-        setMaxDetections(100);
+        setMaxDetections(kFixedMaxDetections);
 
         setInputMethod("MAKCU");
 
@@ -214,22 +214,12 @@ void ConfigManager::setKmboxNetUuid(const QString& v) {
 
 // --- AI ---
 
+// ★ 2026-09-17: DirectML 后端已整条移除, TensorRT 是唯一后端。
+//   backend() 现在恒返回 "TRT"; setBackend / dmlDeviceId / setDmlDeviceId 已删除
+//   (原来是"可选后端"这套 UI 的读写口)。老 QSettings 里的 AI/backend 与
+//   AI/dml_device_id 键不会再被读取, 也不会再被写回。
 QString ConfigManager::backend() const {
-    return m_settings->value("AI/backend", "TRT").toString();
-}
-
-void ConfigManager::setBackend(const QString& v) {
-    m_settings->setValue("AI/backend", v);
-    emit configChanged();
-}
-
-int ConfigManager::dmlDeviceId() const {
-    return m_settings->value("AI/dml_device_id", 0).toInt();
-}
-
-void ConfigManager::setDmlDeviceId(int v) {
-    m_settings->setValue("AI/dml_device_id", v);
-    emit configChanged();
+    return QStringLiteral("TRT");
 }
 
 QString ConfigManager::aiModel() const {
@@ -259,13 +249,15 @@ void ConfigManager::setNmsThreshold(float v) {
     emit configChanged();
 }
 
+// ★ 2026-09-17: 固定为 kFixedMaxDetections (=20), 不再从 QSettings 读用户值。
+//   setter 保留只为兼容既有调用点(它现在只写常量), 不再有任何 UI 绑定到它。
 int ConfigManager::maxDetections() const {
-    return m_settings->value("AI/max_detections", 20).toInt();
+    return kFixedMaxDetections;
 }
 
 void ConfigManager::setMaxDetections(int v) {
-    m_settings->setValue("AI/max_detections", v);
-    emit configChanged();
+    Q_UNUSED(v);
+    m_settings->setValue("AI/max_detections", kFixedMaxDetections);
 }
 
 bool ConfigManager::smallTargetEnabled() const {
@@ -524,34 +516,39 @@ void ConfigManager::writeHotkeyToSettings(int index, const HotkeyData& data) {
     m_settings->setValue(prefix + "keys", data.keys.join(","));
     m_settings->setValue(prefix + "fovX", data.fovX);
     m_settings->setValue(prefix + "fovY", data.fovY);
-    m_settings->setValue(prefix + "trigger_enabled",     data.triggerEnabled);
-    m_settings->setValue(prefix + "trigger_fire_delay",  data.triggerFireDelay);
-    m_settings->setValue(prefix + "trigger_fire_duration", data.triggerFireDuration);
-    m_settings->setValue(prefix + "trigger_fire_interval", data.triggerFireInterval);
-    m_settings->setValue(prefix + "trigger_y_percent",   data.triggerYPercent);
-    m_settings->setValue(prefix + "trigger_delay_jitter_ms",    data.triggerDelayJitterMs);
-    m_settings->setValue(prefix + "trigger_duration_jitter_ms", data.triggerDurationJitterMs);
-    m_settings->setValue(prefix + "trigger_interval_jitter_ms", data.triggerIntervalJitterMs);
-    m_settings->setValue(prefix + "trigger_switch_cooldown_ms", data.triggerSwitchCooldownMs);
-    m_settings->setValue(prefix + "trigger_auto_scope",       data.triggerAutoScope);
-    m_settings->setValue(prefix + "trigger_scope_delay_ms",   data.triggerScopeDelayMs);
-    m_settings->setValue(prefix + "trigger_auto_stop",        data.triggerAutoStop);
-    m_settings->setValue(prefix + "trigger_stop_ms",          data.triggerStopMs);
+    // ★ 2026-09-17: 这里原来还写 trigger_* / aim_path_* 共 18 个键。
+    //   它们对应的 HotkeyProfile 字段已随瞄准控制链删除, 于是这些 QSettings 键
+    //   退化成【写完就没人读、且没有任何运行时消费者】的死数据(在
+    //   ConfigManager::HotkeyData 里绕一圈又回到 QSettings)。已整段删除。
     m_settings->setValue(prefix + "aim_classes",         data.aimClasses);
     m_settings->setValue(prefix + "crosshair_detect_enabled", data.crosshairDetectEnabled);
     m_settings->setValue(prefix + "dynamic_fov_enabled", data.dynamicFovEnabled);
     m_settings->setValue(prefix + "dynamic_fov_strength", static_cast<double>(data.dynamicFovStrength));
-    m_settings->setValue(prefix + "aim_path_mode", data.aimPathMode);
-    m_settings->setValue(prefix + "aim_path_bezier_cx1", static_cast<double>(data.aimPathBezierCx1));
-    m_settings->setValue(prefix + "aim_path_bezier_cy1", static_cast<double>(data.aimPathBezierCy1));
-    m_settings->setValue(prefix + "aim_path_bezier_cx2", static_cast<double>(data.aimPathBezierCx2));
-    m_settings->setValue(prefix + "aim_path_bezier_cy2", static_cast<double>(data.aimPathBezierCy2));
-    m_settings->setValue(prefix + "aim_path_wind_gravity",   static_cast<double>(data.aimPathWindGravity));
-    m_settings->setValue(prefix + "aim_path_wind_wind",      static_cast<double>(data.aimPathWindWind));
-    m_settings->setValue(prefix + "aim_path_wind_step",      static_cast<double>(data.aimPathWindStep));
-    m_settings->setValue(prefix + "aim_path_wind_distance",  static_cast<double>(data.aimPathWindDistance));
-    m_settings->setValue(prefix + "aim_path_wind_threshold", data.aimPathWindThreshold);
-    m_settings->setValue(prefix + "aim_path_custom_samples", data.aimPathCustomSamples);
+    // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────────
+    // ★ 23 个键逐个写出。它们与 HotkeyProfile 的 ctl_* 一一对应,
+    //   由 config_bridge 双向同步 —— 漏一个的表现是"界面能改、重启就没了"。
+    m_settings->setValue(prefix + "ctl_enabled", data.ctlEnabled);
+    m_settings->setValue(prefix + "ctl_kp_x", static_cast<double>(data.ctlKpX));
+    m_settings->setValue(prefix + "ctl_kp_y", static_cast<double>(data.ctlKpY));
+    m_settings->setValue(prefix + "ctl_ki_x", static_cast<double>(data.ctlKiX));
+    m_settings->setValue(prefix + "ctl_ki_y", static_cast<double>(data.ctlKiY));
+    m_settings->setValue(prefix + "ctl_kd_x", static_cast<double>(data.ctlKdX));
+    m_settings->setValue(prefix + "ctl_kd_y", static_cast<double>(data.ctlKdY));
+    m_settings->setValue(prefix + "ctl_tau_unwind_sec", static_cast<double>(data.ctlTauUnwindSec));
+    m_settings->setValue(prefix + "ctl_tau_deriv_sec", static_cast<double>(data.ctlTauDerivSec));
+    m_settings->setValue(prefix + "ctl_i_max", static_cast<double>(data.ctlIMax));
+    m_settings->setValue(prefix + "ctl_max_output_counts", data.ctlMaxOutputCounts);
+    m_settings->setValue(prefix + "ctl_p_full_scale_px", static_cast<double>(data.ctlPFullScalePx));
+    m_settings->setValue(prefix + "ctl_y_offset", static_cast<double>(data.ctlYOffset));
+    m_settings->setValue(prefix + "ctl_y_offset_max", static_cast<double>(data.ctlYOffsetMax));
+    m_settings->setValue(prefix + "ctl_hysteresis_ratio", static_cast<double>(data.ctlHysteresisRatio));
+    m_settings->setValue(prefix + "ctl_max_distance_px", static_cast<double>(data.ctlMaxDistancePx));
+    m_settings->setValue(prefix + "ctl_random_seed", data.ctlRandomSeed);
+    m_settings->setValue(prefix + "ctl_match_center_ratio", static_cast<double>(data.ctlMatchCenterRatio));
+    m_settings->setValue(prefix + "ctl_area_ratio_tol", static_cast<double>(data.ctlAreaRatioTol));
+    m_settings->setValue(prefix + "ctl_k_snap_mult", static_cast<double>(data.ctlKSnapMult));
+    m_settings->setValue(prefix + "ctl_min_aspect", static_cast<double>(data.ctlMinAspect));
+    m_settings->setValue(prefix + "ctl_max_aspect", static_cast<double>(data.ctlMaxAspect));
 }
 
 ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const {
@@ -563,34 +560,37 @@ ConfigManager::HotkeyData ConfigManager::readHotkeyFromSettings(int index) const
     data.keys = m_settings->value(prefix + "keys", "RightMouseButton").toString().split(",", Qt::SkipEmptyParts);
     data.fovX = m_settings->value(prefix + "fovX", 106).toInt();
     data.fovY = m_settings->value(prefix + "fovY", 74).toInt();
-    data.triggerEnabled      = m_settings->value(prefix + "trigger_enabled", false).toBool();
-    data.triggerFireDelay    = m_settings->value(prefix + "trigger_fire_delay", 0).toInt();
-    data.triggerFireDuration = m_settings->value(prefix + "trigger_fire_duration", 0).toInt();
-    data.triggerFireInterval = m_settings->value(prefix + "trigger_fire_interval", 200).toInt();
-    data.triggerYPercent     = m_settings->value(prefix + "trigger_y_percent", 100).toInt();
-    data.triggerDelayJitterMs    = m_settings->value(prefix + "trigger_delay_jitter_ms",    0).toInt();
-    data.triggerDurationJitterMs = m_settings->value(prefix + "trigger_duration_jitter_ms", 0).toInt();
-    data.triggerIntervalJitterMs = m_settings->value(prefix + "trigger_interval_jitter_ms", 0).toInt();
-    data.triggerSwitchCooldownMs = m_settings->value(prefix + "trigger_switch_cooldown_ms", 0).toInt();
-    data.triggerAutoScope    = m_settings->value(prefix + "trigger_auto_scope", 0).toInt();
-    data.triggerScopeDelayMs = m_settings->value(prefix + "trigger_scope_delay_ms", 0).toInt();
-    data.triggerAutoStop = m_settings->value(prefix + "trigger_auto_stop", 0).toInt();
-    data.triggerStopMs   = m_settings->value(prefix + "trigger_stop_ms", 60).toInt();
+    // ★ 2026-09-17: 这里原来还读 trigger_* / aim_path_* 共 18 个键(与上面的写出对称)。
+    //   对应的 HotkeyProfile 字段已随瞄准控制链删除, 这些成员已从 HotkeyData 移除。
     data.aimClasses      = m_settings->value(prefix + "aim_classes", QString()).toString();
     data.crosshairDetectEnabled = m_settings->value(prefix + "crosshair_detect_enabled", false).toBool();
     data.dynamicFovEnabled = m_settings->value(prefix + "dynamic_fov_enabled", false).toBool();
     data.dynamicFovStrength = m_settings->value(prefix + "dynamic_fov_strength", 0.60).toFloat();
-    data.aimPathMode = m_settings->value(prefix + "aim_path_mode", 0).toInt();
-    data.aimPathBezierCx1 = m_settings->value(prefix + "aim_path_bezier_cx1", 0.30).toFloat();
-    data.aimPathBezierCy1 = m_settings->value(prefix + "aim_path_bezier_cy1", 0.00).toFloat();
-    data.aimPathBezierCx2 = m_settings->value(prefix + "aim_path_bezier_cx2", 0.70).toFloat();
-    data.aimPathBezierCy2 = m_settings->value(prefix + "aim_path_bezier_cy2", 0.00).toFloat();
-    data.aimPathWindGravity   = m_settings->value(prefix + "aim_path_wind_gravity", 5.0).toFloat();
-    data.aimPathWindWind      = m_settings->value(prefix + "aim_path_wind_wind", 2.0).toFloat();
-    data.aimPathWindStep      = m_settings->value(prefix + "aim_path_wind_step", 10.0).toFloat();
-    data.aimPathWindDistance  = m_settings->value(prefix + "aim_path_wind_distance", 8.0).toFloat();
-    data.aimPathWindThreshold = m_settings->value(prefix + "aim_path_wind_threshold", 10).toInt();
-    data.aimPathCustomSamples = m_settings->value(prefix + "aim_path_custom_samples", QString()).toString();
+    // ── ★★ 通用控制器层 (2026-09-17 第三轮续) ──────────────────────────
+    // ★ 与上面的写出【严格对称】。默认值刻意与 HotkeyProfile 的成员初值一致,
+    //   这样老 QSettings 里没有这些键时行为不变(等价历史单套行为)。
+    data.ctlEnabled = m_settings->value(prefix + "ctl_enabled", false).toBool();
+    data.ctlKpX = m_settings->value(prefix + "ctl_kp_x", 35.0).toDouble();
+    data.ctlKpY = m_settings->value(prefix + "ctl_kp_y", 35.0).toDouble();
+    data.ctlKiX = m_settings->value(prefix + "ctl_ki_x", 0.0).toDouble();
+    data.ctlKiY = m_settings->value(prefix + "ctl_ki_y", 0.0).toDouble();
+    data.ctlKdX = m_settings->value(prefix + "ctl_kd_x", 0.0).toDouble();
+    data.ctlKdY = m_settings->value(prefix + "ctl_kd_y", 0.0).toDouble();
+    data.ctlTauUnwindSec = m_settings->value(prefix + "ctl_tau_unwind_sec", 0.030).toDouble();
+    data.ctlTauDerivSec = m_settings->value(prefix + "ctl_tau_deriv_sec", 0.020).toDouble();
+    data.ctlIMax = m_settings->value(prefix + "ctl_i_max", 0.0).toDouble();
+    data.ctlMaxOutputCounts = m_settings->value(prefix + "ctl_max_output_counts", 200).toInt();
+    data.ctlPFullScalePx = m_settings->value(prefix + "ctl_p_full_scale_px", 0.0).toDouble();
+    data.ctlYOffset = m_settings->value(prefix + "ctl_y_offset", 0.5).toDouble();
+    data.ctlYOffsetMax = m_settings->value(prefix + "ctl_y_offset_max", 0.5).toDouble();
+    data.ctlHysteresisRatio = m_settings->value(prefix + "ctl_hysteresis_ratio", 1.3).toDouble();
+    data.ctlMaxDistancePx = m_settings->value(prefix + "ctl_max_distance_px", 0.0).toDouble();
+    data.ctlRandomSeed = m_settings->value(prefix + "ctl_random_seed", 0).toInt();
+    data.ctlMatchCenterRatio = m_settings->value(prefix + "ctl_match_center_ratio", 0.5).toDouble();
+    data.ctlAreaRatioTol = m_settings->value(prefix + "ctl_area_ratio_tol", 2.0).toDouble();
+    data.ctlKSnapMult = m_settings->value(prefix + "ctl_k_snap_mult", 1.15).toDouble();
+    data.ctlMinAspect = m_settings->value(prefix + "ctl_min_aspect", 0.2).toDouble();
+    data.ctlMaxAspect = m_settings->value(prefix + "ctl_max_aspect", 5.0).toDouble();
 
     return data;
 }

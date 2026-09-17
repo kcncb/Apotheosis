@@ -83,3 +83,15 @@ out/
 /v4.ini
 /v6.ini
 /v7.ini
+
+# ★ 与本项目无关的本地杂物 (2026-09-17 提交前清理时发现, 都不是 Apotheosis 的产物)
+#   · security-reports/ 与 engagement.md 是【另一次渗透测试】的材料, 不属于本仓库
+#   · openspec/ 与 .codex/skills/ 是另一套工具链的工作目录
+#   · Testing/ 是 ctest 自己写出来的临时目录
+#   · pelican_bicycle.svg 是一个无关的示例图
+/security-reports/
+/engagement.md
+/openspec/
+/.codex/
+/Testing/
+/pelican_bicycle.svg

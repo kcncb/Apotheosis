@@ -8,7 +8,6 @@
 #include <thread>
 
 class IDetector;
-class MouseThread;
 
 namespace runtime
 {
@@ -16,13 +15,18 @@ namespace runtime
 bool preload_model_metadata(const std::string& model_path, bool persist_config, std::string* error = nullptr);
 
 // Encapsulates the end-to-end inference pipeline: detector creation, capture
-// thread, detector thread and mouse thread. Constructed once (owned by the
-// Launcher UI); start() / stop() can be called multiple times so the user can
-// swap backends between runs without restarting Apotheosis.exe.
+// thread and detector thread. Constructed once (owned by the Launcher UI);
+// start() / stop() can be called multiple times so the user can swap backends
+// between runs without restarting Apotheosis.exe.
+//
+// ★ 瞄准控制链已整条移除(2026-09-17): 本会话现在【只做 采集 → 推理】,
+//   检测结果落在 detectionBuffer 里供预览窗显示。原来这里还起一条 MouseThread,
+//   它承担锁靶/瞄点/PID/扳机/下发整条链 —— 那部分已删除, 所以会话不再需要
+//   MouseThread 引用, 也不再 join 鼠标线程。
 class InferenceSession
 {
 public:
-    explicit InferenceSession(MouseThread& mouse_driver);
+    InferenceSession();
     ~InferenceSession();
 
     InferenceSession(const InferenceSession&) = delete;
@@ -44,11 +48,8 @@ private:
     std::unique_ptr<IDetector> detector_owned_;
     IDetector* detector_raw_ = nullptr;
 
-    MouseThread& mouse_driver_;
-
     std::thread capture_thread_;
     std::thread detector_thread_;
-    std::thread mouse_thread_;
     std::thread heartbeat_thread_;
 
     std::string current_backend_;

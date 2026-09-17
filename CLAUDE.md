@@ -2,12 +2,179 @@
 
 Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chinese narrow strings use legal `u8` literals. Use UTF-8/wide filesystem paths for model names.
 
+## ★★ 2026-09-17: 瞄准控制链已整条删除 —— 本程序现在只做【采集 → 推理】
+
+这一节先读, 因为它决定了仓库里**什么已经不存在**。
+
+用户的要求是"只保留采集和推理"。被删除的东西(整条瞄准控制链):
+
+| 删除的东西 | 原来的职责 |
+|---|---|
+| `runtime/mouse_thread_loop.cpp` | 瞄准主循环: 扳机 FSM、下发、chainlog。**这是唯一的下游** |
+| `mouse/boss_aim.{h,cpp}` | 锁谁 + 瞄框内哪个点 |
+| `mouse/aim_tracker.h` | 身份/速度/每轨预测状态机 |
+| `mouse/aim_pid.{h,cpp}` | 生产控制器(PID + 在途补偿 + 亚量化保护) |
+| `mouse/aim_pid_am.h` | AimMagic PID 内核逐字移植(本来就是**未接线**的可选件) |
+| `mouse/aim_scale.h` / `aim_path.h` / `anchor_filter.h` | 尺度调度 / 轨迹整形 / α-β 速度滤波 |
+| `mouse/auto_stop.h` / `trigger_scope.h` | 自动急停 / 自动开镜 |
+| `mouse/autotune_*.{h,cpp}` + `qt_ui/pages/AutoTunePage.*` | LLM 调参 agent(唯一调参对象就是那条回路) |
+| `qt_ui/pages/HotkeyPage.*` | 瞄准参数界面 |
+| `runtime/thread_loops.h` / `runtime/chain_log.h` | 鼠标线程声明 / 全链路日志(唯一写入者已删) |
+| `HotkeyProfile` 里 **55 个字段** | 全部 `pidf_*` / `esync_*` / `trigger_*` / `aim_scale_*` / `aim_path_*` |
+| 15 个逻辑测试 | `aim_*` / `inflight_*` / `dt_smooth` / `autotune_*` / `trigger_scope` / `auto_stop` |
+
+**★ 为什么这些回归是删掉而不是留着**: 它们钉的是 PID 死区、在途补偿、尺度调度、
+提前量、调参安全三层 —— 断言对象全都不存在了。留着只会编不过。**这不是"把测试删了
+就完事"**: 每一个被删的回归, 它保护的**行为**也一起没了。
+
+★★ **同样删掉的还有一批"没有生产者的读数"** —— 这是本轮最容易漏的一类:
+`g_pid_last_err_px` / `g_pid_mode_track` / `g_dynamic_fov_radius_x_px` /
+`g_dynamic_fov_radius_y_px` 的唯一写入者是 `mouse_thread_loop.cpp`。删掉主循环之后,
+预览窗的动态 FOV 椭圆和 DebugPage 的读数**还在读它们**, 于是界面会显示一个
+**永远为 0、看起来像"功能没生效"**的数字。**死读比没有更糟**, 所以读取点一并删除。
+`ConfigManager::HotkeyData` 里 ~20 个只在自己和 QSettings 之间往返的瞄准成员同理。
+
+**现在活着的只有**: 采集(Media Foundation) → 推理(**只剩 TensorRT**) →
+`detectionBuffer` → 预览窗显示检测框。**没有任何东西会动鼠标、按键、或读写游戏。**
+
+## ★★ 2026-09-17 (后一轮): 推理层收敛为【只 end2end + 只 FP16 + 单缓冲 + 候选固定 20】
+
+同一批改动里把推理层剪成了一条路。**每一条都是"删掉一条并列路径", 不是调参**:
+
+| 删除的东西 | 为什么 |
+|---|---|
+| **DirectML 整条后端** (`detector/dml_detector.*`, `postProcessYoloDML`, 界面后端下拉框、DML 显卡 ID、`config.dml_device_id`) | 只留 TRT。老 `config.ini` 里的 `backend` / `dml_device_id` 键**读都不读**, 下次保存消失。`backend` **仍是 `Config` 成员**(会话启动读), 只是恒为 `"TRT"` 且不再落盘 |
+| **非 end2end 模型支持** (`[1,C,N]` / `[1,N,C]` raw 解码、GPU `launch_decode_and_filter` kernel、`kMaxCandidates`、候选/转置缓冲、CPU `NMS`) | 现在**只接受 `[1,N,6]`**。非 end2end 模型**明确报错并拒绝启动**(提示重新 `end2end=True` 导出), 不再静默走别的路 |
+| **双缓冲流水线** (`use_double_buffer`, `numSlots`, `prev_slot`, 界面开关) | 它把"发布第 N 帧"门控在"第 N+1 帧到达"上 ⇒ **白加整整一帧延迟**(120fps = +8.33ms), 与降延迟目标相反 |
+| **FP16→FP32 整块 CPU 转换** (`fp16OutputScratch`) | 旧实现每帧先把整块输出逐元素 `__half2float` 成 float 阵列; end2end 只需读 N 行 × 6 个数 ⇒ 改成**按 dtype 就地读取** |
+| `mouse/ava_exact/` (6 对文件) | 已无消费者 |
+| **候选数上限** | 固定 `kFixedMaxDetections = 20`, **不允许用户设置**(界面只读, 配置键不再落盘) |
+
+★★ **FP16 现在是双向强制**: 输入**和输出**都必须是 `kHALF`, 否则拒绝启动。
+输出这条检查是**必需**的, 不只是策略 —— `postProcess` 直接按 dtype 读 `__half`,
+若输出实为 FP32 而放过, 会把 float 位模式当 `__half` 解释成**垃圾数值且不报错**。
+
+★★ **end2end 路径【不跑 NMS】**(与旧 `cols==6` 路径逐字一致): 图内已完成选择,
+再叠 IoU 抑制会把"两个真实目标靠得很近"误删。**这是特性, 不是遗漏。**
+
+★ 配置面: `backend` / `dml_device_id` / `use_double_buffer` / `max_detections`
+四个键现在**读也不读、写也不写**; 老配置里的它们被安全忽略。
+
+★ 仍然活着、且**必须继续被看住**的配置面: `HotkeyProfile` 只剩 9 个字段
+(`name` / `group` / `keys` / `fovX` / `fovY` / `aim_classes` /
+`crosshair_detect_enabled` / `dynamic_fov_enabled` / `dynamic_fov_strength`)。
+`pidf_mapping_version` 这套迁移机制**整条删除** —— 没有槽位需要迁移。
+★★ `config_migration_test` 里那条"**老配置里那几十个已删除的键必须被安全忽略**"
+(不报错、不污染活着的键、且不再被写回)是**升级路径上最要紧的一条回归**, 保留并加强了。
+
+★★ **验证边界(诚实)**: 这些结论是在 macOS 上得到的 —— 主程序 `ai` 目标在非 Windows
+上**根本编不了**(`CMakeLists.txt` 直接 FATAL_ERROR)。所以"编过"这件事**没有被验证过**。
+本机能跑的是 `APOTHEOSIS_LOGIC_TESTS_ONLY=ON` 的逻辑回归, 现在是 **8 个**(原来是 22 个)。
+其中 `mouse_driver_test` 在 `if(WIN32)` 里, **本机不编译 ⇒ 驱动层现在零覆盖**。
+
+**★ 反过来也要记住: 被删掉的那些"实测结论"仍然是本仓库最有价值的资产。**
+46ms 死区、`inflight_beta=1.6` 的实测最优带、`Kp × s_max ≲ 52`、k̂ 在双机下不可测、
+以及"分母必须是量出来的"那一串教训 —— 它们记在 `docs/` 里, 若将来要重建控制链,
+**先读 `docs/aiming-controller.md` 与 `docs/aimmagic-ground-truth.md`, 不要重新推一遍。**
+
+## ★★ 2026-09-17 (第三轮): 通用控制器层已重建 (L1+L2 纯计算骨架)
+
+★★ **这是"重建", 不是"恢复"** —— 上一轮删掉的那条链**没有回来**。
+新链按 `docs/generic-controller-layer.md` 的设计重写, 放在 **`Apotheosis/control/`**,
+**全部零依赖**(不引 OpenCV / Windows / Qt)⇒ **任何平台都能编、能单测**。
+
+```
+① 筛选(Delete/Filter/Aim) + 选靶(最近 + 滞回) ─ selector.{h,cpp}
+② 检测稳定器(认目标 + 剔除异常框, ★【不滤波】) ─ stabilizer.{h,cpp}
+③ 滤波(α-β 默认 ┃ Kalman 可选, ★二选一禁止串联) ─ filter.h / alpha_beta_filter.{h,cpp}
+④ 瞄点 = 滤波后中心点 + y偏移       ─ anchor.{h,cpp}
+⑤ PID(FK 结构, 六个增益全分方向)      ─ pid_controller.{h,cpp}
+⑥ 限幅 → 单次量化 + 余量【分方向】结转  ─ pid_controller.{h,cpp}
+   整链编排 ─ aim_controller.{h,cpp}
+```
+
+★★ **四条最容易改坏的不变量**（改前先读 `docs/generic-controller-layer.md`）：
+
+| 不变量 | 它的依据 | 改坏会怎样 |
+|---|---|---|
+| **② 稳定器不做任何位置平滑**(D6) | 用户明确要求; 位置平滑只在 ③ 一处 | 与"全链路只有一道滤波"冲突 |
+| **③ 卡尔曼【替换】α-β, 不串联**(D7) | 二者是同一位置的两种实现(α-β 本身就是稳态 Kalman) | 两个滤波器各带滞后、参数互耦 |
+| **⑥ carry 必须分方向** | 不加就跨轴串扰 | 水平的余量被垂直"借走" |
+| **限幅在余量结转【之前】** | 截掉的位移不许攒欠账 | 表现为"松手后冲一下" |
+
+★ **六个增益默认值全部等价于历史行为**(`Kp_x=Kp_y=35`, 其余 0)
+—— 所以"从单套改成六套"这个动作本身不改变任何行为。
+
+★★ **没有移动死区, 而且不要加回来**(2026-09-17 第三轮, 用户决定)。
+死区被实测证伪: 5px 死区 ⇒ 误差 <5px 时完全不出力, 实测 **10.2 次/秒的
+"动/不动"翻转抖动就是这个极限环**。它想解决的问题(末段不冲过头)已由
+`pFullScalePx` **连续饱和**负责 —— 后者经过原点且连续, 不存在"停了"这个状态。
+★ 保留一个"能调但调了就坏"的旋钮比没有更糟(与"配了没反应的死旋钮"是同类坑的反面)。
+★ 回归里有一条专门钉它: "误差 0.01px 也必须出力" —— 加回死区就会变红(实测 5 条失败)。
+★ 若真机发现准星在锚点附近高频微动, **先查检测噪声与滤波**, 见 `docs/generic-controller-layer.md` §5.1。
+
+★★ **验证边界(诚实)**: `control_layer_test` 有 125 条断言, 本机全绿; 并且做了
+**23 处反向变异, 全部变红**(逐条改坏被测行为, 确认断言真的会失败)。
+但它验证的是**纯数值行为** —— **不涉及驱动下发、不涉及真机、不涉及 Windows 编译**。
+★★ **2026-09-17 (第三轮续): 控制层已接进主程序**（原来这里是"还没有生产调用者"）。
+接线点是 `Apotheosis/runtime/aim_loop.cpp`（运行期外壳）+ `aim_loop_config.cpp`（纯映射）：
+
+| 件 | 职责 |
+|---|---|
+| `runtime/aim_loop_config.cpp` | **纯映射**（`FlatConfig` → `ControllerConfig`），不依赖 OpenCV ⇒ 逻辑测试也编它 |
+| `runtime/aim_loop.cpp` | 取检测/取准星/算 dt/下发；**只管接线，不写控制逻辑** |
+| `detector/trt_detector.cpp` | 检测发布【之后】调一次 `runtime::aim_loop::tick()` |
+| `runtime/inference_session.cpp` | `stop_locked()` 在 `join_all_locked()` **之后**复位控制器并释放驱动通道 |
+
+★ **节拍（用户决定）**: **一批检测 = 一拍控制**，在检测线程上跑，`dt` 是实际检测间隔。
+不用采集帧率 —— 重复喂同一个框会让滤波器误判"目标停住了"。
+
+★ **`aim_loop.cpp` 自己建一个 `MouseThread`**：旧控制链删除后程序里已无别的实例。
+惰性构造（只在真要下发时才建），`reset()` 时 join 掉它的 `moveWorker_` 并清空未发队列。
+
+★★ **`ctl_enabled` 默认 false** —— 新增的控制链在真机验证过之前不该自己动鼠标。
+打开后走 `MouseThread::sendRawMove`，**单位就是整数计数，边界上零换算**。
+
+★★ **接线时抓到并修掉一个真 bug**: `AimController::setConfig()` 原来**只写 `cfg_`，
+从不把 PID 部分转交给 `pid_`**（它是独立对象、有自己的配置副本）。后果是**六个增益
+全部被忽略、PID 一直用默认值跑** —— 界面/配置改了完全没反应，不报错不留痕，
+正是本仓库反复踩的"死旋钮"坑。修法: `setConfig` 里补 `pid_.setConfig(cfg.pid)`。
+★ 回归 `tests/control_wiring_test.cpp`（120 条断言）就是钉它的，**13 处反向变异全部变红**。
+
+★★ **2026-09-17 (第三轮续2): 前后端对齐** —— 接线之后发现"参数能改但界面/配置对不上"，
+逐条修完。**这一轮修掉的都是"静默失效"类问题**:
+
+| 对不上的地方 | 后果 | 修法 |
+|---|---|---|
+| **`config.class_filters` 与 `hotkeys[].aim_classes` 是两套桶** | TargetPage 写的是前者，**控制器只读后者 ⇒ 界面上设的类别对控制器完全无效** | 控制器**两源都读**：全局桶打底 + 逐热键只做"提升为 Aim"（不降级） |
+| **6 项参数写死在 control/ 的默认值里** | `maxDistancePx` / 稳定器 5 项 / `randomSeed` **谁都调不了** | 补 8 个配置槽位（load/clamp/save 三处对齐） |
+| **`Filter` 桶永远为空** | 枚举值存在但没有任何生产者 | `class_filters` 现在真的产出 Filter（有测试钉住正反两面） |
+| **`HotkeyPage` 上轮被删** | ★★ `config.hotkeys[]` **从此没有任何写入者**，界面再也改不动热键/类别/找色/FOV | 重建为 **`AimSettingsPage`**（右栏 6 张卡：触发键/FOV/瞄准类别/准星找色/动态FOV/**控制器参数**） |
+| **`HotkeyData` 没有 `ctl_*`** | 就算做了页面也存不下来 | 加 22 个成员 + QSettings 双向 + bridge profile→UI 22 项 |
+
+★★ **两个必须记住的坑（都是实测踩到的）**:
+
+1. **`flattenProfile` 放在 `aim_loop.cpp` 里 = 零覆盖。** 它是 22 条逐字段赋值，
+   而该文件要 include OpenCV/Windows，本机编不了。反向变异时
+   *"不读 classFilters / 不回填 maxDistancePx"* 两条**全绿** —— 因为测试根本没编到它。
+   搬到 `aim_loop_config.cpp`（只依赖 `config.h`，本机可编）后同样两处都会变红。
+   ★ **教训：变异"全绿"时先确认那条变异是否有效** —— 我第一条写的是把
+   `reserve()` 换掉，而 reserve 只影响容量，那是【无效变异】，不是覆盖缺口。
+
+2. **`ClassBucket{Delete=0,Filter=1,Aim=2}` 与 `toControllerConfig` 的 `case` 标签
+   是隐含契约。** 给枚举重排序会编译通过但让 Filter 静默变成 Aim。
+   已加三行 `static_assert` 把它变成编译期错误（实测重排序后确实编不过）。
+
+★ **UI 与配置的对应关系**（改参数前先看这张表）:
+`AimSettingsPage` 是 `config.hotkeys[]` 的**唯一界面写入者**；
+`TargetPage` 管**全局** `class_filters`；两者的关系是"全局打底、逐热键提升"。
+
 ## Current build
 
 - Windows x64 C++20 / CUDA C++17 application with a Qt6 Widgets UI.
 - Root `CMakeLists.txt` is the main build; recommended generator: Visual Studio 18 2026.
 - Target `ai`, executable `build/cuda/Release/Apotheosis.exe`.
-- A single portable binary includes TensorRT and DirectML. Do not restore old multi-build paths.
+- A single portable binary includes TensorRT. ★ DirectML was removed on 2026-09-17; do not restore it.
 - Qt prefix, TensorRT, cuDNN and CRT locations are CMake cache paths. See `docs/build.md` for actual defaults.
 - Ordinary prebuilt OpenCV 4.13.0; GPU operations use `GpuImage`, custom kernels, NPP and nvJPEG. No OpenCV CUDA rebuild is required.
 - `APOTHEOSIS_LOGIC_TESTS_ONLY=ON` builds only independent regressions on any platform; it is not another application/backend build.
@@ -19,45 +186,29 @@ Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chin
 - `capture/capture.cpp`: only the Media Foundation capture-card backend is currently created. No UDP/TCP/raw-Ethernet backend is built into this path.
 - `capture/mf_capture.cpp`: asynchronous Source Reader callback with a cancellable sample wait; bounded processing/decode workers; latest output frames. Device capability selection is strict.
 - Each frame carries its callback-entry steady-clock timestamp through CPU/GPU output and the detector input slot. Input dequeue establishes T1; publishing uses that frame's T0/T1, never the latest global timestamp.
-- `detector/`: TensorRT / DirectML implementations of `IDetector`. TensorRT keeps per-slot timestamps for double buffering.
-- `mouse/boss_aim.cpp`: target association and aim point only — 锁谁, 以及瞄框内哪个点。它不再包含任何控制器。
-- **控制回路** (2026-09-14 重写, 2026-09-16 定为单档 PID-EventSync): PID 在 `mouse/aim_pid.h`, 尺度调度在 `mouse/aim_scale.h`, 身份/速度/提前量在 `mouse/aim_tracker.h`, 接入点是 `boss_aim.cpp::tick()`。误差/积分/微分全程在【检测图像素】域用 double 计算, 只在出口取整一次成【整数鼠标计数】, 取整零头攒到下一拍。三个增益都带时间量纲(`u = dt*Kp*[e + Ki*∫e + Kd*e']`), 换帧率不用重调。★ **控制器不依赖 k̂(像素/计数)**: 双机架构下 k̂ 是游戏机的属性、无法测量, 两条反推路径均已实测证伪(`docs/aimmagic-comparison.md` §6.7)。任何"先标定像素/计数再进回路"的方案都被否决, 配置里也删掉了那个键。★ 2026-09-16 逐字移植时那条"用户手填 k̂"的像素域在途换算链已【整条删除】—— 现在【没有任何地方】需要 k̂ 了, 见下面 PID-EventSync 那条。完整设计见 `docs/aiming-controller.md`。
-- **瞄准点(位置)路径不过滤**(2026-09-12): 控制器吃【原始瞄点】, 甩到瞄点永远是一拍。"瞄点滤波(anchor_filter_ms)"旋钮已从 config/UI 移除。`mouse/anchor_filter.h` 的 α-β 滤波器紧挨在 PID 之前, 只提供**速度**与野值门限(>40px 整拍丢弃且位置原地不动)。速度与位置路径解耦, 所以速度估错也不会让准星抽。时间常数是编译期常数, 故意不做成旋钮(平滑强度与 Kp 耦合, 两个一起调极容易调乱)。★ 2026-09-16 起那个速度状态**有一个消费者**: 喂给 `AimTracker::setPlatformVelocity()`(AM 的"自己没在动时预测系数只落不涨"要用它, 见 PID-EventSync 那条)。★ 2026-09-16 逐字移植后, 这个量同时也喂给滑行外推的消费者判定。
-- **链路死区 = 46ms**(`mouse/aim_pid.h` 的 `boss::kAimDeadTimeS`) —— 整个回路最关键的物理量, 从实机日志反推: ①Kp=100 时误差以 5.00Hz/200ms 摆动 = 24 拍, 离散"积分+纯延迟"环路的振荡周期是 `2(2d+1)` 拍 => d = 5.5 拍 ≈ 46ms, 临界每拍增益 `g_crit = 2sin(π/(2(2d+1))) ≈ 0.2602`, 而实机 `g = Kp*dt*k̂ = 0.494` = 1.9 倍临界 —— 这就是"Kp=30 稳、Kp=100 抽"的全部原因。**不要再用"软件 E2E ≈11ms"当这个量**: 它漏掉了 HID+游戏帧+显示+采集缓冲。★ 由此得到工程上限: `Kp × s_max ≲ 52`(k̂=0.593 时), 生产点 `Kp=35, s_max=1.5` 正好压在这条线上 —— **s_max 不能再调高, 除非把 Kp 降下来**。
-- **在途自身位移补偿(Smith, 2026-09-14 重新启用; 2026-09-16 定为【唯一一条】)**: 把"已经发出去、游戏里已生效、只是画面还没回来"的那批计数从输出/误差里扣掉, 环路退化成 `y_n = y_{n-1} - g*y_{n-1}`, 于是高增益既能瞬时贴上去又不振荡。★★ **2026-09-16 逐字移植后只剩【计数域】这一条**: `AimPidParams::inflight_beta`, `u -= beta*N/W` —— 不含 k̂, 生产点 1.6, 窗口 = 实测死区 `kAimDeadTimeS` = 46ms。原来那个"像素域(AM 的发送环, 用用户手填的 k̂)"的**第二条链已整条删除**(连同 `AimTracker::inflightPixels()`/`noteSend()`/`amTakesOverInflight()` 裁决) —— 它服务的 FrameSync/EventSync 像素域链没移植, 而 k̂ 在双机架构下测不出来。★ 三条要点: ①**计数域那项必须在计数域扣**, 早期在像素域扣的实现隐含假设 `Kp = 1/k̂`, 实际 5 倍过补偿; ②**必须除以窗口拍数 W**, 否则同一批在途计数会被重复扣 W 次(实测 1000fps 尾段 8.30px); ③积分必须累加**原始误差**。★ 补偿方向不对称: 补**不足**只是回到原来的延迟(安全), 补**过头**会把已生效的指令再扣一遍 → 正反馈发散, 所以窗口不许超过真实死区。实测 60fps 尾段随 beta 是**一个最优带**而不是"越大越好": 0.0→299.6px, 0.4→3.09, 0.8→0.294, **1.6→0.294**, 2.0→9.53, 2.4→60.7。★★ **beta=0 不是"关掉一个可选优化", 是"拆掉主刹车"** —— 它现在是**唯一**的刹车, 所以任何重构都不许顺手把它清零。结构体默认 0.0(让 `aim_pid_test` 的 20ms 假执行器不受影响), 生产接线显式给 1.6。回归: `tests/inflight_comp_test.cpp` + `tests/aim_eventsync_test.cpp`。
-- 旧 AVA PIDF 整条管线(pidf_mode1/mode2、postprocess、update、axis_policy、aim_movement_pipeline、controller_orchestration、pid_input、qx_curve、process_humanization、humanization_math、热键旁路、mouse_output、timed_button)已于 2026-09-11 删除; 更早的 `predictive_controller`(1a5a792)也一并删除 —— 它的自运动补偿把一个写死的"像素/计数"标定增益放在反馈回路内部, 标定不准就在锚点附近每拍反向极限环。曾用在线最小二乘估那个量(`aim_motion.h` + `anchor_observer.h`), 该路径也因双机架构无法测量 k̂ 而于 2026-09-14 整条删除。
-- `pidf_*` 槽位(单位见 config.h): Kp 计数/(像素·秒)、Ki 1/秒、Kd 秒、`pidf_psat_*` P项饱和阈值 像素、`pidf_inflight_*` 无量纲 beta、`pidf_predict_*` 预测系数(±0.2)。★ `pidf_mapping_version` 是槽位语义变更的迁移机制, 当前 **7**: <4 重置五个增益, <5 重置在途补偿, <6 把旧【死区】值(<=20px)丢弃并重置越界的预测系数, **<7 清空尺度基准框高并把 s_min 回默认**(旧的两个绝对阈值 `aim_scale_near_h`/`far_h` 已删除, 不迁移 —— 那是拍出来的常数, 不是用户那个距离的真实框高)。**改任何槽位语义都必须推进这个版本号**, 否则老配置会被静默误读。
-- **提前量(预测补偿)只有一处**(2026-09-16 定稿): `AimTracker::predictionLead()` 的**每轨状态机** —— 系数按 0.1/帧 爬升、−0.2/帧 回落、夹在 [0,1], 提前量 = 系数 × 尺寸权重 × 框心速度, **在算误差之前**直接加到瞄点上。三道 §4.2 约束照旧: 系数范围 **±0.2**(旧 ±100 会让准星偏出几百到上万像素)、**硬像素上限**(默认 12px, 绝对天花板 64px)、**速度噪声门**(默认 60px/s, 实测静止目标 v̂ 噪声 p99=46/max=52)。没有后两道, 稳态瞄偏 = `factor×sw×v` 会随速度**线性增长**, 正是任务书 §4.2 明令禁止的形态。系数默认 0(关闭)。★ 2026-09-16: 原来那个**全局**的 `AimPredict`(`mouse/aim_predict.h`)连同它的测试已整条删除 —— 它只在"经典 PID"档被接线, 而那一档已被删除。回归: `tests/aim_tracker_test.cpp` + `tests/aim_eventsync_test.cpp`。
-- **PID-EventSync = 唯一的瞄准链路**(2026-09-15 移植 AimMagic 1.0.30; 2026-09-16 起单档; **同日改为【逐字移植】**): 原来有"经典 PID / EventSync"两档(`aim_mode`), **已删除经典档** —— `AimPredict`(`mouse/aim_predict.h`)、`aim_mode` 键、`use_prediction_tick`/`prediction_tick_hz`/`prediction_tick_max_run` 全部整条删除, 老配置残留的 `aim_mode` 被**忽略**(不报错、不影响任何键)。★★ **2026-09-16 二次重写**: 第一版是"按思路适配"(参数自己挑、常数自己定), 用户否决并要求**原样照抄**。现在的 `mouse/aim_tracker.h` 是 `FUN_140089ac0` + `FUN_14006e470` 的**逐行移植**, 全部常数与判据 byte 核对过, 真值表在 `docs/aimmagic-ground-truth.md` §1/§5。**改这个文件之前先读那份文档。**
-  - ①**跟踪器**: 关联 = **类别相等** + IoU **严格大于**门限(`IoU == 门限` 不算命中), **没有距离半径**; `hits` 是**累计**命中数(漏帧**不清零**); 命中门 = `min_hits <= hits && misses <= max_age`; 销毁门 = `max_age < misses`(所以**漏 max_age 帧仍存活**, 要到 +1 帧才删)。
-  - ②**速度**: **持有语义** —— 距上次刷新不足 `vel_sample_ms` 时**沿用旧值且不刷新时间戳**(窗口自然到期), 超过才重算 `(Δp/clamp(dt_s,0.001,1.0))*0.25 + v_old*0.75`。AM 默认 20ms。
-  - ③**滑行外推**(2026-09-16 新增): 漏检期位置按 `v*clamp(dt_s)` 外推, 速度按 **X ×0.95 / Y ×0.8** 不对称衰减。★★ **这个外推结果就是喂给下游的框心**, `boss_aim.cpp` 必须真的消费它(`out.coast_consumed` / `coast_offset_x/y` 是遥测) —— 只算不消费 = 死代码, 而且**编译通过、测试全绿、行为与移植前一样**。
-  - ④**每轨预测状态机**(`FUN_14006e470`): 系数 涨 0.1/帧 / 落 0.2/帧 / 夹 [0,1], 状态住在**每条轨迹**上。★★ 涨的完整条件(展开 `||` 后)是 **`|框逐帧位移| > max(30, 0.8×尺寸)×(1+1.5k)` 且 `|自身逐帧位移| > 10px`** —— **两个都是必要条件**。所以**目标静止时系数恒 0**, 无论平台多快。★★ 两轴的"尺寸"是**交叉**的: **X 轴吃框高, Y 轴吃框宽**(原文如此)。★★ 输出还要过一道**重低通**: 正常混合 **0.05**、方向翻转 **0.02**(都是小量 ⇒ 时间常数约 20 帧)。
-  - ⑤**提前量 = 用户系数 × 【平台位移】× 尺寸权重 × 每轨系数**, **就地加到框心**(`*pfVar14 = fVar19 + *pfVar14`)。吃的是**自己甩枪的速度**(`runtime+0xC04/+C08`), **不是目标速度** —— 目标速度只进"涨不涨"的判据。尺寸权重吃**框高**: `h<=下限` 时保持 **1.0**(不是 0), `h>=上限` 时才归 0。
-  - ★ **"真换目标"只有一个判据: 跟踪器锁定的轨迹号变了**。★ **丢目标不清控制器历史**: 单帧漏检由 `max_age` 滑行窗口吸收; 只有**轨迹真死**或真换目标才复位 PID/锚点滤波。★★ **跟踪器每拍都要喂**(包括没目标的那几拍), 否则漏帧计数不增长、超龄轨迹永远不淘汰。
-  - ★★ **整条删除的**: 像素域在途换算链(`counts_per_pixel_*` / `inflight_window_s` / `inflight_beta` / `self_motion_gain`)。它们服务的是 FrameSync/EventSync 的像素域链, 而那条链没移植(k̂ 双机下测不出)。**在途补偿现在只有计数域 `AimPidParams::inflight_beta`(生产 1.6)一条, 绝不许清零** —— 它是唯一的主刹车。所以 `amTakesOverInflight()` 那套二选一裁决也随之删除。
-  - ★ **本项目有意保留的偏差只有 2 处, 且默认关闭(=0) ⇒ 默认行为与 AM 逐位一致**: `pred.max_lead_px`(硬像素上限) + `pred.vel_floor`(速度噪声门)。理由: 任务书 §4.2 要求提前量必须有界, 而 AM 原文**没有上限也没有噪声门**。配置层另有一道 `±1.0` 的系数夹取(AM 无夹取)。
-  - 配置键(8 个, 与 AM 的 Group 作用域一一对应): `esync_min_hits`(3) / `esync_max_age`(5) / `esync_assoc_iou`(0.30) / `esync_vel_sample_ms`(20) / `esync_pred_factor_x`(0) / `esync_pred_factor_y`(0) / `esync_pred_min_w`(20) / `esync_pred_max_w`(80)。删掉的 7 个键**读后丢弃**, 老配置不报错。★ `esync_vel_window_ms` 的旧值**不许迁移**到 `esync_vel_sample_ms`(累加窗 vs 持有窗, 语义不同)。因为**没有任何旧槽位被改语义**, `pidf_mapping_version` **不推进**(仍是 7)。UI 在 `HotkeyPage.cpp` 的「跟踪与提前量（PID-EventSync）」段。设计/偏差: `docs/eventsync-mode.md` + `docs/aimmagic-ground-truth.md`。
-  - ★★★ **踩过的坑(本轮新增)**: (ⅰ)**"看着差不多、其实反了"是本轮的主要失败模式** —— 低通混合系数我写成"正常 1.0 直通"(真值 0.05)、两轴尺寸我写成"X 吃宽"(真值 X 吃高)、位移量纲我写成 `vel×dt_ms`(真值 `vel×dt_s`)。三处都让**系数永远是 0**, 而"系数 0 ⇒ 与关预测逐位一致"**看起来完全正常**。(ⅱ)⇒ **一致性断言必须配反向验证**(打开后必须不同), 否则它会慢慢变成空转。(ⅲ)**"算出来了" ≠ "用上了"**: 逐字移植必须显式确认搬的是"算法"还是"算法+它的消费者", 漏掉下游那一句加法就会得到**编译通过、测试全绿、行为不变**的死代码。(ⅳ)测试夹具也会让断言空转: 门限 `max(30, 0.8×尺寸)` 对默认 60×80 的框算出来是 48px, 而 120fps 下要 5760px/s 才够 —— 夹具必须专门构造"门限够得着"的框(高瘦框), 否则测的是"门限不成立"而不是"逻辑正确"。(ⅴ)**`predictionLead()` 既是查询也是步进** —— FSM 在它里面推进, 夹具不每帧调它, 系数就永远停在 0。
-- **尺度增益调度**(2026-09-14 新增, 同日改为**单基准 + 手动设定**; `mouse/aim_scale.h`): 用 **`bbox.height`** 按公式 `s = clamp((h/H₀)^γ, s_min, s_max)` 调制等效增益(γ=1, 连续有界单调)。**H₀ = "你的参数是在多远的距离上调出来的"**, `h = H₀` 时 `s` 恒为 1.0(与不做尺度逐位相同); 无基准时整条链路恒为中性。★★ 设基准是「控制 → 自动调参」页上一个**按钮**(「以当前距离设为基准」→ 取最近约 7 秒框高的中位数), **与调参会话无关**: 曾经只在跑调参期间采, 那个设计的问题是【不跑调参就永远学不到】, 而"参数在哪个距离调的"跟"调参有没有在跑"是两件独立的事(用户指出)。采集缓冲是 `Runtime::sample_target_height` 里的 `atomic<double>` 环形数组 —— 瞄准线程每帧写、UI 线程按按钮读, 不加锁。★★ 旧版要用户填 `near_h_px=160`/`far_h_px=45` 两个**绝对**像素阈值, 用户指出**根本测不出当前框高**且换游戏/分辨率就失效 —— 已删除。★★ 远处**也**降增益(`s_min` 放开到 [0.30, 1.00], 默认 1.0): 旧版把 `s_min` 钉在 1.0 的理由是"降增益让远处更跟不上", 但那个论证**隐含假设像素速度固定** —— 远处目标像素速度本来就小(`v_px ≈ f·v_world/d`), 按框高等比缩放才是正确的距离补偿(用户原话: "远处敌人看着移动会变慢啊, 那肯定也是按公式下降")。迁移: `pidf_mapping_version` **7**(v6 及更早清空基准 + s_min 回默认; **不**拿旧阈值当基准 —— 那是拍出来的常数, 不是用户那个距离的真实框高)。回归: `tests/aim_scale_test.cpp` + `tests/config_migration_test.cpp`。
-- `mouse/aim_path.h` 仍然保留可用于输出整形, 接在控制器之后(`mouse_thread_loop.cpp`)。四种模式: `0` 直线(透传) / `1` 贝塞尔 / `2` 自定义手绘 / `3` WindMouse(仿 AimMagic 的 `enable_mouse_curve`, 参数 `aim_path_wind_gravity/wind/step/distance` = AM 的 `wind_mouse_G0/W0/M0/D0`, 外加 AM 的 `curve_threshold` 门控 `aim_path_wind_threshold`)。★ 四条共同的不变式: **只旋转不缩放** —— 曲线只提供局部切线, 幅值必须仍等于 PID 输出; 起段 `entry_fade` 让第一拍恒等于控制器输出; `settle_radius` 内回退直线; 门控之内整段旁路。WindMouse 在锁定瞬间的局部坐标系里生成(像素量纲), 重采样成 256 段 `Y(t)` 后走与贝塞尔/自定义完全相同的那套整形, 随机但可复现(固定种子 + 混入 `track_id`)。回归: `tests/aim_path_test.cpp`。
-- **全局配置方案**: `qt_ui/config/config_profiles.{h,cpp}` —— 一份方案 = `configs/<名>.ini` 的完整快照(+ 同名 `.curves/`), 生效配置就是当前方案文件本身(`Config::loadConfig` 把 `config_path` 指过去, `saveConfig("config.ini")` 的重定向让它自动写回)。活动方案名记在 `configs/active.txt`, **不新增配置键**。切换会 `publish()` 运行时快照 + `syncFromRuntime()` + 重发 `configLoaded`(所有页面按新值重读控件)。
-- **扳机 FSM** 在 `mouse_thread_loop.cpp`(`TriggerState` + `TriggerPhase`)。**自动开镜** = `mouse/trigger_scope.h` 的 `boss::ScopeController`, 仿 AimMagic 的「开火方式」(`trigger_auto_scope`: 0 关 / 1 点按右键「只点一下」 / 2 长按右键)。四条硬规则: ①热键自己绑了右键时自动开镜一律不生效(否则把镜切回去); ②`ready()` 在不适用时恒为 true(返回 false 会把扳机整个卡死); ③**右键绝不允许卡在按下** —— 接敌途中复位走 `flushUp()`(只补抬指), 会话/接敌结束走 `forceRelease()`, 退出前 Apotheosis.cpp 再补一次; ④**只点一下, 不自动收镜**(实机反馈: 收镜的第二下会和用户自己的开镜操作打架), 且接敌途中的复位不重新武装, 否则每次重新锁到目标都会再点一下、把"切换开镜"的游戏来回切。点按模式的一次点击**跨两拍**(同拍 down/up 会被游戏吞掉), 下发顺序是先抬后按。与 AM 的有意偏差: AM 同拍先左键再右键(第一枪其实没开镜), 本项目先开镜再闸左键(`trigger_scope_delay_ms`, 从点下右键那刻计时)。回归: `tests/trigger_scope_test.cpp`。
-- **亚量化保护**(2026-09-13, `aim_pid.cpp` 出口): 出口唯一的量化是"取整成整数计数", 所以 **1 计数 = 链路的最小位移**。锁死后残差中位只有 0.27px, 而在途补偿每拍可能把它顶成反号 → P 项反向 → 自持成 **±1 计数的 60Hz 抖动**(日志实证: Kp=100 时 43~54% 的帧在下发 ±1、符号翻转 79%; 框自身逐帧变化中位仅 0.06px, **不是检测噪声**)。保护条件是三条同时成立才夹取: ①`|未补偿输出| < 1 计数`、②补偿后与补偿前**反号**、③反向幅度不超过 `subquantum_reverse_ratio`。★ **完全不需要 k̂** —— 判据全部在计数域, 老实现那套"半个量子"的写法要 k̂, 已被替换。★ 三条同时成立是为了让**甩枪/跟枪逐拍完全一致**(回归断言位相同): 少了 ① 会在甩枪中途误夹(实测第 8 帧 off=41 on=0)。回归: `tests/aim_pid_quantum_test.cpp`。
-- **自动急停**(2026-09-13, `mouse/auto_stop.h` 的 `boss::AutoStopController`): 开火那一拍如果玩家按着 WASD, 就往盒子补一个**反方向键**的短按(W→S/S→W/A→D/D→A) —— 多数 FPS 引擎里相反方向键同时存在 = 抵消 = 立刻停住, 这一枪才是站定打的。是"补键"不是"抢键"(盒子没有屏蔽物理键的能力)。配置: `trigger_auto_stop` / `trigger_stop_ms`(20~300, 默认 60)。**只有 MAKCUNEW 有键盘通道**(`0x22 KEY_TAP`, HID usage id: W=0x1A/A=0x04/S=0x16/D=0x07), 其它输入方式整项跳过并记 `auto_stop=unsupported`; `MouseThread::tapKey()` 在非 MAKCUNEW 下返回 false(不静默成功)。★ 三条硬规则(有回归): ①`GetAsyncKeyState` 会把我们注入的键读回来, 必须把自己正在注入的那个键从物理集合里剔除, 否则自激(判玩家按 S → 去补 W); ②短按窗口内不重发(连点模式每发都重发 = 反方向键一直按着, 玩家走不动); ③只在真的开火那一拍读键、没按 WASD 就不发。★ 用 KEY_TAP 而不是 KEY_MASK: TAP 由固件定时弹起(**自清**), 上位机异常也不会把键卡住; MASK 是绝对态, 漏清除帧会把玩家移动键永久卡死。想让"停稳再开枪"就配 `trigger_fire_delay`: 进命中区→补反方向键→等开火延迟→开火。回归: `tests/auto_stop_test.cpp`。
-- **AimMagic PID 内核已逐字移植(2026-09-16, `mouse/aim_pid_am.h`)**: `FUN_140056f10`(逐轴内核) + `FUN_1400579f0`(双轴外层) 的逐行移植, 回归 `tests/aim_pid_am_test.cpp`(**47 项**)。真值表在 `docs/aimmagic-ground-truth.md` §0.5–§0.14 / §7。★★ **它【尚未接线进生产回路】, 这是有意的** —— 生产仍走 `mouse/aim_pid.h`(已用实机数据整定过: 死区 46ms、`inflight_beta=1.6`、`Kp×s_max≲52`)。AM 内核吃的是 **setpoint**(不是误差), 且外层还要做"按帧比例的增益插值 + 三值取中位数的输出夹取", 依赖 AM 自己的帧计数器/总帧数/幅度上限三个量, 本项目没有对应配置项 ⇒ **接不接线是另一个决定**, 必须同时满足"说清依赖 / 保留 `aim_pid.h` 对照路径 / 用同一份假游戏数据跑对比"三条才许做。★★★ **移植期间抓出的 5 处我自己的错(N5–N9, 见 §8.3), 全是"读了一遍以为自己懂了"**: ①档位 `PID-Free` 是 **0x8** 不是 0x7(Ghidra 把 `CMP 0x8` 渲染成一个**印错了位模式**的 denormal double ⇒ **枚举槽位的比较一律回反汇编读 `CMP <imm>`**); ②D 混合系数是 **`1−exp(−40π·dt)`** 不是线性式(常数 `0x1401f8030` = **−40π 带负号**, 线性式在 8.3ms 下是 **−0.043**; 而且两者**极限都不同**: `dt→0` 时 0.0125 vs 0.9874 ⇒ 不是精度问题是定性错误); ③D 项是 `(1.0−blend)×D_hist`, 那个 `dVar21` 在式子前刚被赋成 1.0(**不是**历史槽); ④第 1 帧早退**只跳 D/F**, 积分代码在早退**之前** ⇒ 第 1 帧照常累加; ⑤`+0xFD` **只在 Adaptive 档**是闸门, 非 Adaptive 档完全无效。★ 每个常数都**回镜像 byte 复核**过(`0x1401f6358`=1.0 / `0x1401f8010`=0.3 / `0x1401f8018`=0.7 / `0x1401f8030`=−40π / `0x1401f4680`=符号位掩码)。★ `FUN_1401daf1a` 确认是 **`exp`**(IAT thunk + 数值判据双重证据)。
-- 闭环回归: `tests/aim_pid_test.cpp` —— 假游戏(目标有世界速度、镜头按我们的计数转、测量与执行都有延迟), 覆盖收敛/稳态滞后/限幅/取整余量/复位。另有 `tests/aim_acceptance_test.cpp`(G1~G7 验收) / `aim_scale_test.cpp`(尺度调度) / `inflight_comp_test.cpp`(在途补偿) / `aim_pid_quantum_test.cpp`(亚量子) / **`aim_tracker_test.cpp`(106 项, AM 逐字移植跟踪器+预测)** / **`aim_eventsync_test.cpp`(27 项, EventSync 全链路闭环)** / **`aim_pid_am_test.cpp`(47 项, AM PID 内核逐字移植)** / `autotune_test.cpp`(调参 agent, 211 项) / `autotune_reload_test.cpp`(**陈旧值回灌**) / `config_migration_test.cpp`(**配置槽位迁移**) / `autotune_layout_test.cpp`(**界面几何, 需 Qt**) —— 共 24 个(`aim_predict_test` 已随 AimPredict 一起删除), `ctest --test-dir build/logic-tests -C Release`。★ `config_migration_test` 必须跟着 `config.cpp` 一起编, 并**显式定义 `NOMINMAX`**(`SimpleIni.h` 与 `config.cpp` 用 `std::min/max`, 而 `windows.h` 的宏会把它们撕坏; 主程序通过 `Apotheosis.h` 拿到这个定义, 逻辑测试没有那一层)。★★ `autotune_layout_test` 是【离屏渲染真实控件再量像素宽度】的那一类 —— 列宽/裁切问题逻辑测试完全测不到。踩过的坑: 表格用 `setStretchLastSection(true)` 时代码读起来是"让最后一列占满剩余宽度", 实际效果是**前 6 列被压到 16~52px、数字挤成一团**; 只把它关掉也【不够】, `ResizeToContents` 给的是"装得下内容的最小宽度"、不含表头需要, 仍会压扁。正解是前 6 列 `Interactive` + 显式 `setColumnWidth`, 最后一列才 `Stretch`。**这类"改完看着对"的界面问题必须实测**。★★ **它还会"自己把自己搞红"**: 页面构造时 `loadSettings()`、析构时 `saveSettings()`, 而测试后面要切到「体感」模式量感受框 —— 那个 index 被存进本进程自己的 QSettings, 于是**第一次跑绿、之后每次都红**(实测踩到)。修法是构造前先把 `auto_tune/mode` 那个键删掉, 让"默认值"这条断言真的在测默认值。它需要 Qt(找不到就自动跳过, 不拖垮整个 logic-tests), 且 `ctest` 里必须把 Qt 的 bin 加进 PATH —— 否则进程以 `0xC0000135`(找不到 DLL)直接退出、一行业务输出都没有, 看起来像"测试崩了"。
-- **调参 agent**(2026-09-14 新增, `mouse/autotune_*.h/.cpp` + `qt_ui/pages/AutoTunePage.*`): LLM 驱动的整定器, 界面在「控制 → 自动调参」。数据源**只用真实运行日志**(chainlog 的 SecPid, 每帧一条), 特意**不用仿真** —— 仿真需要 k̂ 和延迟等假设值, 而 k̂ 测不出来。只把**指标摘要+参数+数据来历**发给 LLM, **不发画面**。★ 安全三层全部**独立于 LLM**: 单步幅度 ≤±20%(beta 上调仅 ±10%)、绝对值域夹取、NaN/Inf 回落原值; 发散/自持抖动/明显变差时**自动回滚**(不问模型)。★ 写回**复用 `live_tune` 的已验证重载路径**(另存完整配置 → 原子改名 → loadConfig + publish + syncFromRuntime), 而不是自己改内存 —— 否则界面上显示的参数和实际在跑的不一致(CLAUDE.md 记过的"配置里是 100, 实际在跑 20")。★ 唯一非 LLM 的"参数"是**尺度基准框高** —— 它不由 agent 学, 而是用户在「自动调参」页按一个按钮设定的观测值(见上条)。设计: `docs/autotune-agent.md`; 回归: `tests/autotune_test.cpp`(211 项; 抓出过真 bug —— 发散判据曾先排序再取头尾 25%, 导致时间顺序丢失、任何正常数据都被判发散; 另有"写盘成功但没生效"; 见坑⑤、坑⑥)。★ 界面几何另有 `tests/autotune_layout_test.cpp`(离屏渲染 + 量列宽)。
-- ★★ **调参会话 = 模式 + 开始/结束, 一次一轮**(2026-09-14 改版, 取代原来的"开关式后台连调"): 用户点「开始采样」→ 正常去打 → 点「结束并调一轮」, 程序取**这两次点击之间**的全部真实日志, 判可用性、算指标、调**一轮**。三个模式: **静态目标 / 动态目标 / 体感**(体感 = 用户用文本框自由描述感受)。三条设计要点: ①**为什么一次一轮** —— 连调十轮分不清哪一轮起的作用, 而中间几轮的数据是"你还在适应新参数"的过渡态, 拿它判断本身就是错的; 调参的节奏必须是人的节奏(调一轮 → 打几枪 → 体感判断)。所以界面上的"每轮采样时长/两轮间隔"旋钮和后台线程**全部删除**, `AutoTuner` 不再有 `start/stop/loop/trigger_once`。②**采样边界 = 两次按钮点击之间的日志**(`begin_session` 记 `SampleBuffer::pushed()` 作起点, `end_session` 记终点, `range()` 切段), **不读任何引擎信号** —— agent 层因此不依赖热键状态/hooks, 能在纯逻辑测试里独立编译验证。③**段的切分用绝对序号**(`push()` 返回单调递增、不因淘汰而变的序号)而不是缓冲区下标 —— 用下标的话, 采样超过缓冲容量(约 68 秒)后起点会被挤掉, 切出来的就不是"开始到结束", 而且**不会报错**、只会让指标悄悄不准; 用绝对序号时 `range()` 会把已淘汰部分裁掉(不报错), 剩下数据仍可用。★ **可用性硬判据** `judge_segment()`: 样本 ≥60 / 时长 ≥0.8s / 有效框高 >0 / 覆盖率 ≥50% / 野值跳变 ≤12(+1/200 条) / 静态模式下尺寸离散度 ≤0.60(否则提示改用动态模式), 不满足就**不发请求**、直接把中文原因显示给用户重采。★ 提示词按模式给**不同的解读指令**(动态模式明确告诉模型"匀速滞后物理上消不掉, 别硬加 Kp"; 体感模式明确"用户原话是主证据, 数字是佐证, 冲突时信用户"), 并说明"甩枪带来的误差峰值是正常操作, 要看稳态段残差而不是全程峰值"。
-- ★★★ **踩过的坑, 再也不要犯②: 算比值时, 先问分母是怎么来的。** `TrackSegment::coverage` 的公式**算错过两次**, 两次都是同一个毛病 —— 用推测出来的分母, 而不是量出来的。第一版 `coverage = n ÷ (跨度 ÷ 平均dt)` 有两个缺陷: ①**分母把"程序没在跑"的死时间算进去了** —— 实测用户日志(4454 条 SecPid, dt_ms 中位 8.74ms、**零丢帧**)里有 9.5s/9.9s/12s/18s/29.6s 的空洞(那些秒瞄准循环没有输出帧), 跨度÷均值把它们算成"本该有的样本数", 于是**完全正常的数据被判成 31.9%**, 每段都过不了 50% 门限 —— 用户侧的现象就是"为什么会覆盖率一直不够"; ②**平均 dt 偏大**(9.26ms vs 典型步进 8.3ms, 少数慢帧拉高均值), 所以连完全连续的一段也只能算出 **111%**, 量域上就不对。**根本问题**: `dt_ms` 是引擎自己报的每拍间隔, 它本来就记录了"这一拍之前空了多久", **直接看它就够了, 不需要推测**。新定义 `coverage = (dt_ms ≤ 中位数×4) 的样本数 ÷ 总样本数` —— 实测同一份日志从 31.9% 变成 **100%**, 逐段也接近 100%。`gaps`(断档计数)用同一个门限, 两者才不会互相打架。**教训: 判据的分母必须是量出来的; 如果是推出来的, 那个模型错了会表现成"明明数据没问题却一直告警", 而且不会报错、只会静默给出错误结论。** 回归: `tests/autotune_test.cpp` §[12] —— 走真实代码路径(`begin_session→push→end_session`), 钉住三个数: 连续段 = 100%(不是 111%)、一次 30 秒断档只掉 ~0.25%(旧公式掉到 20%)、每 5 条断一次则明显下降(门限没形同虚设)。
-- ★★★ **踩过的坑, 再也不要犯③: 有哨兵值的变量不能拿来当重置用。** 用户实测报「一直显示这段数据只有 0 条」。根因: `Runtime::begin_session()` 里有一行 `last_seq_ = 0;`, 而 `feed_from_chainlog()` 用 **0 当"尚未初始化"的哨兵** —— `if (last_seq_ == 0) { last_seq_ = seq - total; }`(用意是"第一次接入别把历史全灌进来")。点「开始」把它归零后, 下一次 feed 以为自己是第一次接入, 把起点重设到*当前最旧一条*并把 `seq` 也赋成同一个值, 于是 `for (i = last_seq_; i < seq; ++i)` **一条都不跑** —— 永远收不到样本。**教训: 重置和未初始化是两件不同的事, 复用同一个值会让"重新开始"被误读成"第一次开始"。** 修法是**根本不重置它**(`last_seq_` 本来就一直指向"已消费到哪一条", 点「开始」只是让 tuner 在当前绝对序号上打起点标记, 两者互不干扰)。★★ **这个 bug 只测 agent 那层抓不到** —— `AutoTuner` 完全正确, 问题在 `Runtime` 喂数据那一侧; 所以 `autotune_test` 的源文件列表追加了 `autotune_runtime.cpp`(该层不依赖 Qt, config 读写走 `RuntimeHooks` 注入的函数指针), 回归在 `tests/autotune_test.cpp` §[13]: 点开始 → 喂 200 条 → 断言收到 200 条, 并单独验证**第二次采样**同样有效。实践过的验证方法: 把修复退回一行, 确认测试真的变红(3 项失败), 再恢复 —— 否则你不知道测试在测什么。
-- ★★★ **踩过的坑, 再也不要犯④: 错误信息必须携带能定位问题的证据。** 用户实测报「测试连接成功, 但显示没 content」。根因是**推理模型的思考过程和正文共用同一个输出预算** —— 带思维链的模型(deepseek-reasoner / QwQ / thinking 变体)先产出一大段 `reasoning_content`, 而**推理 token 也算在 `max_tokens` 里**, 预算被吃光后上游返回 `finish_reason="length"` + `content=""`, 正文一个字都没有(多个上游都记录为已知失败模式)。★★ **为什么"测试连接"是绿的而真调参失败**: 测试用的提示词极短(`请只回复一个 JSON`), 思考量极小; 真调参的提示词长得多(系统提示+指标+参数+数据来历), 思考量大一个量级 —— **测试连接通过 ≠ 预算够**。已做三件事: ①默认 `max_tokens` 800 → **4096**; ②界面加「最大输出」输入框(256~32768, 一起持久化、一起推给 runtime —— 漏推就会重现此 bug); ③**错误信息按上游实际表现分情况给证据**(`finish_reason=="length"` → "思考把预算用光了"+实际 token 数+让你调「最大输出」; 有 reasoning 无正文 → 报思考字符数; 非 OpenAI 格式 → **把响应原文开头显示出来**; HTTP 4xx → 连上游 `error.message` 一起显示)。★ **教训: 原来那句"响应里没有 content 字段(模型可能只返回了 reasoning)"把两个可能原因混在一句话里, 而真正的原因(预算被吃光)恰恰没被提到 —— 用户拿它查不出所以然。错误信息要描述【上游说了什么】, 而不是只描述我们这边的失败状态。** ★ 为了让这层**可离线测试**, 把响应解释从 `chat_completion` 拆成了公开的 `parse_completion_body(resp, http_status, max_tokens)`(网络不可重复, 但"上游返回这样的 JSON 该怎么理解"完全可以判定, 而出错的正是这一层); 回归 `tests/autotune_test.cpp` §[14] 用真实响应体逐条断言, 并钉住"默认 max_tokens ≥ 4096"。
-- ★★ **「改动幅度」三档 (2026-09-15, 保守/平稳/激进)**: 用户实测报「试了两次显示已应用但体感没什么变化」, 查下来三轮加起来 Kp 只动 10%、Ki 一动没动。根因是**两处叠加**: 提示词里写着"幅度要克制 —— 宁可小步走稳"(模型本来就保守), 而硬夹取只给 ±20% —— 于是当参数明显偏离合理区间时(如 Ki=5.0 而默认 1.0)每轮 20% 的步子**永远走不到**。修法是把这个决定权交给用户: `StepStyle{Conservative ±10%, Steady ±20%(默认), Aggressive ±50%}`, beta 上调三档都额外收紧(5%/10%/20%, 因为补过头会正反馈发散)。★★ **最关键的设计约束: 提示词与硬夹取必须取自同一个 StepStyle** —— 提示词说"你可以改 ±50%"而 `apply_limits` 只放 ±20%, 用户就会看到"选了激进还是没变化", 那正是这次的病。★ 激进档的提示词必须**明确鼓励用满额度**("一次调到位"、"把额度用满"), 因为模型的默认倾向是极度保守, 不写这句话它只挪一点点; 绝对值域硬边界(kp≤300 等)不因档位放开。★ 档位记进 `Round::style`, 详情页显示「改动幅度: 激进」—— "改了多少"与"结果如何"必须一起看。回归: `tests/autotune_test.cpp` §[15](三档额度/提示词差异/不再出现「幅度要克制」) + `tests/autotune_layout_test.cpp`(界面上三档都在且写着正确百分比)。
-- ★★★ **踩过的坑, 再也不要犯⑤: 一个"读"函数可能有副作用 —— `loadConfig()` 会改"以后往哪写"。** 用户实测报「自动调参不好用, 体感根本不明显」, 查下来**参数压根没生效**: `active.txt` 指着 `CF.ini`(kp=15.0/ki=5.0), 而实际在跑的是 `live_tune.ini`(kp=6.2/ki=3.3), 界面上却一直显示「已应用」。根因在 `runtime/live_tune.cpp::applyLiveFile()` 里的 `config.loadConfig(path)` —— `Config::loadConfig()` 的**第一件事就是 `config_path = <传进去的路径>`**, 而 `ConfigBridge` 落盘走 `saveConfig()`, 它有一条 `if (target == "config.ini" && !config_path.empty()) target = config_path;`。于是**调参每应用一次, 落盘目标就被永久重定向到 live_tune.ini**, 用户之后改自己激活的方案文件再也不会生效(时间戳实证: 21:03 切方案 → CF.ini 21:04 落盘 → autotune 21:05~21:09 连写 12 次 live_tune.ini)。**教训: 名字听起来是"纯读取"的函数, 调用方必须确认它会不会改全局状态; 任何"读一份副本再应用"的调用方都要【解析前存下、解析后还原】那个路径**, 把副作用关在那一次调用里。修法: 新增 `Config::configPath()/setConfigPath()`, live_tune 解析前后保存还原。★★ **同一条链上还修了一个更隐蔽的毛病: "写出去就算成功"** —— 旧 `hooks.write` 是 `saveConfig → 原子改名 → return true`, 但"写到文件"和"运行时用上了"之间隔着轮询/内容体检/loadConfig/publish 四道关。现在 `write_and_verify()` **只有运行时快照真的变成新值才返回 true**, 2 秒等不到就报 false 并把**「想要 / 文件里 / 实际在跑」三个值**一起显示; `KnobsSetter` 签名改成 `bool(const Knobs&, std::string& err)` 让原因穿到 UI(弹窗 + 结果列按生效/回滚/失败着色)。**判据必须取"运行时那侧可观测的证据", 而不是"我们这边动作做完了"** —— 这是本次事故的全部教训。★ 回归 `tests/autotune_test.cpp` §[16] 走**真实的 `run_one_round`**(经可注入的 `set_reply_fn` 喂模型回答, 因为决定性判据在网络请求之后), 已做反向验证: 把判据退回成无视返回值, 该节 **3 项立刻变红**。★ 第一次写这组测试时只测了 `set_` 的接线, 把 `run_one_round` 的判据改错测试依然全绿 —— **"周边全绿、判据写错"是最危险的情形**。
-- ★★★ **踩过的坑, 再也不要犯⑥: "整片写回"式的界面, 必须在每次外部改配置后重读控件 —— 否则它是缓存, 不是显示。** 修完坑⑤用户仍报「一直没能真正生效!!」。这回证据在运行时日志里, 而且是个**不对称**: `chain_live.log` 的 `reason=pid_params` 显示 `x=(kp=15→30→50→60) y=(kp=15.0)` 一路到会话结束 **y 永远不动**。而自动调参是**同时写 x 和 y** 的(`write_knobs_to_config` 两轴赋同一个值)—— 所以必然是有人把 y 盖回了旧值。根因: `HotkeyPage::reloadFromRuntime()` **只有 `rebuildGroupCombo()`**, 只重建分组下拉和热键列表, **完全不碰六个瞄准参数 spinbox**; 而本页的写回 `saveUiToCurrentProfile()` 是**把控件当前值整片写回 config**(`hp.pidf_kp_y = m_pidfGain[1]->value();`)。于是: ①外部改配置(调参/live_tune)触发 `configLoaded` → ②本页只重建下拉, spinbox 仍显示旧值 → ③用户之后在本页改**任何**别的控件(视野/扳机/曲线…)都会整片写回, 顺手把陈旧值灌回去 → ④**参数被悄悄改回, 不报错、不留痕**。★ **教训: `saveUiToCurrentProfile` 这种写法把"控件值"当成了权威副本, 那就要求每一个改 config 的入口都同步刷新控件; 否则那个界面不是"显示", 而是一个随时会把旧值灌回去的缓存。** ★ 旁证: `TargetPage`/`SessionPage`/`HardwarePage`/`CrosshairPage`/`CapturePage`/`AiModelPage`/`DebugPage` **都**在 `configLoaded` 上重读控件, 只有 HotkeyPage 漏了 —— 而它第 87 行的注释还写着"所有瞄准参数都要按新方案重建"(**注释描述意图, 代码做的是别的事**)。修法: `reloadFromRuntime()` 追加 `reloadProfileFromConfig()`(内部 `loadProfileToUi()` 有 `m_loading` 守卫, 期间 `setValue` 不会反过来写回)。回归: `tests/autotune_reload_test.cpp` —— 把链路的数据后果写下来(陈旧缓存写回→参数被打回; 重读后→不再污染; 真实 Runtime 写回断言调参确实同时写 x/y, 把日志里的不对称唯一归因到界面回灌)。
-- ★★★ **踩过的坑, 再也不要犯⑦: 阻塞式验证不能等"事件循环才会发生的事"。** 修完坑⑤的"写回要验生效"后, 用户每轮都报「参数未能真正生效」, 而 live_tune_ack.txt 里全是 applied。根因是【线程死锁式自等】: `AutoTunePage::onEndSession()` 在 **UI 线程**同步跑 `rt.end_session()` -> `hooks.write` -> `write_and_verify()`, 验证环节用 `std::this_thread::sleep_for(100ms)` 循环等快照变化; 但快照只有 `live_tune::poll()`(QTimer, 200ms)应用文件后才更新, **那个定时器跑在同一个被阻塞的 UI 线程事件循环上** —— 等待期间一次都不会触发。于是"写出文件 -> 2 秒内必然验不到 -> 判失败 -> 回滚(同样等不到) -> 返回后事件循环恢复, 定时器把回滚值应用掉(ack 里的 applied 全是失败之后才写出的)"每轮必现。**测试全绿是因为假钩子直接改内存, 根本没走到这条线程交互 —— 又一次"周边全绿、真实路径没人测"。** 修法: `live_tune::poll_now()`(与定时器同一段 poll() 代码, 只是同步立即执行), 验证循环里每一拍主动调它, 不再依赖事件循环。★ 同场加映: `live_tune.ini` 与方案文件同住 configs/, 方案列表枚举 `*.ini` 时会把它当成一个名叫 "live_tune" 的方案 —— 用户一点它, `active.txt` 就变成 'live_tune', "切方案/保存"从此都作用在调参通道文件上(实测发生过)。修法: `internalNonProfileNames()` 显式排除(`names()`/`entries()` 都滤)。**凡是"外部机制写进用户数据目录"的文件, 枚举用户数据时都要排除。**
-- ★★ **删档重构的教训(2026-09-16)**: 删掉两档里的一个时, 有三件容易做错的事。①**不要把"档位判断"顺手改成常量** —— 在途补偿那处原本是"EventSync 档就把计数域 beta 置 0", 删档后若写成"恒置 0", 而 AM 那条像素域链默认(窗口 0)根本没在跑, 于是生产点**唯一的主刹车被静默拆掉**(实测 beta=0 ⇒ 60fps 发散)。★★ **2026-09-16 的答案变了**: 那条"替代链"现在已【整条删除】, 所以答案不再是一个谓词, 而是"**根本不存在二选一**"—— 计数域 beta 是唯一的补偿, 绝不许清零。这次改动同时删掉了 `amTakesOverInflight()` 与它那套裁决, 因为"选哪条"这个问题本身消失了。②**"关档时逐位不变"的回归全部失效**: 那套断言的前提消失了, 必须重新问一遍"现在的默认行为是什么"(现在写成"三件可关的件全关 ⇒ 与教科书 PID 逐位相同")。③**依赖该档位的配置键要整条删、不要留成 no-op**: `use_prediction_tick` 三个键在单档下必然恒假, 留着就是三个**静默无效**的旋钮。
-- **输入方式与驱动抽象**(2026-09-15 升级, 形状仿 AimMagic 的 `FUN_140040ff0` 驱动工厂): `mouse/mouse_driver.h` 的 `IDriver` 统一接口 + `mouse_driver::open()` 工厂。支持三家后端: **`MAKCU`**(官方库, 串口) / **`MAKCUNEW`**(直通透传固件, 串口, 6Mbps) / **`KMBOXNET`**(从 commit `9236942^` 恢复, 以太网 UDP, 屏幕显示 IP/端口/UUID)。★ 核心变化: 从"MouseThread 里 `if (makcu_new_) ... else if (makcu_)` 按具体类分叉"改成**按能力位查询**(`supports(kCapKeyboard)` / `kCapMove` / `kCapButtonLeft` / `kCapPhysicalRead`…); 自动急停因此对 MAKCUNEW 和 KMBOXNET **同时自动可用**, 不再绑定单一硬件; 老 MAKCU 明确返回 `false` 并记 `auto_stop=unsupported`。★ 连不上时**带得出证据**: `describeStatus()` / `lastError()` 打印具体 IP/端口/COM 与错误原因, 不再是旧代码那种只有一行的 `Error connecting.`。★ 设备热插拔流程保留: `createInputDevices()` 解除借出指针后才关闭旧设备, `inputDeviceMutex` 保护指针读取, `MouseThread::refreshDriver()` 自动把当前借出指针包成统一接口。回归: `tests/mouse_driver_test.cpp`(测试 24, 覆盖名称/能力/状态串/非法名字拒绝/空指针安全降级)。
+- `detector/`: **only** the TensorRT implementation of `IDetector` remains (DirectML deleted).
+  ★ Single-buffered: the double-buffer pipeline was removed on 2026-09-17 because it added a
+  full frame of latency (+8.33ms @120fps). Results publish as soon as they are ready.
+  ★ Engine I/O must be FP16 in **and** out, output must be end2end `[1,N,6]` — otherwise the
+  engine is rejected at load time rather than silently mis-decoded.
+- ★★ **瞄准控制链已于 2026-09-17 整条删除**(`boss_aim` / `aim_tracker` / `aim_pid` /
+  `aim_scale` / `aim_path` / `anchor_filter` / `auto_stop` / `trigger_scope` /
+  `autotune_*` / `runtime/mouse_thread_loop.cpp` / `HotkeyPage` / `AutoTunePage`)。
+  本节下面原来那一大段(控制回路、46ms 死区、在途补偿、亚量化保护、扳机 FSM、
+  调参 agent、PID-EventSync、尺度调度、AimMagic PID 内核移植…)**描述的东西都已经不在
+  代码里了**, 已整段移除以免误导。**那些实测结论没有丢**: 它们完整记在
+  `docs/aiming-controller.md`、`docs/aimmagic-ground-truth.md`、`docs/aimmagic-comparison.md`、
+  `docs/eventsync-mode.md`、`docs/autotune-agent.md` 里 —— **要重建控制链就先读它们,
+  不要重新推一遍**(46ms 死区、`inflight_beta` 的最优带、`Kp×s_max≲52`、
+  k̂ 在双机架构下不可测, 这些都是量出来的, 不是想出来的)。
+- `mouse/mouse_driver.h` / `mouse.cpp`: 驱动抽象与下发队列**仍然存在且仍然编译**,
+  但它现在**没有任何下发消费者**(原来唯一调用它的是 `mouse_thread_loop.cpp`)。
+  输入设备仍会被探测/打开/关闭(`Apotheosis.cpp::createInputDevices()`),
+  只是不会再往游戏里发任何东西。★ `assignInputDevices()` 现在是空实现,
+  这是有意的(保留调用序列, 去掉已经没有消费者的推送)。
+- **输入方式与驱动抽象**(2026-09-15 升级, 形状仿 AimMagic 的 `FUN_140040ff0` 驱动工厂): `mouse/mouse_driver.h` 的 `IDriver` 统一接口 + `mouse_driver::open()` 工厂。支持三家后端: **`MAKCU`**(官方库, 串口) / **`MAKCUNEW`**(直通透传固件, 串口, 6Mbps) / **`KMBOXNET`**(从 commit `9236942^` 恢复, 以太网 UDP, 屏幕显示 IP/端口/UUID)。★ 核心变化: 从"MouseThread 里 `if (makcu_new_) ... else if (makcu_)` 按具体类分叉"改成**按能力位查询**(`supports(kCapKeyboard)` / `kCapMove` / `kCapButtonLeft` / `kCapPhysicalRead`…); ★ 注意: 能力位本身仍然有效, 但**它的第一个消费者(自动急停)已随控制链删除** —— 所以现在"能力位被查询"这件事在生产路径上**没有下游**。★ 连不上时**带得出证据**: `describeStatus()` / `lastError()` 打印具体 IP/端口/COM 与错误原因, 不再是旧代码那种只有一行的 `Error connecting.`。★ 设备热插拔流程保留: `createInputDevices()` 解除借出指针后才关闭旧设备, `inputDeviceMutex` 保护指针读取, `MouseThread::refreshDriver()` 自动把当前借出指针包成统一接口。回归: `tests/mouse_driver_test.cpp`(测试 24, 覆盖名称/能力/状态串/非法名字拒绝/空指针安全降级)。
+★★ 它在 `tests/CMakeLists.txt` 的 `if(WIN32)` 里 ⇒ **macOS 上不编译、不在 ctest 列表里**。
+   所以"逻辑测试全绿"这句话**不覆盖驱动层**。
 - UI: `qt_ui/MainWindow.cpp`, `qt_ui/pages/`, shared widgets. `overlay/preview_window.cpp` is the runtime image preview, not the old ImGui launcher.
 - `qt_ui/preview/` is an independent visual preview, not a working inference application.
 
@@ -74,6 +225,61 @@ Read `AGENTS.md` first. UI text stays Chinese, source files stay UTF-8, and Chin
 
 ## Validation
 
-Run existing logic tests via CMake/CTest (`docs/build.md`). Tests include per-frame timing, overwritten input counts, device timestamp validity/freshness, cancelled sample waits and event ownership with an instrumented CUDA API.
+★ **2026-09-17 (第三轮) 之后的实情**: 本机能跑的只有 `APOTHEOSIS_LOGIC_TESTS_ONLY=ON`, 现在 **8 个**测试:
 
-A successful logic test or appearance preview does not prove Windows application compilation, driver behavior, GPU inference or hardware operation. State what was actually tested. Avoid modifying third-party modules or generated build directories.
+```
+cmake -S . -B build/logic-tests -DAPOTHEOSIS_LOGIC_TESTS_ONLY=ON
+cmake --build build/logic-tests -j8
+ctest --test-dir build/logic-tests --output-on-failure
+```
+
+它们是 `latency_probe_test` / `capture_card_caps_test` / `device_frame_age_test` /
+`interruptible_slot_test` / `gpu_ready_event_test` / `raw_frame_layout_test` /
+**`control_wiring_test`** / **`control_layer_test`**
+
+前 6 个是**采集与推理数据面**的回归(逐帧时序、被覆盖的输入计数、设备时间戳有效性/新鲜度、
+可取消的采样等待、GPU 事件所有权)。
+
+★ `control_layer_test` 是第三轮新增的**控制器层回归**(125 条断言), 钉 ①~⑥ 全链:
+选靶滞回、稳定器不平滑、突变→硬重置、α-β 公式、锚点方向、六增益分方向、
+余量结转(含"不放大")、限幅顺序、**无死区(0.01px 也出力)**、D 项低通、
+积分 clamp 与按分量回吐。
+★★ **它的价值来自"23 处反向变异全部变红"这个事实, 不只来自"全绿"。**
+   做法: 逐条改坏被测行为(见 `docs/generic-controller-layer.md`), 确认断言真的失败。
+   **一个不会失败的断言不是证据** —— 本轮就靠这个抓出了 4 个假覆盖:
+   从未被触发的 D 项低通、只看遥测快照的 reset 断言、
+   以及被"中心太远"回退路径掩盖的尺寸判据。
+   (另有 `deadzonePx` —— 它最初是**声明了却没人用**的死参数, 补实现后发现
+   "能调但调了就坏"同样有害, 于是**整项删除**, 并留了一条防它回来的回归。)
+
+★ 原来那 22 个里有 15 个钉的是瞄准控制链, 已随控制链删除。
+**每一个被删的回归, 它保护的行为也一起没了。**
+
+★★ **`config_migration_test` 在 macOS 上被静默跳过** —— 它需要 `Apotheosis/modules/SimpleIni.h`,
+而那个第三方单头文件在本 checkout 里**不存在**(Windows 上才有)。`tests/CMakeLists.txt` 用
+`if(EXISTS ...)` 包着它, 所以它**既不编译也不在 ctest 列表里** —— 本机**无法**验证配置层。
+这是覆盖缺口, 不是"它通过了"。
+
+★★ **`mouse_driver_test` 同样跳过**(在 `if(WIN32)` 里) ⇒ 驱动层本机零覆盖。
+
+★★ `control_wiring_test`（**120 条断言**, 13 处反向变异全红）钉的是
+**"配置 → 控制器"的映射**（含 `flattenProfile` 的 22 条逐字段搬运）、
+**"配置真的驱动控制"**、**类别桶两源合并**与 **dt 门禁**。它的存在理由: 漏映射 = 静默失效（界面能改、跑起来没变），
+不报错不留痕 —— 上面那个 `setConfig` 不转发 PID 配置的 bug 就是这么被抓出来的。
+
+★★★ **"8/8 绿"证明的是这 8 件事, 不是别的。** 主程序 `ai` 目标在非 Windows 上
+**编不了**(`CMakeLists.txt` 直接 FATAL_ERROR), 所以:
+**Windows 编译、Qt 界面接线、TensorRT 推理、采集卡行为、驱动下发、以及
+`Apotheosis.exe` 到底能不能起来"—— 全部没有被验证过。**
+不要用"逻辑测试全绿"去说"改好了"或"能跑了"。
+
+★★ **第三轮的控制器层尤其要注意这一点**: `control_layer_test` 全绿 + 23 处反向变异
+全红, 证明的是**"这套数值公式按设计实现了"**。它**不证明**:
+- 参数取值合理(六个增益的实测定值**一个都还没有**);
+- 接上真机后表现如何（★ 接线**已在源码层完成**，但**没有在 Windows 上编过**，
+  更**没有在真机上跑过** —— 本机只有逻辑回归；见下面"第三轮续"那节）;
+- Windows 上能编过(本机只编了 `control_layer_test`, **主程序没碰过**)。
+
+A successful logic test or appearance preview does not prove Windows application compilation,
+driver behavior, GPU inference or hardware operation. State what was actually tested.
+Avoid modifying third-party modules or generated build directories.

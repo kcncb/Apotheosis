@@ -65,10 +65,9 @@ private:
     cudaStream_t stream;
 
     bool useCudaGraph;
-    // True once *every* active slot has a captured + instantiated graph. When
-    // numSlots==2 we capture one graph per slot, each writing to its own pinned
-    // dst. Per-slot graphs lets graph capture coexist with double_buffer
-    // pipelining instead of being mutually exclusive.
+    // True once the (single) graph has been captured + instantiated.
+    // ★ 2026-09-17: 双缓冲整条移除后只剩单槽, 所以只需要一张图。
+    //   下面这些数组形式上保留 2 个元素以免改动面过大, 实际只用下标 0。
     bool cudaGraphCaptured;
     std::array<cudaGraph_t, 2> cudaGraphs{ nullptr, nullptr };
     std::array<cudaGraphExec_t, 2> cudaGraphExecs{ nullptr, nullptr };
@@ -103,7 +102,7 @@ private:
     std::unordered_map<std::string, void*> pinnedOutputBuffers;
     std::unordered_map<std::string, void*> pinnedOutputBuffersB;
     std::array<cudaEvent_t, 2> slotDoneEvent{ nullptr, nullptr };
-    int numSlots = 1;
+    // ★ 2026-09-17: numSlots 成员已删除 —— 单缓冲固定单槽。
     std::unordered_map<std::string, void*>& pinnedSlot(int s) {
         return s == 0 ? pinnedOutputBuffers : pinnedOutputBuffersB;
     }
@@ -162,9 +161,14 @@ private:
 
     GpuImage gpuFrameBuffer;
 
+    // ★ 2026-09-17: 签名改了 —— 原来是 `const float* output`。
+    //   现在直接传 pinned 缓冲区原始指针 + 数据类型, 由本函数按需读取:
+    //   模型固定 FP16 I/O, 旧实现在调用前先把整块输出逐元素 __half2float 成
+    //   一个 float 阵列(纯 CPU 开销), 而 end2end 只需要读 N 行 × 6 个数。
     void postProcess(
-        const float* output,
+        const void* output,
         const std::string& outputName,
+        nvinfer1::DataType dtype,
         std::chrono::duration<double, std::milli>* nmsTime
     );
 
@@ -186,23 +190,14 @@ private:
     void* inputBufferDevice;
 
     std::unordered_map<std::string, nvinfer1::DataType> outputTypes;
-    std::unordered_map<std::string, std::vector<float>> fp16OutputScratch;
 
-    // Per-output device buffer that holds the post-transpose [N, C] float32
-    // tensor (YOLOv8-style outputs only). Pre-transpose on the GPU fixes the
-    // stride-unfriendly access pattern in the old CPU decode loop and folds in
-    // the fp16->fp32 cast that used to run per-element on the CPU.
-    std::unordered_map<std::string, void*> transposedDeviceBuffers;
-    std::unordered_map<std::string, size_t> transposedSizes;
-    std::unordered_map<std::string, bool> outputNeedsTranspose;
-    // Per-output cached YOLO layout. cnLayout=true means model output is
-    // [1, C, N] (Ultralytics default), false means [1, N, C] (transposed
-    // export). outputC / outputN store the resolved channel and anchor counts
-    // so the inference loop and CUDA Graph capture both feed the kernel
-    // identical, layout-correct values.
-    std::unordered_map<std::string, bool> outputCnLayout;
-    std::unordered_map<std::string, int> outputC;
-    std::unordered_map<std::string, int> outputN;
+    // ★ 2026-09-17: 下面这些成员全部删除 —— 它们只服务"raw YOLO 输出 +
+    //   GPU 转置 + 候选块"那条路径, 而本程序现在只接受 end2end 输出 [1,N,6]:
+    //     fp16OutputScratch   (CPU 侧 __half2float 整块转换的落地缓冲)
+    //     transposedDeviceBuffers / transposedSizes / outputNeedsTranspose
+    //     outputCnLayout / outputC / outputN  (raw 布局判定)
+    //   freeTransposedBuffers() 保留为空实现, 因为 initialize()/析构仍调用它
+    //   (调用序列保持不变, 少一处"看起来还有东西要做"的误导)。
     void freeTransposedBuffers();
 
     // CUDA Events

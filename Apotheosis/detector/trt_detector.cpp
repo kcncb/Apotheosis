@@ -11,6 +11,7 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn.hpp>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <limits>
@@ -34,18 +35,15 @@
 #include "runtime/active_hotkey.h"
 #include "runtime/latency_probe.h"
 #include "runtime/sched_boost.h"
+// ★ 通用控制器层 (2026-09-17 第三轮重建): 一批检测发布后跑一拍控制。
+#include "runtime/aim_loop.h"
 
 int model_quant;
 std::vector<float> outputData;
 
-// Max candidates the GPU decode+filter kernel will emit before CPU NMS.
-// Per-output device buffer layout is: [int counter (16B aligned) | float
-// candidates[kMaxCandidates * 6]]. 1024 is ample for YOLOv8 at the common
-// confidence thresholds (typical real scenes yield 20-200 kept).
-static constexpr int kMaxCandidates = 1024;
-static constexpr size_t kDecodeHeaderBytes = 16;
-static constexpr size_t kDecodeCandidatesBytes = static_cast<size_t>(kMaxCandidates) * 6 * sizeof(float);
-static constexpr size_t kDecodeBlockBytes = kDecodeHeaderBytes + kDecodeCandidatesBytes;
+// ★ 2026-09-17: kMaxCandidates / kDecodeHeaderBytes / kDecodeCandidatesBytes /
+//   kDecodeBlockBytes 全部删除 —— 它们只服务"raw YOLO 输出 + GPU 解码 kernel"
+//   那条路径, 而本程序现在只接受 end2end 模型(输出已是成品框)。
 
 extern std::atomic<bool> detector_model_changed;
 extern std::atomic<bool> detection_resolution_changed;
@@ -313,16 +311,14 @@ void TrtDetector::freePinnedOutputs()
     pinnedOutputBuffersB.clear();
 }
 
+// ★ 2026-09-17: end2end-only 之后不再需要转置/候选缓冲, 此函数成为空实现。
+//   保留函数本身是因为 initialize()/析构里仍会调用它(调用序列保持不变)。
+// ★ 2026-09-17: end2end-only 之后没有转置/候选缓冲要释放, 此函数成为空实现。
+//   保留函数本身是因为 initialize() / 析构里仍会调用它(调用序列保持不变)。
 void TrtDetector::freeTransposedBuffers()
 {
-    for (auto& kv : transposedDeviceBuffers)
-    {
-        if (kv.second) cudaFree(kv.second);
-    }
-    transposedDeviceBuffers.clear();
-    transposedSizes.clear();
-    outputNeedsTranspose.clear();
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // waitForEvent —— 自旋等待版的事件同步
@@ -393,16 +389,13 @@ void TrtDetector::allocatePinnedOutputs()
 
     for (const auto& name : outputNames)
     {
-        // Pinned buffer size matches what the stream D2Hs: for GPU-decoded
-        // outputs that's [counter | candidates] (transposedSizes[name]); for
-        // raw outputs that's the native engine tensor (outputSizes[name]).
-        size_t bytes = outputSizes[name];
-        auto tsIt = transposedSizes.find(name);
-        if (tsIt != transposedSizes.end() && tsIt->second > 0)
-            bytes = tsIt->second;
+        // ★ 2026-09-17: end2end 输出直接 D2H, 所以 pinned 缓冲大小就是引擎张量
+        //   本身的大小(outputSizes[name])。原先还要查 transposedSizes 来决定
+        //   是否用 [counter | candidates] 布局 —— 那条路径已删除。
+        const size_t bytes = outputSizes[name];
         if (bytes == 0) continue;
 
-        for (int slot = 0; slot < numSlots; ++slot)
+        for (int slot = 0; slot < 2; ++slot)
         {
             void* hostPtr = nullptr;
             cudaError_t err = cudaHostAlloc(&hostPtr, bytes, cudaHostAllocDefault);
@@ -418,7 +411,7 @@ void TrtDetector::allocatePinnedOutputs()
 
         if (runtime_config::read()->verbose)
         {
-            std::cout << "[Detector] Allocated " << numSlots << " pinned host buffer(s) for output "
+            std::cout << "[Detector] Allocated pinned host buffer(s) for output "
                 << name << ": " << bytes << " bytes each" << std::endl;
         }
     }
@@ -458,7 +451,7 @@ bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
 
     bool needsCapture = !cudaGraphCaptured || shapeChanged;
 
-    for (int s = 0; s < numSlots; ++s)
+    for (int s = 0; s < 2; ++s)
     {
         auto& staging = graphInputBuffers[s];
         if (staging.empty() || staging.rows() != rows
@@ -492,7 +485,7 @@ bool TrtDetector::ensureGraphStaging(int rows, int cols, int channels)
 bool TrtDetector::captureCudaGraph(int slot)
 {
     if (!useCudaGraph) return false;
-    if (slot < 0 || slot >= numSlots) return false;
+    if (slot < 0 || slot >= 2) return false;
     if (graphInputBuffers[slot].empty()) return false;
 
     if (cudaGraphExecs[slot])
@@ -583,36 +576,13 @@ bool TrtDetector::captureCudaGraph(int slot)
         const auto itPinned = pinned.find(name);
         if (itPinned == pinned.end() || !itPinned->second) continue;
 
-        const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
-        if (needsT)
-        {
-            const int C = outputC[name];
-            const int N = outputN[name];
-            const bool cnLayout = outputCnLayout[name];
-            const bool isHalf = (outputTypes[name] == nvinfer1::DataType::kHALF);
-            unsigned char* devBlock = reinterpret_cast<unsigned char*>(transposedDeviceBuffers[name]);
-            int* devCounter = reinterpret_cast<int*>(devBlock);
-            float* devCandidates = reinterpret_cast<float*>(devBlock + kDecodeHeaderBytes);
-
-            const SmallTargetDecode st = computeSmallTargetDecode();
-            launch_decode_and_filter(
-                outputBindings[name], C, N, numClasses, isHalf,
-                runtime_config::read()->confidence_threshold, st.smallConf,
-                static_cast<float>(st.areaThreshPx), img_scale,
-                kMaxCandidates, cnLayout, devCounter, devCandidates, stream
-            );
-
-            cudaMemcpyAsync(itPinned->second, devBlock,
-                transposedSizes[name], cudaMemcpyDeviceToHost, stream);
-        }
-        else
-        {
-            cudaMemcpyAsync(itPinned->second,
-                outputBindings[name],
-                outputSizes[name],
-                cudaMemcpyDeviceToHost,
-                stream);
-        }
+        // ★ 2026-09-17: end2end 模型的输出是成品框, 不需要 GPU 解码 kernel
+        //   —— 直接 D2H 拷回即可。
+        cudaMemcpyAsync(itPinned->second,
+            outputBindings[name],
+            outputSizes[name],
+            cudaMemcpyDeviceToHost,
+            stream);
     }
 
     st = cudaStreamEndCapture(stream, &cudaGraphs[slot]);
@@ -632,17 +602,13 @@ bool TrtDetector::captureCudaGraph(int slot)
     }
 
     // Mark as fully captured only once every active slot is done.
-    cudaGraphCaptured = true;
-    for (int s = 0; s < numSlots; ++s)
-    {
-        if (!cudaGraphExecs[s]) { cudaGraphCaptured = false; break; }
-    }
+    cudaGraphCaptured = (cudaGraphExecs[0] != nullptr);
     return true;
 }
 
 inline void TrtDetector::launchCudaGraph(int slot)
 {
-    if (slot < 0 || slot >= numSlots) return;
+    if (slot < 0 || slot >= 2) return;
     if (!cudaGraphExecs[slot]) return;
     auto err = cudaGraphLaunch(cudaGraphExecs[slot], stream);
     if (err != cudaSuccess)
@@ -868,7 +834,6 @@ bool TrtDetector::initialize(const std::string& model_path)
     outputSizes.clear();
     outputShapes.clear();
     outputTypes.clear();
-    fp16OutputScratch.clear();
     freeTransposedBuffers();
 
     for (const auto& inName : inputNames)
@@ -1001,112 +966,85 @@ bool TrtDetector::initialize(const std::string& model_path)
                       << std::endl;
             return false;
         }
+        // ★ 2026-09-17: 输出也必须是 FP16, 且这条检查是【必需】的, 不只是"顺便
+        //   强制 FP16 策略"。postProcess 现在直接按 dtype 从 pinned 缓冲里逐个读
+        //   __half 再 __half2float(每帧只读 N 行 × 6 个数, 不再先把整块输出转成
+        //   float 阵列)。如果输出其实是 FP32 而这里放过, 那条读取路径会把 float
+        //   的位模式当 __half 解释 —— 得到一堆垃圾数值, 而不会报任何错。
+        //   宁可在这里拒绝启动, 也不要静默产出一屏乱框。
+        for (const auto& outName : outputNames)
+        {
+            const nvinfer1::DataType outDt = engine->getTensorDataType(outName.c_str());
+            if (outDt != nvinfer1::DataType::kHALF)
+            {
+                std::cerr << "[Detector] FP16-only build: engine output '" << outName
+                          << "' dtype must be kHALF (got "
+                          << static_cast<int>(outDt) << "). "
+                          << "Delete the cached .engine and rebuild with FP16 enabled."
+                          << std::endl;
+                return false;
+            }
+        }
     }
 
-    // Pre-compute decode metadata for YOLOv8/v11-style raw outputs. The
-    // tensor can be either [1, C, N] (channels-major, Ultralytics default)
-    // or [1, N, C] (transposed export). We resolve C/N per-output and stash
-    // the layout flag so the GPU decode kernel reads the correct stride
-    // regardless of export style. EfficientNMS plugin output [1, N, 6] is
-    // detected via cols==6 and skipped.
-    outputCnLayout.clear();
-    outputC.clear();
-    outputN.clear();
+    // ── 只支持 end2end 模型 (2026-09-17) ──────────────────────────────────────
+    //
+    // 唯一接受的输出形态是 [1, N, 6] —— NMS / DFL 解码已经烘进计算图, 每行是
+    // 成品框 [x1, y1, x2, y2, conf, class_id]。这是 YOLO end2end 导出以及
+    // EfficientNMS 插件风格的共同形状。
+    //
+    // 为什么只留这一种 (删掉了原来的 [1,C,N] / [1,N,C] raw 解码路径):
+    //   · raw 形态需要在 CPU 上跑 DFL 解码 + 阈值筛 + NMS, 是整条链路里最大
+    //     的一笔 CPU 开销;
+    //   · end2end 把这件事挪进图里(GPU), CPU 侧退化成"遍历 N 行、按 conf 过滤";
+    //   · 只维护一种形态 ⇒ 不需要 layout 判定、不需要 GPU 解码 kernel、
+    //     不需要候选缓冲 —— 少一条路径就少一类静默错。
+    //
+    // ★ 非 end2end 模型现在【明确拒绝并报错】, 不再静默走到别的路径上去。
+    //   报错信息要能直接告诉用户怎么办(重新导出), 而不是让人去猜。
     for (const auto& outName : outputNames)
     {
         const auto& shape = outputShapes[outName];
-        bool needs = false;
-        size_t bytes = 0;
-        bool cnLayout = true;
-        int resolvedC = 0;
-        int resolvedN = 0;
-        if (shape.size() == 3 && shape[0] == 1 && shape[1] > 0 && shape[2] > 0)
+        const bool isEnd2End = shape.size() == 3 && shape[0] == 1
+                            && shape[2] == 6 && shape[1] > 0;
+        if (!isEnd2End)
         {
-            const int64_t dim1 = shape[1];
-            const int64_t dim2 = shape[2];
-            // EfficientNMS plugin output is [1, N, 6]; do not transpose it.
-            const bool isEfficientNms = (dim2 == 6);
-            if (!isEfficientNms)
-            {
-                // Pick the smaller-valid dim (>4) as C. For standard YOLO
-                // exports C is far smaller than N (e.g. 84 vs 8400).
-                if (dim1 > 4 && dim1 <= dim2)
-                {
-                    resolvedC = static_cast<int>(dim1);
-                    resolvedN = static_cast<int>(dim2);
-                    cnLayout = true;
-                    needs = true;
-                }
-                else if (dim2 > 4 && dim2 < dim1)
-                {
-                    resolvedC = static_cast<int>(dim2);
-                    resolvedN = static_cast<int>(dim1);
-                    cnLayout = false;
-                    needs = true;
-                }
-                else if (dim1 >= 5)
-                {
-                    resolvedC = static_cast<int>(dim1);
-                    resolvedN = static_cast<int>(dim2);
-                    cnLayout = true;
-                    needs = true;
-                }
-                if (needs)
-                {
-                    // Device buffer layout: [int counter (16B aligned) |
-                    // float candidates[kMaxCandidates * 6]]. D2H is one op.
-                    bytes = kDecodeBlockBytes;
-                }
-            }
+            std::cerr << "[Detector] 不支持的模型输出形状: " << outName << " = [";
+            for (size_t i = 0; i < shape.size(); ++i)
+                std::cerr << (i ? ", " : "") << shape[i];
+            std::cerr << "]\n"
+                      << "[Detector] 本程序只接受 end2end 形态 [1, N, 6] "
+                         "(NMS/解码已烘进图内)。\n"
+                      << "[Detector] 请重新导出: yolo export model=<你的.pt> "
+                         "format=onnx end2end=True simplify=True\n"
+                      << "[Detector] 然后重新生成 .engine。"
+                      << std::endl;
+            // 不设"错误标志位"—— 上面这条 stderr 就是唯一的失败证据,
+            // 而 initialize() 返回 false 已经足以让会话启动失败。
+            return false;
         }
-        outputNeedsTranspose[outName] = needs;
-        outputCnLayout[outName] = cnLayout;
-        outputC[outName] = resolvedC;
-        outputN[outName] = resolvedN;
-        if (needs)
-        {
-            transposedSizes[outName] = bytes;
-            void* ptr = nullptr;
-            cudaError_t err = cudaMalloc(&ptr, bytes);
-            if (err == cudaSuccess)
-            {
-                transposedDeviceBuffers[outName] = ptr;
-            }
-            else
-            {
-                std::cerr << "[Detector] Failed to allocate transposed buffer for "
-                          << outName << ": " << cudaGetErrorString(err) << std::endl;
-                outputNeedsTranspose[outName] = false;
-                transposedSizes.erase(outName);
-            }
-        }
+        // 三张表在这条唯一路径上都不再需要, 留空以保持下游读取安全。
     }
 
-    // CUDA Graph + double_buffer now coexist: we capture one graph per slot,
-    // each writing to its own pinned dst. The two are no longer mutually
-    // exclusive — pipelining (CPU post-process on prev slot while GPU runs
-    // curr slot's graph) stacks on top of the launch-overhead savings from
-    // collapsing N kernel launches into one cudaGraphLaunch.
-    numSlots = (runtime_config::read()->use_double_buffer ? 2 : 1);
-
-    // 明确打出实际生效的流水线模式, 便于确认配置真的落到了推理线程上。
-    // (config.ini 会持久化这两个开关, 改了代码默认值不一定能覆盖已存在的 ini。)
-    std::cout << "[Detector] Pipeline: "
-              << (numSlots == 2
-                      ? "double-buffer (result publication deferred by one frame)"
-                      : "single-buffer (result published as soon as ready)")
-              << " slots=" << numSlots
+    // ★ 2026-09-17: 双缓冲流水线整条移除 —— 只剩单槽(单缓冲)。
+    //
+    // 为什么删掉: 双缓冲把"发布第 N 帧结果"门控在"第 N+1 帧到达"上, 代价是
+    // 【整整一帧的延迟】(120fps = +8.33ms, 60fps = +16.7ms), 与"降低推理延迟"
+    // 的目标正好相反。它换来的吞吐只在 GPU 链 + CPU 后处理逼近帧预算时才有意义,
+    // 而实测推理约 0.5~8.8ms, 相对帧预算有整数量级余量 —— 属于白付一帧。
+    // 现在 numSlots 恒为 1, 结果一就绪就发布。
+    //
+    // 注意 CUDA Graph 与它无关, 仍然保留(每槽一张图的概念随之退化为单图)。
+    std::cout << "[Detector] Pipeline: single-buffer (published as soon as ready)"
               << " cuda_graph=" << (runtime_config::read()->use_cuda_graph ? "on" : "off")
               << std::endl;
 
+    // slotDoneEvent[0] 现在只服务单槽; 数组形式上保留 2 个元素以免改动面过大。
     for (int s = 0; s < 2; ++s)
     {
         if (slotDoneEvent[s]) { cudaEventDestroy(slotDoneEvent[s]); slotDoneEvent[s] = nullptr; }
     }
-    for (int s = 0; s < numSlots; ++s)
-    {
-        cudaEventCreateWithFlags(&slotDoneEvent[s], cudaEventDisableTiming);
-    }
+    cudaEventCreateWithFlags(&slotDoneEvent[0], cudaEventDisableTiming);
 
     allocatePinnedOutputs();
 
@@ -1388,7 +1326,8 @@ void TrtDetector::loadEngine(const std::string& modelFile)
 
 void TrtDetector::processFrame(const cv::Mat& frame, runtime::FrameContext context)
 {
-    if (runtime_config::read()->backend == "DML") return;
+    // ★ 2026-09-17: 这里原来有一句 `if (backend == "DML") return;` —— DirectML
+    //   后端整条移除后, 那个早退不再可能成立, 已删除。
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
     if (shouldExit.load()) return;
@@ -1405,7 +1344,7 @@ void TrtDetector::processFrame(const cv::Mat& frame, runtime::FrameContext conte
 
 void TrtDetector::processFrameGpu(GpuImage frame, runtime::FrameContext context)
 {
-    if (runtime_config::read()->backend == "DML") return;
+    // ★ 2026-09-17: 同上, DML 早退已删除。
 
     std::unique_lock<std::mutex> lock(inferenceMutex);
     if (shouldExit.load()) return;
@@ -1435,13 +1374,12 @@ void TrtDetector::inferenceThread()
                       << mmcssTask << ")" << std::endl;
     }
 
-    // Double-buffer pipeline state. When numSlots==1 prev_slot stays -1 and
-    // post-processing runs inline on the just-submitted slot (legacy flow).
-    int curr_slot = 0;
-    int prev_slot = -1;
+    // ★ 2026-09-17: 双缓冲移除后只有单槽。curr_slot 恒为 0, 原先的 prev_slot
+    //   已删除(它存在的唯一意义就是双缓冲的"上一帧")。
+    //   slotCaptureNs/slotSubmitNs 等数组形式上保留, 只使用下标 0。
+    const int curr_slot = 0;
 
-    // 每个槽记住"自己那一帧"的 T0/T1: 取帧时写本槽, 发布时读本槽。
-    // 双缓冲下正在推理的帧与正在发布的帧是两个不同的槽, 共用一个全局单槽会串味。
+    // 这一槽记住"自己那一帧"的 T0/T1: 取帧时写, 发布时读。
     int64_t slotCaptureNs[2] = {0, 0};
     runtime::FrameContext slotContexts[2]{};
     int64_t slotSubmitNs[2]  = {0, 0};
@@ -1481,8 +1419,6 @@ void TrtDetector::inferenceThread()
             publishTrtModelMetadata(*this);
             detection_resolution_changed.store(true);
             detector_model_changed.store(false);
-            curr_slot = 0;
-            prev_slot = -1;
             slotCaptureNs[0] = slotCaptureNs[1] = 0;
             slotSubmitNs[0]  = slotSubmitNs[1]  = 0;
             graphCaptureGivenUp = false;
@@ -1607,11 +1543,7 @@ void TrtDetector::inferenceThread()
                         bool needsCapture = ensureGraphStaging(frameRows, frameCols, frameChannels);
                         if (needsCapture)
                         {
-                            bool captureOk = true;
-                            for (int s = 0; s < numSlots; ++s)
-                            {
-                                if (!captureCudaGraph(s)) { captureOk = false; break; }
-                            }
+                            bool captureOk = captureCudaGraph(0);
                             if (!captureOk)
                             {
                                 // Give up for this session instead of retrying
@@ -1652,10 +1584,8 @@ void TrtDetector::inferenceThread()
                         cudaEventRecord(slotDoneEvent[curr_slot], stream);
                         usedGraph = true;
 
-                        if (numSlots == 1)
-                        {
-                            waitForEvent(copyCompleteEvent[curr_slot]);
-                        }
+                        // 单槽: 在提交下一帧之前等这一帧的拷贝完成。
+                        waitForEvent(copyCompleteEvent[curr_slot]);
                     }
                 }
 
@@ -1676,56 +1606,23 @@ void TrtDetector::inferenceThread()
                         if (itPinned == curPinned.end() || !itPinned->second)
                             continue;
 
-                        const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
-                        if (needsT)
-                        {
-                            const int C = outputC[name];
-                            const int N = outputN[name];
-                            const bool cnLayout = outputCnLayout[name];
-                            const bool isHalf = (outputTypes[name] == nvinfer1::DataType::kHALF);
-                            unsigned char* devBlock = reinterpret_cast<unsigned char*>(transposedDeviceBuffers[name]);
-                            int* devCounter = reinterpret_cast<int*>(devBlock);
-                            float* devCandidates = reinterpret_cast<float*>(devBlock + kDecodeHeaderBytes);
-
-                            const SmallTargetDecode st = computeSmallTargetDecode();
-                            const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
-                            launch_decode_and_filter(
-                                outputBindings[name], C, N, numClasses, isHalf,
-                                runtime.confidenceThreshold, st.smallConf,
-                                static_cast<float>(st.areaThreshPx), img_scale,
-                                kMaxCandidates, cnLayout, devCounter, devCandidates, stream
-                            );
-
-                            cudaMemcpyAsync(
-                                itPinned->second, devBlock, transposedSizes[name],
-                                cudaMemcpyDeviceToHost, stream
-                            );
-                        }
-                        else
-                        {
-                            cudaMemcpyAsync(
-                                itPinned->second, outputBindings[name],
-                                outputSizes[name], cudaMemcpyDeviceToHost, stream
-                            );
-                        }
+                        // ★ 2026-09-17: end2end 输出直接 D2H, 无 GPU 解码阶段。
+                        cudaMemcpyAsync(
+                            itPinned->second, outputBindings[name],
+                            outputSizes[name], cudaMemcpyDeviceToHost, stream
+                        );
                     }
 
                     cudaEventRecord(copyCompleteEvent[curr_slot], stream);
                     cudaEventRecord(slotDoneEvent[curr_slot], stream);
 
-                    if (numSlots == 1)
-                    {
-                        // Single-slot: block here as before.
-                        waitForEvent(copyCompleteEvent[curr_slot]);
-                    }
+                    // 单槽: 同上, 阻塞等这一帧的拷贝完成。
+                    waitForEvent(copyCompleteEvent[curr_slot]);
                 }
 
-                // Decide which slot to post-process this iteration.
-                //   numSlots==1  -> use curr_slot (inline, legacy behavior).
-                //   numSlots==2  -> use prev_slot; first frame has no prev, so
-                //                   skip post and just advance.
-                const int post_slot = (numSlots == 1) ? curr_slot : prev_slot;
-                const bool do_post = (post_slot >= 0);
+                // ★ 2026-09-17: 单槽 —— 结果一就绪就发布, 不再有"上一帧"。
+                const int post_slot = curr_slot;
+                const bool do_post = true;
 
                 // 本次发布的这一帧自己的 T0/T1 —— 不是"最新的"那一帧的。
                 // 旧实现在发布时读全局槽, 读到的已经是下一帧的戳, 于是 total
@@ -1738,11 +1635,6 @@ void TrtDetector::inferenceThread()
 
                 if (do_post)
                 {
-                    if (numSlots > 1)
-                    {
-                        // Wait for this slot's GPU work chain to complete.
-                        waitForEvent(slotDoneEvent[post_slot]);
-                    }
 
                     auto& postPinned = pinnedSlot(post_slot);
                     for (const auto& name : outputNames)
@@ -1751,83 +1643,21 @@ void TrtDetector::inferenceThread()
                         if (itPinned == postPinned.end() || !itPinned->second)
                             continue;
 
-                        const bool needsT = outputNeedsTranspose.count(name) && outputNeedsTranspose[name];
-
-                        if (needsT)
-                        {
-                            // Pinned layout: [int counter (16B aligned) |
-                            // float candidates[K*6]]. GPU already decoded +
-                            // conf-filtered; all CPU has to do is NMS on the
-                            // small kept set via the existing cols==6 path.
-                            auto* block = reinterpret_cast<unsigned char*>(itPinned->second);
-                            const int kept_raw = *reinterpret_cast<const int*>(block);
-                            const int kept = std::min(kept_raw, kMaxCandidates);
-                            const float* cands = reinterpret_cast<const float*>(block + kDecodeHeaderBytes);
-
-                            std::vector<int64_t> shape{ 1, kept, 6 };
-                            const SmallTargetDecode st = computeSmallTargetDecode();
-                            const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
-                            // GPU 内核已做面积自适应过滤,这里只让候选通过 conf 门槛并跑 NMS,
-                            // 不再重复 CPU 面积过滤(传 -1 关闭)。
-                            std::vector<Detection> detections = postProcessYolo(
-                                cands, shape, numClasses,
-                                st.decodeFloor,
-                                runtime.nmsThreshold,
-                                &lastNmsTimeValue,
-                                -1.0f, 0.0
-                            );
-                            capDetectionsToMax(detections, runtime.maxDetections);
-
-                            {
-                                std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
-                                detectionBuffer.boxes.clear();
-                                detectionBuffer.precise_boxes.clear();
-                                detectionBuffer.classes.clear();
-                                detectionBuffer.confidences.clear();
-                                for (const auto& det : detections)
-                                {
-                                    detectionBuffer.boxes.push_back(det.box);
-                                    detectionBuffer.precise_boxes.push_back(det.preciseBox);
-                                    detectionBuffer.classes.push_back(det.classId);
-                                    detectionBuffer.confidences.push_back(det.confidence);
-                                }
-                                runtime::latency::markInferenceDone(publishSubmitNs);
-                                detectionBuffer.bumpVersionLocked(publishContext);
-                                detectionBuffer.cv.notify_all();
-                            }
-                            continue;
-                        }
-
-                        nvinfer1::DataType dtype = outputTypes[name];
-                        if (dtype == nvinfer1::DataType::kHALF)
-                        {
-                            const size_t numElements = outputSizes[name] / sizeof(__half);
-                            const __half* halfPtr = reinterpret_cast<const __half*>(itPinned->second);
-
-                            auto& outputDataFloat = fp16OutputScratch[name];
-                            if (outputDataFloat.size() != numElements)
-                                outputDataFloat.resize(numElements);
-
-                            for (size_t i = 0; i < numElements; ++i)
-                                outputDataFloat[i] = __half2float(halfPtr[i]);
-
-                            postProcess(outputDataFloat.data(), name, &lastNmsTimeValue);
-                        }
-                        else if (dtype == nvinfer1::DataType::kFLOAT)
-                        {
-                            const float* floatPtr = reinterpret_cast<const float*>(itPinned->second);
-                            postProcess(floatPtr, name, &lastNmsTimeValue);
-                        }
+                        // ★ 2026-09-17: 这里原来有两个分支 ——
+                        //   ① raw 输出的 GPU 候选块(needsT)后处理;
+                        //   ② FP16 输出在 CPU 上逐元素 __half2float 再交给 postProcess。
+                        //   两者都已删除:
+                        //   · ①随 raw YOLO 路径一起消失(只支持 end2end);
+                        //   · ②是纯 CPU 开销 —— 模型固定 FP16 I/O, 而 end2end 的
+                        //     输出本就该按 FP16 直接解码, 不必先整体转成 float 阵列
+                        //     再遍历。现在直接把 __half 指针交给 postProcess,
+                        //     由它按需读取(每帧只读 N 行 × 6 个数, N 很小)。
+                        postProcess(reinterpret_cast<const void*>(itPinned->second),
+                                    name, outputTypes[name], &lastNmsTimeValue);
                     }
                 }
 
                 auto t_post_end = std::chrono::steady_clock::now();
-
-                if (numSlots > 1)
-                {
-                    prev_slot = curr_slot;
-                    curr_slot = (curr_slot + 1) % numSlots;
-                }
 
                 float preprocessMs = 0.0f;
                 float inferenceMs = 0.0f;
@@ -1917,34 +1747,88 @@ void TrtDetector::preProcess(const GpuImage& frame)
     }
 }
 
-void TrtDetector::postProcess(const float* output, const std::string& outputName, std::chrono::duration<double, std::milli>* nmsTime)
+void TrtDetector::postProcess(const void* output, const std::string& outputName,
+                              nvinfer1::DataType dtype,
+                              std::chrono::duration<double, std::milli>* nmsTime)
 {
-    if (numClasses <= 0) return;
-
+    // ── 只处理 end2end 输出 [1, N, 6] (2026-09-17) ──────────────────────────
+    //
+    // 每行是成品框 [x1, y1, x2, y2, conf, class_id], NMS/解码已烘进图内。
+    // 所以这里【不跑 NMS】: 图内已经做过无 NMS 的选择, 每一行都是模型认为该
+    // 保留的目标; 再叠一层 IoU 抑制会把"两个真实目标靠得很近"的情况误删 ——
+    // 那是纯损失, 没有任何收益。
+    //
+    // ★ 与旧实现的关键差别: 不再先把整块输出逐元素 __half2float 成一个 float
+    //   阵列。end2end 只需要读 N 行 × 6 个数(N 很小), 所以直接按 dtype 取值。
     const auto shapeIt = outputShapes.find(outputName);
     if (shapeIt == outputShapes.end())
         return;
+    const std::vector<int64_t>& shape = shapeIt->second;
+    if (shape.size() != 3 || shape[0] != 1 || shape[2] != 6 || shape[1] <= 0)
+        return;   // initialize() 已拒绝非 end2end 模型, 这里只是兜底
+
+    const int64_t rows = shape[1];
+    const float img_scale_local = img_scale;
+    const DetectorRuntimeSettings runtime = detectorRuntimeSettings();
+    const float baseConf = std::max(runtime.confidenceThreshold, 0.0f);
+
+    auto rowPtr = [&](int64_t i) -> const float* {
+        const size_t off = static_cast<size_t>(i) * 6;
+        if (dtype == nvinfer1::DataType::kHALF)
+        {
+            // 每个数就地读成 float: 全程无中间 float 阵列, 无整块转换。
+            static thread_local std::array<float, 6> row{};
+            const __half* h = reinterpret_cast<const __half*>(output) + off;
+            for (int k = 0; k < 6; ++k) row[k] = __half2float(h[k]);
+            return row.data();
+        }
+        return reinterpret_cast<const float*>(output) + off;
+    };
 
     std::vector<Detection> detections;
+    detections.reserve(static_cast<size_t>(std::min<int64_t>(rows, kFixedMaxDetections)));
 
-    // If this output was GPU-transposed from [1, C, N] to [N, C], tell the
-    // decoder about the new row-major layout by swapping the inner dims.
-    std::vector<int64_t> shape = shapeIt->second;
-    auto itT = outputNeedsTranspose.find(outputName);
-    if (itT != outputNeedsTranspose.end() && itT->second && shape.size() == 3)
-        std::swap(shape[1], shape[2]);
+    for (int64_t i = 0; i < rows; ++i)
+    {
+        const float* det = rowPtr(i);
+        const float confidence = det[4];
+        if (!(confidence > baseConf))
+            continue;   // end2end 的 TopK 会填 conf=0 的空槽, 必须过滤
 
-    const SmallTargetDecode st = computeSmallTargetDecode();
-    detections = postProcessYolo(
-        output,
-        shape,
-        numClasses,
-        st.decodeFloor,
-        detectorRuntimeSettings().nmsThreshold,
-        nmsTime,
-        st.baseConf, st.areaThreshPx
-    );
-    capDetectionsToMax(detections, detectorRuntimeSettings().maxDetections);
+        // 与旧 cols==6 路径逐字一致: classId 直接截断, 【不做范围钳制】。
+        // 原来这里我加过一句"越界类别归 0", 已撤掉 —— 那是我自己的发明,
+        // 不是移植内容。end2end 图的 category id 来自图内 argmax, 本就在
+        // [0, numClasses) 内; 真越界了也宁可让它原样透出(下游按整数比较,
+        // 不会索引越界), 而不是悄悄改成一个语义不同的类别。
+        const int classId = static_cast<int>(det[5]);
+
+        Detection d;
+        d.preciseBox = cv::Rect2f(
+            det[0] * img_scale_local, det[1] * img_scale_local,
+            (det[2] - det[0]) * img_scale_local,
+            (det[3] - det[1]) * img_scale_local);
+        d.box.x = static_cast<int>(std::lround(d.preciseBox.x));
+        d.box.y = static_cast<int>(std::lround(d.preciseBox.y));
+        d.box.width  = static_cast<int>(std::lround(d.preciseBox.width));
+        d.box.height = static_cast<int>(std::lround(d.preciseBox.height));
+        d.confidence = confidence;
+        d.classId = classId;
+        detections.push_back(d);
+    }
+
+    // 只按置信度保留前 kFixedMaxDetections 个 (capDetectionsToMax 内部会排序)。
+    capDetectionsToMax(detections, kFixedMaxDetections);
+
+    // ★ 2026-09-17 这里删掉了两步, 各有理由:
+    //   · applySmallTargetConfFilter —— 小目标面积自适应阈值是 raw 解码路径的
+    //     召回补偿(放宽 GPU 粗筛门槛再按面积二次过滤)。end2end 模型自己决定
+    //     保留哪些框, 再按面积卡一遍只会与模型的选择打架。
+    //   · NMS —— 见函数头: 图内已做无 NMS 选择, 再抑制是纯损失。
+    //   Delete 桶过滤保留: 它是用户显式表达"这个类别我不要", 与模型无关。
+    applyDeleteBucketFilter(detections);
+
+    if (nmsTime)
+        *nmsTime = std::chrono::duration<double, std::milli>(0);
 
     {
         std::lock_guard<std::mutex> lock(detectionBuffer.mutex);
@@ -1966,6 +1850,29 @@ void TrtDetector::postProcess(const float* output, const std::string& outputName
         runtime::latency::markInferenceDone(publishSubmitNs);
         detectionBuffer.bumpVersionLocked(publishContext);
         detectionBuffer.cv.notify_all();
+    }
+
+    // ── ★★ 通用控制器层: 每出一批检测就跑一拍 (2026-09-17 第三轮) ─────────
+    //
+    // ★ 节拍由用户决定(D4-d): 【一批检测 = 一拍控制】。
+    //   不用采集帧率当节拍 —— 控制误差来自检测, 而检测的间隔才是真实的
+    //   信息间隔。用采集帧重复喂同一个框会让滤波器误判"目标停住了"。
+    //
+    // ★★ 必须在 detectionBuffer.mutex 【释放之后】调用:
+    //   aim_loop::tick() 自己要拿那把锁拷检测, 持锁调用会自死锁。
+    //
+    // ★ 它自己会判"控制是否启用"(ctl_enabled) —— 没开就是一次快照读 + 早退,
+    //   代价可以忽略, 所以这里不用再加条件。
+    //   ★ 绝不让异常逃出去打断推理线程: 控制层是新增的、还没上过真机,
+    //     它出问题不该把整条推理管线拖下水。
+    try
+    {
+        runtime::aim_loop::tick();
+    }
+    catch (...)
+    {
+        // 静默吞掉是刻意的: 控制失败不影响检测发布(预览仍然工作)。
+        // ★ 不在这里打日志 —— 每帧一条会把日志刷爆。
     }
 }
 

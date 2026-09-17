@@ -12,19 +12,19 @@
 #include <stdexcept>
 
 #include "inference_session.h"
-#include "thread_loops.h"
 #include "cuda_availability.h"
 #include "active_hotkey.h"
 
 #include "capture.h"
 #include "mouse.h"
 #include "Apotheosis.h"
-#include "dml_detector.h"
 #include "trt_detector.h"
 #include "detector/model_inspector.h"
 #include "model_crypto/model_crypto.h"
 #include "auth/auth_state.h"
 #include "runtime/config_snapshot.h"
+// ★ 通用控制器层 (2026-09-17 第三轮重建): 会话停止时复位控制器并释放驱动通道。
+#include "runtime/aim_loop.h"
 #include "runtime/latency_probe.h"
 
 extern std::atomic<bool> shouldExit;
@@ -207,8 +207,7 @@ bool preload_model_metadata(const std::string& model_path, bool persist_config, 
     return true;
 }
 
-InferenceSession::InferenceSession(MouseThread& mouse_driver)
-    : mouse_driver_(mouse_driver)
+InferenceSession::InferenceSession()
 {
 }
 
@@ -237,22 +236,8 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
         last_error_.clear();
 
         // 单机自用：跳过 oliver 密钥/心跳检查
-        if (backend == "DML")
-        {
-            auto dml = std::make_unique<DirectMLDetector>();
-            if (!dml->initialize(model_path))
-            {
-                last_error_ = "DirectML detector initialization failed";
-                detector_owned_.reset();
-                detector_raw_ = nullptr;
-                return false;
-            }
-            detector_raw_ = dml.get();
-            detector_owned_ = std::move(dml);
-            dml_detector = static_cast<DirectMLDetector*>(detector_raw_);
-            g_detector = detector_raw_;
-        }
-        else if (backend == "TRT")
+        // ★ 2026-09-17: DirectML 后端整条移除, 只保留 TensorRT。
+        if (backend == "TRT")
         {
             if (!is_tensorrt_available())
             {
@@ -300,12 +285,9 @@ bool InferenceSession::start(const std::string& backend, const std::string& mode
                 g_detector->inferenceThread();
         }, &running_);
 
-        mouse_thread_ = start_guarded("MouseThread", [this] {
-    #ifdef _WIN32
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-    #endif
-            mouseThreadFunction(mouse_driver_);
-        }, &running_);
+        // ★ 这里原来还起一条 MouseThread(TIME_CRITICAL), 跑锁靶/瞄点/PID/扳机/下发
+        //   整条瞄准链。那条链已整条删除(2026-09-17), 会话现在只做 采集 → 推理,
+        //   检测结果由 detectionBuffer 承载, 供预览窗显示。
 
         // 单机自用：不再启动鉴权心跳线程
         std::cout << "[Session] Started with backend=" << backend
@@ -345,11 +327,17 @@ void InferenceSession::stop_locked()
     frameCV.notify_all();
 
     join_all_locked();
-    mouse_driver_.clearQueuedMoves();
-    mouse_driver_.releaseLeftButton();
+
+    // ── ★★ 通用控制器层: 会话停止 ⇒ 复位控制器并释放驱动通道 ──────────────
+    // ★ 必须在 join_all_locked() 【之后】: 检测线程是控制器的调用者,
+    //   线程还在跑的时候去 reset 会与 tick() 抢状态。
+    // ★ 复位清掉积分/余量/滤波状态 —— 不清的话下次 start 会带着上次攒下的
+    //   积分与速度估计, 表现为"刚开瞄准就冲一下"。
+    // ★ 同时释放 MouseThread(join 它的 moveWorker_ 线程, 并清空未发队列),
+    //   否则"停了之后还动一下", 而且重复启停会累积线程。
+    runtime::aim_loop::reset();
 
     g_detector = nullptr;
-    dml_detector = nullptr;
     detector_raw_ = nullptr;
     detector_owned_.reset();
     publish_model_metadata(nullptr);
@@ -393,7 +381,6 @@ void InferenceSession::join_all_locked()
 
     safe_join("detector", detector_thread_);
     safe_join("capture", capture_thread_);
-    safe_join("mouse", mouse_thread_);
     safe_join("heartbeat", heartbeat_thread_);
 }
 

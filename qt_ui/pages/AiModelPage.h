@@ -21,7 +21,8 @@ private slots:
     void reloadFromConfig();
 
 private:
-    void onBackendChanged(int index);
+    // ★ 2026-09-17: onBackendChanged 已删除 —— DirectML 后端整条移除后
+    //   TensorRT 是唯一后端, 不存在"切换后端"这个动作。
     void browseModel();
     void onSmallTargetToggled(bool enabled);
     void updateModelInfo();
@@ -31,9 +32,7 @@ private:
     QComboBox* m_modelCombo{};
     QLineEdit* m_modelPath{};
     QLabel* m_fixedInputLabel{};
-    QComboBox* m_backendCombo{};
-    QSpinBox* m_dmlDeviceId{};
-    QWidget* m_dmlRow{};
+    // m_backendCombo / m_dmlDeviceId / m_dmlRow 已随 DirectML 后端删除。
     QLabel* m_backendStatusLabel{};
 
     // Detection card
@@ -41,7 +40,7 @@ private:
     QDoubleSpinBox* m_confSpin{};
     QSlider* m_nmsSlider{};
     QDoubleSpinBox* m_nmsSpin{};
-    QSpinBox* m_maxDetections{};
+    // m_maxDetections 已删除: 上限固定为 kFixedMaxDetections, 界面只读展示。
 
     // Small target card
     ToggleSwitch* m_smallTargetEnabled{};

@@ -179,27 +179,18 @@ void render_overlays(cv::Mat& canvas, const PreviewConfigSnapshot& cfg)
     }
 
 
-    // 2. FOV ellipses (base + dynamic gate).
+    // 2. FOV ellipse (base only).
+    //    ★ 2026-09-17: "dynamic gate" 那条椭圆已删 —— 它画的是
+    //    g_dynamic_fov_radius_x/y, 而那两个量的唯一生产者(mouse_thread_loop)
+    //    已随瞄准控制链删除。留着就是一个永远不画出来的分支。
     if (cfg.fov_base_x > 0 && cfg.fov_base_y > 0)
     {
         const cv::Point center(canvas.cols / 2, canvas.rows / 2);
         const cv::Size baseAxes(std::max(1, cfg.fov_base_x / 2),
                                 std::max(1, cfg.fov_base_y / 2));
 
-        const float dynRx = g_dynamic_fov_radius_x_px.load();
-        const float dynRy = g_dynamic_fov_radius_y_px.load();
-        const bool dynActive = cfg.dynamic_fov_enabled && dynRx > 0.0f && dynRy > 0.0f;
-
-        const cv::Scalar baseCol = dynActive ? bgr(60, 200, 255) : bgr(60, 200, 255); // amber
+        const cv::Scalar baseCol = bgr(60, 200, 255); // amber
         cv::ellipse(canvas, center, baseAxes, 0, 0, 360, baseCol, 1, cv::LINE_AA);
-
-        if (dynActive)
-        {
-            const cv::Size dynAxes(std::max(1, static_cast<int>(dynRx)),
-                                   std::max(1, static_cast<int>(dynRy)));
-            const cv::Scalar dynCol = bgr(255, 220, 80); // cyan-blue
-            cv::ellipse(canvas, center, dynAxes, 0, 0, 360, dynCol, 2, cv::LINE_AA);
-        }
     }
 
     // 3. Crosshair colour-find ROI rectangle.

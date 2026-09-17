@@ -11,15 +11,12 @@ struct Detection
     float confidence;
     int classId;
     // 保留模型解码得到的浮点框供 AVA selector/tracker 使用。旧的整数框
-    // 继续提供给 overlay、NMS 和其它既有消费者，避免在显示链中扩散改动。
+    // 继续提供给 overlay 和其它既有消费者，避免在显示链中扩散改动。
     cv::Rect2f preciseBox;
 };
 
-void NMS(
-    std::vector<Detection>& detections,
-    float nmsThreshold,
-    std::chrono::duration<double, std::milli>* nmsTime = nullptr
-);
+// ★ 2026-09-17: NMS 声明已删除 —— end2end 模型的 NMS 在计算图内完成,
+//   CPU 侧再抑制会把"两个真实目标靠得很近"的情况误删。
 
 // Drop detections whose classId is in the config's "Delete" bucket. Takes
 // configMutex internally so callers do not need to.
@@ -64,25 +61,7 @@ SmallTargetDecode computeSmallTargetDecode();
 // flood the tracker and overlay.
 void capDetectionsToMax(std::vector<Detection>& detections, int maxDetections);
 
-std::vector<Detection> postProcessYolo(
-    const float* output,
-    const std::vector<int64_t>& shape,
-    int numClasses,
-    float confThreshold,
-    float nmsThreshold,
-    std::chrono::duration<double, std::milli>* nmsTime = nullptr,
-    float smallTargetBaseConf = -1.0f,
-    double smallTargetAreaThreshPx = 0.0
-);
-
-std::vector<Detection> postProcessYoloDML(
-    const float* output,
-    const std::vector<int64_t>& shape,
-    int numClasses,
-    float confThreshold,
-    float nmsThreshold,
-    std::chrono::duration<double, std::milli>* nmsTime = nullptr,
-    float smallTargetBaseConf = -1.0f,
-    double smallTargetAreaThreshPx = 0.0
-);
+// ★ 2026-09-17 删除: postProcessYolo (raw YOLO 解码 + NMS) 与 postProcessYoloDML。
+//   本程序现在只接受 end2end 模型 [1,N,6], 解码/NMS 都在图内; 那段处理已经
+//   内联进 TrtDetector::postProcess。DML 版本随 DirectML 后端一起删除。
 #endif // POSTPROCESS_H
