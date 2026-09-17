@@ -59,6 +59,8 @@ private slots:
     void onAddProfile();
     void onDeleteProfile();
     void onCopyProfile();
+    void onAddGroup();
+    void onDeleteGroup();
     void onTargetClassesChanged();
 
 private:
@@ -73,6 +75,18 @@ private:
     void buildControllerCard();    // ★★ 通用控制器层（23 个 ctl_*）
     void buildDynamicFovCard();    // 动态 FOV
 
+    // ★ 小工具：hint 文案必须走 class 属性而不是 objectName ——
+    //   theme.qss 的选择器是 QLabel[class="hint"]，objectName 匹配不到任何规则，
+    //   那样 4 条提示会退化成无样式正文（旧页用的是 property）。
+    static QLabel* makeHint(const QString& text);
+    // 卡片内分段标题（旧页的 SectionTitle 用法）
+    static QLabel* makeSectionTitle(const QString& text);
+    // 一行 double 参数: 建 QDoubleSpinBox + 收集进 m_ctlDoubles + 套 fieldRow。
+    // 抽出来是因为控制器卡有 19 个 double，逐个手写极易漏收进 m_ctlDoubles
+    // (漏了就是"界面能改、写不回配置"的静默失效)。
+    QWidget* makeDoubleRow(const char* obj, const char* label,
+                           double lo, double hi, double step, double def);
+
     void rebuildGroupCombo();
     void rebuildProfileList();
     void reloadProfileToUi();
@@ -83,6 +97,7 @@ private:
     QVBoxLayout* m_rightLayout = nullptr;   // 卡片往这里加
     QComboBox*   m_groupCombo = nullptr;
     QListWidget* m_profileList = nullptr;
+    QLabel*      m_leftTitle = nullptr;
     QStackedWidget* m_stack = nullptr;
     QLabel* m_emptyHint = nullptr;
 
